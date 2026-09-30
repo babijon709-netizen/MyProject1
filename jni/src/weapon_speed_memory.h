@@ -6,8 +6,29 @@
 // Поэтому контроллер синхронно держит и config, и подтверждённые ARM64-аудитом
 // live-кэши. Инструкции/данные библиотек не меняются, а все адресные цепочки
 // состоят только из статических go_active offsets текущего релиза.
+//
+// Жизненный цикл (почему тут столько кода про смерть игрока):
+//
+// 1. Конфиг — это общий ScriptableObject, он переживает смерть. Пока тумблер
+//    включён, в нём лежит НАШЕ ускоренное значение. Новое оружие после
+//    респавна собирается именно из него, поэтому его live-кэши с рождения
+//    ускорены. Принять такую копию за «оригинал» нельзя: следующее ускорение
+//    поделит её ещё раз, и после пары смертей период выстрела вырождается в
+//    ноль — оружие просто перестаёт стрелять, пока тумблер не перещёлкнут.
+//    Отсюда clean_ (эталон оригиналов на конфиг) и Scalar::unpoison_*.
+// 2. Владелец (оружие, WaitForSeconds) может исчезнуть ровно в тот момент,
+//    когда мы возвращаем ему оригинал: чтение адреса срывается, restore()
+//    честно сообщает «не смог». Раньше такой отказ намертво держал
+//    контроллер на СТАРОМ контексте — новое оружие не принималось, обе
+//    функции навсегда уходили в Failed и лечились только выключением и
+//    включением тумблера. Теперь незакрытое восстановление уезжает в
+//    очередь pending_ и повторяется в фоне, а живой контекст принимается
+//    сразу.
+// 3. Стрельба и перезарядка независимы: отказ восстановления у выключенной
+//    функции больше не мешает применению включённой.
 #include "viewmodel.h"
 #include "game_offsets_active.h"
+#include <cstddef>
 #include <cstdint>
 
 namespace weapon_speed {
@@ -15,6 +36,11 @@ inline constexpr const char* kWeapons = "HyperHug.Games.Oxide.Features.Weapons";
 // Переключатели всегда используют прежний максимум UI; промежуточных
 // коэффициентов больше нет.
 inline constexpr float kMaxMultiplier = 20.f;
+// Нижние пределы записываемых интервалов. Вырожденный (нулевой/денормальный)
+// период — это не «очень быстро», а сломанная стрельба: пара тактов игрового
+// цикла с нулём, и оружие не стреляет вовсе.
+inline constexpr float kMinShotPeriod = 0.0005f;
+inline constexpr float kMinBurstSeconds = 0.0005f;
 
 template<class IO> bool pointer(IO& io, uint64_t address, uint64_t& value) {
     if (!io.read(address,value)) return false;
@@ -64,15 +90,39 @@ struct Scalar {
     uint64_t address=0;
     float original=0.f,last=0.f,current=0.f;
     bool owned=false;
+    // Оригинал захвачен именно этим sample() — только такой можно править
+    // как «копию нашего ускорения» (см. unpoison_*).
+    bool fresh=false;
 
     template<class IO> bool sample(IO& io,uint64_t addr,float lo,float hi) {
         float value=0.f;
+        fresh=false;
         if (!io.read(addr,value) || !finite_range(value,lo,hi)) return false;
         // If the game rebuilt a cache while the toggle was active, adopt that
         // new unowned value instead of restoring an obsolete lifecycle value.
-        if (!owned || address!=addr || value!=last) original=value;
+        if (!owned || address!=addr || value!=last) { original=value; fresh=true; }
         address=addr; current=value;
         return true;
+    }
+    // Значение ассета (HitscanWeaponConfig). Статические данные релиза не
+    // меняются сами по себе: если свежий «оригинал» отличается от эталона
+    // кратно (это наше же ускорение, оставшееся в конфиге с прошлой жизни
+    // игрока), берём эталон как есть.
+    void unpoison_asset(float clean) {
+        if (!fresh || !(clean>0.f) || !(original>0.f)) return;
+        if (original<=clean*0.25f || original>=clean*4.f) original=clean;
+    }
+    // Живой кэш оружия: игра пересчитывает его из конфига и множителей
+    // статов, поэтому точного эталона нет. Копия нашего ускорения опознаётся
+    // по кратности (в 4+ раза быстрее известного оригинала) и разворачивается
+    // тем же множителем — так переживает и смену статов.
+    void unpoison_copy(float clean,float multiplier,float hi) {
+        if (!fresh || !(clean>0.f) || !(original>0.f) || !(multiplier>1.f)) return;
+        if (original>clean*0.25f) return;
+        float restored=original*multiplier;
+        if (!viewmodel::finite(restored)) return;
+        if (restored>hi) restored=hi;
+        original=restored;
     }
     template<class IO> bool put(IO& io,float value) {
         if (!address || !viewmodel::finite(value)) return false;
@@ -128,17 +178,80 @@ template<class IO> class Controller {
     // Values copied by FPHitscan.lMf/sPo into an already-live weapon.
     Scalar shot_period_{},effective_full_{},effective_loop_{},burst_seconds_{};
 
+    // Эталон оригиналов для текущего конфига: по нему опознаются копии нашего
+    // же ускорения у заново созданного оружия (респавн, смена оружия).
+    struct Clean {
+        Identity config{};
+        float fire=0.f,config_full=0.f,config_loop=0.f;
+        float shot=0.f,full=0.f,loop=0.f,burst=0.f;
+    };
+    Clean clean_{};
+
+    // Сколько кадров подряд (около секунды) цепочка не разрешается, прежде
+    // чем снимать ускорение. Одиночный промах — это сбой чтения (на
+    // устройстве отказывают единицы процентов чтений), и откатываться по
+    // нему нельзя: получалось «то работает, то нет», а каждый второй кадр
+    // уходил на лишние записи. Настоящая смерть держится куда дольше.
+    static constexpr int kResolveMissLimit=60;
+    int resolve_miss_=0;
+
+    // Отложенное восстановление: владелец исчез или не читается прямо сейчас.
+    struct Pending {
+        Identity owner{};
+        uint64_t address=0;
+        float original=0.f,last=0.f;
+        int attempts=0;
+    };
+    // ~5 секунд при 60 кадрах: после этого объект уже точно не вернётся.
+    static constexpr int kPendingAttempts=300;
+    static constexpr std::size_t kPendingSlots=8;
+    Pending pending_[kPendingSlots]{};
+    std::size_t pending_count_=0;
+
+    void defer(const Identity& owner,const Scalar& s) {
+        if (!s.owned || !s.address) return;
+        for (std::size_t i=0;i<pending_count_;++i)
+            if (pending_[i].address==s.address) {
+                pending_[i]=Pending{owner,s.address,s.original,s.last,0};
+                return;
+            }
+        if (pending_count_>=kPendingSlots) return;   // очередь полна: забываем
+        pending_[pending_count_++]=Pending{owner,s.address,s.original,s.last,0};
+    }
+    // Снять ускорение и освободить слот. true — оригинал уже возвращён (или
+    // объект честно мёртв); false — восстановление отложено в очередь.
+    bool retire(Scalar& s,const Identity& owner) {
+        if (!s.owned) { s={}; return true; }
+        const Scalar copy=s;
+        if (s.restore(io_,owner)) return true;       // restore сам обнулил s
+        defer(owner,copy);
+        s={};
+        return false;
+    }
+    void drain_pending() {
+        std::size_t out=0;
+        for (std::size_t i=0;i<pending_count_;++i) {
+            Pending p=pending_[i];
+            Scalar s;
+            s.address=p.address; s.original=p.original; s.last=p.last; s.owned=true;
+            if (s.restore(io_,p.owner)) continue;    // вернули или объект мёртв
+            if (++p.attempts>=kPendingAttempts) continue;
+            pending_[out++]=p;
+        }
+        pending_count_=out;
+    }
+
     bool restore_fire() {
-        const bool a=config_fire_.restore(io_,context_.config);
-        const bool b=shot_period_.restore(io_,context_.weapon);
-        const bool c=burst_seconds_.restore(io_,context_.burst_wait);
+        const bool a=retire(config_fire_,context_.config);
+        const bool b=retire(shot_period_,context_.weapon);
+        const bool c=retire(burst_seconds_,context_.burst_wait);
         return a && b && c;
     }
     bool restore_reload() {
-        const bool a=config_full_.restore(io_,context_.config);
-        const bool b=config_loop_.restore(io_,context_.config);
-        const bool c=effective_full_.restore(io_,context_.weapon);
-        const bool d=effective_loop_.restore(io_,context_.weapon);
+        const bool a=retire(config_full_,context_.config);
+        const bool b=retire(config_loop_,context_.config);
+        const bool c=retire(effective_full_,context_.weapon);
+        const bool d=retire(effective_loop_,context_.weapon);
         return a && b && c && d;
     }
     bool restore_all() {
@@ -146,15 +259,49 @@ template<class IO> class Controller {
         const bool b=restore_reload();
         return a && b;
     }
-    bool normalize_inherited_caches(const Context& next) {
-        if (!(context_.config==next.config) || context_.weapon==next.weapon) return true;
-        const bool a=shot_period_.normalize_copy(
+    // Уборка унаследованного ускорения на ЖИВОМ оружии, которое мы не
+    // трогали: оно собрано игрой из ускоренного конфига. Копия опознаётся по
+    // кратности относительно эталона (как в Scalar::unpoison_copy) и
+    // разворачивается тем же множителем. Без этого выключенный тумблер
+    // оставлял только что полученный после респавна ствол ускоренным до
+    // ближайшего перезахода в руки.
+    void unwind_copy(uint64_t address,float clean,float multiplier,float hi) {
+        if (!address || !(clean>0.f) || !(multiplier>1.f)) return;
+        float value=0.f;
+        if (!io_.read(address,value) || !viewmodel::finite(value) || value<=0.f) return;
+        if (value>clean*0.25f) return;               // не наша копия
+        float restored=value*multiplier;
+        if (!viewmodel::finite(restored) || restored>hi) return;
+        if (!io_.write_heap(address,restored)) return;
+        float check=0.f;
+        (void)(io_.read(address,check) && check==restored);
+    }
+    void sweep_inherited(const Context& live,bool fire_fields,bool reload_fields) {
+        // Эталон принадлежит конкретному конфигу; чужое оружие не трогаем.
+        if (!clean_.config.object || !(clean_.config==live.config)) return;
+        if (live.weapon==context_.weapon && owned_state()) return; // это наше, его закроет restore
+        if (fire_fields) {
+            unwind_copy(live.weapon.object+go_active::FPWEAPON_SHOT_PERIOD,
+                        clean_.shot,kMaxMultiplier,120.f);
+            if (live.burst_wait.object)
+                unwind_copy(live.burst_wait.object+go_active::WAITFORSECONDS_SECONDS,
+                            clean_.burst,kMaxMultiplier,120.f);
+        }
+        if (reload_fields) {
+            unwind_copy(live.weapon.object+go_active::FPWEAPON_EFFECTIVE_RELOAD_PERIOD,
+                        clean_.full,kMaxMultiplier,120.f);
+            unwind_copy(live.weapon.object+go_active::FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD,
+                        clean_.loop,kMaxMultiplier,120.f);
+        }
+    }
+    void normalize_inherited_caches(const Context& next) {
+        if (!(context_.config==next.config) || context_.weapon==next.weapon) return;
+        shot_period_.normalize_copy(
             io_,next.weapon.object+go_active::FPWEAPON_SHOT_PERIOD);
-        const bool b=effective_full_.normalize_copy(
+        effective_full_.normalize_copy(
             io_,next.weapon.object+go_active::FPWEAPON_EFFECTIVE_RELOAD_PERIOD);
-        const bool c=effective_loop_.normalize_copy(
+        effective_loop_.normalize_copy(
             io_,next.weapon.object+go_active::FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD);
-        return a && b && c;
     }
 
     bool resolve(uint64_t player,Context& c) {
@@ -212,19 +359,31 @@ template<class IO> class Controller {
 
     bool apply_fire(float multiplier) {
         if (!config_fire_.sample(io_,context_.config.object+go_active::HITSCANCONFIG_FIRE_RATE,
-                                0.0001f,10000.f) ||
-            !shot_period_.sample(io_,context_.weapon.object+go_active::FPWEAPON_SHOT_PERIOD,
+                                0.0001f,10000.f)) return false;
+        config_fire_.unpoison_asset(clean_.fire);
+        if (!shot_period_.sample(io_,context_.weapon.object+go_active::FPWEAPON_SHOT_PERIOD,
                                  0.000001f,120.f)) return false;
-        if (context_.burst_wait.object &&
-            !burst_seconds_.sample(io_,context_.burst_wait.object+go_active::WAITFORSECONDS_SECONDS,
-                                   0.000001f,120.f)) return false;
+        shot_period_.unpoison_copy(clean_.shot,multiplier,120.f);
+        if (context_.burst_wait.object) {
+            if (!burst_seconds_.sample(io_,context_.burst_wait.object+go_active::WAITFORSECONDS_SECONDS,
+                                       0.000001f,120.f)) return false;
+            burst_seconds_.unpoison_copy(clean_.burst,multiplier,120.f);
+        }
+        // Эталон на текущий конфиг: по нему опознаётся оружие, рождённое из
+        // уже ускоренного конфига (респавн, смена оружия того же типа).
+        if (config_fire_.original>0.f) clean_.fire=config_fire_.original;
+        if (shot_period_.original>0.f) clean_.shot=shot_period_.original;
+        if (context_.burst_wait.object && burst_seconds_.original>0.f)
+            clean_.burst=burst_seconds_.original;
 
         float wanted=config_fire_.original>=1.f
             ? config_fire_.original*multiplier : config_fire_.original/multiplier;
         if (wanted<0.01f) wanted=0.01f;
         if (wanted>5000.f) wanted=5000.f;
-        const float shot=shot_period_.original/multiplier;
-        const float burst=burst_seconds_.original/multiplier;
+        float shot=shot_period_.original/multiplier;
+        if (shot<kMinShotPeriod) shot=kMinShotPeriod;
+        float burst=burst_seconds_.original/multiplier;
+        if (burst<kMinBurstSeconds) burst=kMinBurstSeconds;
 
         const bool a=config_fire_.put(io_,wanted);
         const bool b=shot_period_.put(io_,shot);
@@ -234,18 +393,26 @@ template<class IO> class Controller {
 
     bool apply_reload(float multiplier) {
         if (!config_full_.sample(io_,context_.config.object+go_active::HITSCANCONFIG_FULL_RELOAD,
-                                0.f,120.f) ||
-            !config_loop_.sample(io_,context_.config.object+go_active::HITSCANCONFIG_LOOP_RELOAD,
                                 0.f,120.f)) return false;
+        config_full_.unpoison_asset(clean_.config_full);
+        if (!config_loop_.sample(io_,context_.config.object+go_active::HITSCANCONFIG_LOOP_RELOAD,
+                                0.f,120.f)) return false;
+        config_loop_.unpoison_asset(clean_.config_loop);
         // Do not take a transient zero as the "original" of a cache whose
         // config mode is enabled; sPo may initialize it later from our already
         // accelerated config, which would otherwise be accelerated a 2nd time.
         const float full_min=config_full_.original>0.f ? 0.000001f : 0.f;
         const float loop_min=config_loop_.original>0.f ? 0.000001f : 0.f;
         if (!effective_full_.sample(io_,context_.weapon.object+go_active::FPWEAPON_EFFECTIVE_RELOAD_PERIOD,
-                                    full_min,120.f) ||
-            !effective_loop_.sample(io_,context_.weapon.object+go_active::FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD,
+                                    full_min,120.f)) return false;
+        effective_full_.unpoison_copy(clean_.full,multiplier,120.f);
+        if (!effective_loop_.sample(io_,context_.weapon.object+go_active::FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD,
                                     loop_min,120.f)) return false;
+        effective_loop_.unpoison_copy(clean_.loop,multiplier,120.f);
+        if (config_full_.original>0.f) clean_.config_full=config_full_.original;
+        if (config_loop_.original>0.f) clean_.config_loop=config_loop_.original;
+        if (effective_full_.original>0.f) clean_.full=effective_full_.original;
+        if (effective_loop_.original>0.f) clean_.loop=effective_loop_.original;
 
         float full=config_full_.original>0.f ? config_full_.original/multiplier : 0.f;
         float loop=config_loop_.original>0.f ? config_loop_.original/multiplier : 0.f;
@@ -276,16 +443,29 @@ public:
     viewmodel::Status fire=viewmodel::Status::Off,reload=viewmodel::Status::Off;
     explicit Controller(IO& io):io_(io){}
 
-    bool has_state() const {
+    // Ускорение, которое прямо сейчас числится за нами (без фоновых долгов).
+    bool owned_state() const {
         return config_fire_.owned || config_full_.owned || config_loop_.owned ||
             shot_period_.owned || effective_full_.owned || effective_loop_.owned ||
             burst_seconds_.owned;
     }
+    bool has_state() const { return pending_count_!=0 || owned_state(); }
     bool reset(bool restore) {
-        const bool ok=!restore || restore_all();
+        bool ok=true;
+        if (restore) {
+            drain_pending();
+            ok=restore_all();
+            // Единственная попытка добить то, что только что отложилось:
+            // дальше адреса уносить некуда — сессия закрывается.
+            drain_pending();
+            ok=ok && pending_count_==0;
+        }
         context_={};
         config_fire_={}; config_full_={}; config_loop_={};
         shot_period_={}; effective_full_={}; effective_loop_={}; burst_seconds_={};
+        clean_={};
+        pending_count_=0;
+        resolve_miss_=0;
         session_=base_=0;
         fire=reload=viewmodel::Status::Off;
         return ok;
@@ -295,25 +475,49 @@ public:
         if (session!=session_ || base!=base_) { reset(false); session_=session; base_=base; }
         fire=fast_fire?Status::Waiting:Status::Off;
         reload=fast_reload?Status::Waiting:Status::Off;
-        if (!fast_fire && !restore_fire()) fire=Status::Failed;
-        if (!fast_reload && !restore_reload()) reload=Status::Failed;
-        if ((!fast_fire && !fast_reload) || fire==Status::Failed || reload==Status::Failed) return;
+        // Долги прошлых жизней: вернуть оригиналы объектам, которые в момент
+        // отката не читались. Ни на что дальше не влияет.
+        drain_pending();
+
+        if (!fast_fire && !fast_reload) {
+            // Обе выключены. Пока состояние ещё наше — один проход по живому
+            // оружию: оно могло родиться (респавн, смена ствола) из уже
+            // ускоренного конфига и унаследовать наши значения.
+            if (base && owned_state()) {
+                Context live;
+                if (resolve(player,live)) sweep_inherited(live,true,true);
+            }
+            if (!restore_fire()) fire=Status::Failed;
+            if (!restore_reload()) reload=Status::Failed;
+            return;
+        }
         if (!base) return;
 
         // No offset discovery: live reads only validate exact local objects
         // selected through release go_active constants.
         Context next;
         if (!resolve(player,next)) {
-            restore_all();
+            // Игрок мёртв, оружие убрано или просто сорвалось чтение. Первое
+            // отличается от второго только устойчивостью: откатываемся лишь
+            // после серии промахов, иначе функция мигает на каждом сбое.
+            if (++resolve_miss_>=kResolveMissLimit) restore_all();
             return;
         }
+        resolve_miss_=0;
         if (!(next==context_)) {
-            if (!normalize_inherited_caches(next) || !restore_all()) {
-                fire=reload=Status::Failed;
-                return;
-            }
+            // Живой контекст принимается ВСЕГДА. Незакрытые откаты старого
+            // оружия — забота pending_, а не повод отключить функцию.
+            normalize_inherited_caches(next);
+            restore_all();
             context_=next;
         }
+        if (!(clean_.config==next.config)) { clean_={}; clean_.config=next.config; }
+        // Выключенная половина: сначала снять унаследованное ускорение с
+        // живого оружия, потом вернуть оригиналы своим значениям. Функции
+        // независимы — отказ отката одной не отменяет применение другой.
+        if (!fast_fire || !fast_reload) sweep_inherited(next,!fast_fire,!fast_reload);
+        if (!fast_fire && !restore_fire()) fire=Status::Failed;
+        if (!fast_reload && !restore_reload()) reload=Status::Failed;
         if (fast_fire) fire=apply_fire(kMaxMultiplier)?Status::Active:Status::Failed;
         if (fast_reload) reload=apply_reload(kMaxMultiplier)?Status::Active:Status::Failed;
     }

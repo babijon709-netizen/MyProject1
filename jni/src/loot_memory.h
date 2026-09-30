@@ -72,6 +72,15 @@ inline constexpr std::uint32_t kCadenceBits = 0x3EB33333u;
 inline constexpr int32_t kMaxRunners      = 64;
 inline constexpr std::size_t kMaxItemsPerTick = 512;
 inline constexpr int32_t kMaxItemsPerArray   = 4096;
+// Как часто сбрасывать ОТРИЦАТЕЛЬНЫЕ вердикты по классам (~1 минута при
+// 60 кадрах). Положительные живут до конца сессии: класс il2cpp не переезжает.
+inline constexpr std::uint32_t kNegativeCacheTicks = 3600;
+
+// Результат сверки имени: «не тот» и «не прочиталось» — разные вещи. Срыв
+// чтения (на устройстве отказывают единицы процентов чтений) нельзя запоминать
+// как вердикт: один такой промах по настоящему классу промиса раньше навсегда
+// выключал быстрый подбор — до перещёлкивания тумблера.
+enum class Verdict { Yes, No, Unreadable };
 
 template <class IO> class Controller {
     IO& io_;
@@ -88,11 +97,22 @@ template <class IO> class Controller {
     // чтобы один огромный массив не голодал соседей и свой хвост.
     std::uint64_t begin_runner_ = 0, item_phase_ = 0;
     std::uint32_t neutralized_ = 0;     // сколько ожиданий ускорено всего
+    std::uint32_t ticks_ = 0;           // для протухания отрицательных вердиктов
     void forget_addresses() {
         // Сессия сменилась: ни один старый адрес не обязан быть валиден.
         helper_class_ = 0; promise_class_ = 0; scaled_class_ = 0;
         begin_runner_ = item_phase_ = 0;
+        ticks_ = 0;
         runner_classes_.clear(); item_classes_.clear();
+    }
+    // Мусорный указатель из устаревшего снимка массива мог попасть в кэш как
+    // «не тот класс», а позже по этому адресу окажется настоящий класс.
+    // Положительные вердикты сохраняем — они не протухают.
+    static void forget_negatives(std::vector<std::pair<std::uint64_t, bool>>& cache) {
+        std::size_t out = 0;
+        for (std::size_t i = 0; i < cache.size(); ++i)
+            if (cache[i].second) cache[out++] = cache[i];
+        cache.resize(out);
     }
     bool pointer(std::uint64_t address, std::uint64_t& value) {
         if (!io_.read(address, value)) return false;
@@ -102,27 +122,29 @@ template <class IO> class Controller {
     // Сравнение C-строки в памяти игры: имена классов il2cpp — const char*
     // в .rodata, читаем ровно len+1 байт посимвольно (длинный блок мог бы
     // выйти за границу отображения, а кэш 128-байтных блоков гасит цену).
-    bool text_is(std::uint64_t address, const char* text) {
+    Verdict text_is(std::uint64_t address, const char* text) {
         char buf[48];
         const std::size_t len = std::strlen(text);
-        if (len + 1 > sizeof(buf)) return false;
+        if (len + 1 > sizeof(buf)) return Verdict::No;
         for (std::size_t i = 0; i <= len; ++i) {
             char c = 0;
-            if (!io_.read(address + i, c)) return false;
-            if (c != text[i]) return false;   // включая завершающий '\0'
+            if (!io_.read(address + i, c)) return Verdict::Unreadable;
+            if (c != text[i]) return Verdict::No;   // включая завершающий '\0'
         }
-        return true;
+        return Verdict::Yes;
     }
     // Il2CppClass* по значению (в отличие от io.named, который ждёт объект):
     // имя и неймспейс лежат по указателям +0x10/+0x18 от самого класса.
-    bool class_is(std::uint64_t klass, const char* name, const char* ns) {
-        if (klass < 0x10000) return false;
+    Verdict class_is(std::uint64_t klass, const char* name, const char* ns) {
+        if (klass < 0x10000) return Verdict::No;
         std::uint64_t np = 0, sp = 0;
-        if (!pointer(klass + go_active::IL2CPP_CLASS_NAME, np) || np < 0x10000)
-            return false;
-        if (!pointer(klass + go_active::IL2CPP_CLASS_NAMESPACE, sp) || sp < 0x10000)
-            return false;
-        return text_is(np, name) && text_is(sp, ns);
+        if (!pointer(klass + go_active::IL2CPP_CLASS_NAME, np)) return Verdict::Unreadable;
+        if (np < 0x10000) return Verdict::No;
+        if (!pointer(klass + go_active::IL2CPP_CLASS_NAMESPACE, sp)) return Verdict::Unreadable;
+        if (sp < 0x10000) return Verdict::No;
+        const Verdict by_name = text_is(np, name);
+        if (by_name != Verdict::Yes) return by_name;
+        return text_is(sp, ns);
     }
     // Кэш вердиктов «этот класс — тот самый»: имена читаются один раз на класс.
     static constexpr std::size_t kMaxClassCache = 96;
@@ -149,8 +171,11 @@ template <class IO> class Controller {
         std::uint64_t klass = 0;
         if (!pointer(base + go_active::PLAYER_LOOP_HELPER_TYPEINFO_RVA, klass) || klass < 0x10000)
             return Anchor::NotYet;
-        if (!class_is(klass, "PlayerLoopHelper", "Cysharp.Threading.Tasks"))
-            return Anchor::Mismatch;
+        const Verdict named = class_is(klass, "PlayerLoopHelper", "Cysharp.Threading.Tasks");
+        // Сорванное чтение — это «ещё нет», а не «чужой билд»: иначе один
+        // промах уводил функцию в Failed до перещёлкивания тумблера.
+        if (named == Verdict::Unreadable) return Anchor::NotYet;
+        if (named == Verdict::No) return Anchor::Mismatch;
         if (!pointer(klass + go_active::IL2CPP_CLASS_STATIC_FIELDS_OFFSET, statics) || !statics)
             return Anchor::NotYet;
         helper_class_ = klass;
@@ -165,16 +190,25 @@ template <class IO> class Controller {
         if (klass == promise_class_) return 1;
         if (klass == scaled_class_) return 2;
         bool verdict = false;
-        if (!cached(item_classes_, klass, verdict)) {
-            verdict = class_is(klass, "DelayIgnoreTimeScalePromise", "") ||
-                      class_is(klass, "DelayPromise", "");
-            remember(item_classes_, klass, verdict);
+        // Отрицательный вердикт кэшируется только когда имя ДЕЙСТВИТЕЛЬНО
+        // прочитано и не совпало; сорванное чтение просто пропускает элемент
+        // до следующего тика.
+        if (cached(item_classes_, klass, verdict) && !verdict) return 0;
+        const Verdict ignore_scale = class_is(klass, "DelayIgnoreTimeScalePromise", "");
+        if (ignore_scale == Verdict::Yes) {
+            promise_class_ = klass;
+            remember(item_classes_, klass, true);
+            return 1;
         }
-        if (!verdict) return 0;
-        if (class_is(klass, "DelayIgnoreTimeScalePromise", "")) {
-            promise_class_ = klass; return 1;
+        const Verdict scaled = class_is(klass, "DelayPromise", "");
+        if (scaled == Verdict::Yes) {
+            scaled_class_ = klass;
+            remember(item_classes_, klass, true);
+            return 2;
         }
-        scaled_class_ = klass; return 2;
+        if (ignore_scale == Verdict::No && scaled == Verdict::No)
+            remember(item_classes_, klass, false);
+        return 0;
     }
 public:
     viewmodel::Status status = viewmodel::Status::Off;
@@ -193,6 +227,13 @@ public:
         using viewmodel::Status;
         if (!enabled) { reset(); return; }
         if (session != session_) { forget_addresses(); session_ = session; }
+        // Отрицательные вердикты протухают: кэш не должен стать вечной
+        // причиной «подбор перестал работать» после смены сцены/смерти.
+        if (++ticks_ >= kNegativeCacheTicks) {
+            ticks_ = 0;
+            forget_negatives(runner_classes_);
+            forget_negatives(item_classes_);
+        }
         if (!base) { status = Status::Waiting; return; }
         const Anchor anchor = resolve_helper(base);
         if (anchor == Anchor::NotYet)   { status = Status::Waiting; return; }
@@ -234,8 +275,13 @@ public:
             if (!pointer(runner, rk) || rk < 0x10000) continue;
             bool runner_ok = false;
             if (!cached(runner_classes_, rk, runner_ok)) {
-                runner_ok = class_is(rk, "PlayerLoopRunner",
-                                     "Cysharp.Threading.Tasks.Internal");
+                const Verdict named = class_is(rk, "PlayerLoopRunner",
+                                               "Cysharp.Threading.Tasks.Internal");
+                // Промах чтения не запоминаем: иначе настоящий раннер мог
+                // навсегда остаться «не тем» — все ожидания в нём переставали
+                // ускоряться до перезапуска функции.
+                if (named == Verdict::Unreadable) continue;
+                runner_ok = named == Verdict::Yes;
                 remember(runner_classes_, rk, runner_ok);
             }
             if (!runner_ok) continue;

@@ -17,9 +17,26 @@
 #include "logfile.h"
 
 namespace {
+// Чтение блока с одним повтором: см. Memory::read — одиночный отказ
+// транспорта не должен выглядеть как «не тот класс».
+inline bool read_bytes(uint64_t address, void* out, size_t size) {
+    if (address < 0x10000 || !out || !size) return false;
+    if (g_mem.read_quiet(address, out, size)) return true;
+    return g_mem.read_quiet(address, out, size);
+}
+
 struct Memory {
+    // Одиночный отказ чтения — это норма транспорта, а не «объекта нет»: на
+    // устройстве отказывают единицы процентов чтений (лог 16.09: 51 тысяча на
+    // 1,16 млн). Цепочки этих функций длинные (игрок → FPManager → оружие →
+    // конфиг), и без повтора вероятность собрать всю цепочку за кадр падает в
+    // разы: функция то применялась, то откатывалась — со стороны «работает
+    // через раз, особенно после смерти». Повтор стоит лишнего чтения только
+    // там, где первое уже сорвалось.
     template<class T> bool read(uint64_t address, T& value) {
-        return address >= 0x10000 && g_mem.read_quiet(address, &value, sizeof(value));
+        if (address < 0x10000) return false;
+        if (g_mem.read_quiet(address, &value, sizeof(value))) return true;
+        return g_mem.read_quiet(address, &value, sizeof(value));
     }
     template<class T> bool write(uint64_t address, const T& value) {
         return address >= 0x10000 && g_mem.write(address, &value, sizeof(value));
@@ -33,7 +50,7 @@ struct Memory {
         if (!klass) return false;
         char n[64]{}, ns[64]{};
         auto np = ptr(klass + IL2CPP_CLASS_NAME), sp = ptr(klass + IL2CPP_CLASS_NAMESPACE);
-        if (!np || !sp || !g_mem.read_quiet(np, n, sizeof(n)) || !g_mem.read_quiet(sp, ns, sizeof(ns))) return false;
+        if (!np || !sp || !read_bytes(np, n, sizeof(n)) || !read_bytes(sp, ns, sizeof(ns))) return false;
         n[63] = ns[63] = 0;
         return std::strcmp(n, name) == 0 && std::strcmp(ns, "Oxide") == 0;
     }
@@ -167,7 +184,7 @@ struct HeapMemory {
         char n[96]{}, ns[96]{};
         const size_t nl=std::strlen(name)+1, sl=std::strlen(namespaze)+1;
         return nl<=sizeof(n) && sl<=sizeof(ns) && np && sp &&
-            g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
+            read_bytes(np,n,nl) && read_bytes(sp,ns,sl) &&
             std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
     }
     bool named(uint64_t object, const char* name, const char* namespaze) {
@@ -182,8 +199,8 @@ struct HeapMemory {
         const uint64_t np=memory.ptr(klass+go_active::IL2CPP_CLASS_NAME);
         const uint64_t sp=memory.ptr(klass+go_active::IL2CPP_CLASS_NAMESPACE);
         char ns=1, name[33]{};
-        if (!np || !sp || !g_mem.read_quiet(sp,&ns,1) || ns ||
-            !g_mem.read_quiet(np,name,sizeof(name))) return false;
+        if (!np || !sp || !read_bytes(sp,&ns,1) || ns ||
+            !read_bytes(np,name,sizeof(name))) return false;
         for (unsigned i=0;i<sizeof(name);++i) {
             if (!name[i]) return i>0;
             const unsigned char c=(unsigned char)name[i];
@@ -303,11 +320,16 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     tick_fps(epoch, settings.fps_limit);
     loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
     const bool want_no_spread = settings.no_spread || esp_silent_wants_no_spread();
-    // Use the local identity already validated by the world reader first. The
-    // fixed TypeInfo RVA can lag behind a game update even when every managed
-    // field offset is unchanged; that used to disable all four weapon toggles.
     uint64_t player = 0;
     static bool local_source_failed = false;
+    // Сколько кадров подряд локальный игрок не находится. Одиночный промах —
+    // это сбой чтения (на устройстве отказывают единицы процентов чтений), и
+    // состояние трогать нельзя. Устойчивая серия — это уже смерть или смена
+    // мира: контроллерам надо дать отработать жизненный цикл на player=0,
+    // иначе они остаются на мёртвом контексте и после респавна ничего не
+    // применяют, пока тумблер не перещёлкнут.
+    static int local_miss = 0;
+    constexpr int kLocalMissGrace = 12;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || want_no_spread || weapons.has_state() ||
         g_state.fast_fire || g_state.fast_reload || weapon_speeds.has_state()) {
@@ -318,7 +340,14 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                 heap_memory.named(memio::untag(net),"NetworkIdentity","Mirror") &&
                 memory.read(memio::untag(net)+go_active::NETWORK_IDENTITY_IS_LOCAL_PLAYER,local) && local==1;
         };
-        if (local_player_ok(g_local_player)) player=g_local_player;
+        // Источник истины — статика GameControllerBase.localPlayer: после
+        // смерти и респавна это уже НОВЫЙ PlayerManager. Кэш мирового
+        // читателя берётся только запасным: освобождённый объект ещё
+        // несколько секунд проходит все проверки (класс и NetworkIdentity на
+        // месте), и вся цепочка оружия разрешалась на мертвеце — стрельба и
+        // перезарядка «работали» мимо живого оружия. Фиксированный TypeInfo
+        // RVA может отстать от обновления игры, поэтому он идёт последним, а
+        // кэш остаётся страховкой на случай сорванного чтения статики.
         auto try_class = [&](uint64_t klass) {
             if (player || !klass || !memory.klass_is(klass,"GameControllerBase")) return;
             const uint64_t sf=get_class_static_fields(klass);
@@ -329,6 +358,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         };
         try_class(g_game_controller_class);
         try_class(memory.ptr(g_il2cpp_base+GAME_CONTROLLER_TYPEINFO_RVA));
+        if (!player && local_player_ok(g_local_player)) player=g_local_player;
         if (!player) {
             if (!local_source_failed) {
                 local_source_failed=true;
@@ -337,17 +367,24 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                         (unsigned long long)g_game_controller_class,
                         (unsigned long long)GAME_CONTROLLER_TYPEINFO_RVA);
             }
-            // A failed read is NOT a confirmed scene change. Keep pending
-            // originals so a later successful frame can still restore them.
-            auto wait=controller.has_state()?viewmodel::Status::Failed:viewmodel::Status::Waiting;
-            controller.status={wait,wait};
-            weapons.recoil=settings.no_recoil||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
-            weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
-            weapon_speeds.fire=g_state.fast_fire||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
-            weapon_speeds.reload=g_state.fast_reload||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
-            return;
+            if (++local_miss < kLocalMissGrace) {
+                // A failed read is NOT a confirmed scene change. Keep pending
+                // originals so a later successful frame can still restore them.
+                auto wait=controller.has_state()?viewmodel::Status::Failed:viewmodel::Status::Waiting;
+                controller.status={wait,wait};
+                weapons.recoil=settings.no_recoil||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+                weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+                weapon_speeds.fire=g_state.fast_fire||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+                weapon_speeds.reload=g_state.fast_reload||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+                return;
+            }
+            // Игрока устойчиво нет (смерть/загрузка мира): тики ниже идут с
+            // player=0 — контроллеры вернут оригиналы живым объектам, забудут
+            // мёртвые и встретят респавн чистыми.
+        } else {
+            local_miss = 0;
+            local_source_failed = false;
         }
-        local_source_failed=false;
     }
     weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
     {
