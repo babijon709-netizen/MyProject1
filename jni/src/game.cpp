@@ -6504,6 +6504,96 @@ static uint64_t s_melee_klass = 0;
 static bool     s_melee_klass_ok = false;
 static char     s_melee_klass_name[24] = {};
 
+// ---- Поиск полей рейкаста по сигнатуре ------------------------------------
+//
+// FPMelee читает результат рейкаста из активностей PlayerEventHandler: две
+// обёртки GuI`1<GKo> по 0x160 и 0x168. Это оффсеты КОНКРЕТНОЙ сборки игры, и
+// после обновления они уезжают — а вместе с ними молча умирает весь Silent
+// Melee: подменять нечего, шаблоны не учатся, удар уходит по взгляду.
+//
+// Поэтому оффсеты теперь проверяемые. Если по известным адресам нет живого
+// GKo, объект обработчика просматривается целиком и обёртки опознаются по
+// содержимому: ссылка на объект, внутри которого лежит правдоподобный
+// UnityEngine.RaycastHit (мировая точка, конечная дистанция, коллайдер) и
+// GameObject попадания. Найденное кешируется на класс орудия.
+static bool gko_looks_real(uint64_t data) {
+    if (!valid_obj(data)) return false;
+    unsigned char blob[0x30];
+    if (!rd_buf(data + GKO_RAYCAST_HIT, blob, sizeof(blob))) return false;
+    Vec3 point{};
+    float distance = 0.0F;
+    uint64_t collider = 0;
+    memcpy(&point, blob + RAYCASTHIT_POINT, sizeof(point));
+    memcpy(&distance, blob + RAYCASTHIT_DISTANCE, sizeof(distance));
+    memcpy(&collider, blob + RAYCASTHIT_COLLIDER, sizeof(collider));
+    if (!vec3_is_finite(point) || !position_looks_like_world_space(point)) return false;
+    if (!std::isfinite(distance) || distance <= 0.0F || distance > 500.0F) return false;
+    if (!valid_obj(memio::untag(collider))) return false;
+    return valid_obj(memio::untag(rd_ptr(data + GKO_HIT_OBJECT)));
+}
+
+// Кеш на класс орудия: пока в руках то же самое, поиск не повторяется.
+static uint64_t s_ray_cache_klass = 0;
+static uint64_t s_ray_off_primary = GUM_RAYCAST_DATA;
+static uint64_t s_ray_off_fallback = GUM_AIM_RAYCAST;
+static bool     s_ray_off_known = false;
+static double   s_ray_scan_next = 0.0;
+
+void ray_wrapper_reset() {
+    s_ray_cache_klass = 0;
+    s_ray_off_primary = GUM_RAYCAST_DATA;
+    s_ray_off_fallback = GUM_AIM_RAYCAST;
+    s_ray_off_known = false;
+    s_ray_scan_next = 0.0;
+}
+
+static void ray_wrapper_offsets(uint64_t handler, uint64_t& primary, uint64_t& fallback) {
+    primary = s_ray_off_primary;
+    fallback = s_ray_off_fallback;
+    if (s_ray_off_known) return;
+
+    // Сначала проверяем то, что уже есть: живой GKo по текущим оффсетам —
+    // лучшее доказательство, что они верны, и поиск не нужен вовсе.
+    auto wrapper_holds_gko = [&](uint64_t off) {
+        if (!off) return false;
+        const uint64_t wrapper = memio::untag(rd_ptr(handler + off));
+        if (!valid_obj(wrapper)) return false;
+        return gko_looks_real(memio::untag(rd_ptr(wrapper + GUI_VALUE)));
+    };
+    if (wrapper_holds_gko(primary) || wrapper_holds_gko(fallback)) {
+        s_ray_off_known = true;
+        return;
+    }
+
+    // Поиск стоит десятков чтений, поэтому не чаще раза в секунду: игра может
+    // просто ни во что не целиться, и тогда искать нечего в принципе.
+    const double now = mono_seconds();
+    if (now < s_ray_scan_next) return;
+    s_ray_scan_next = now + 1.0;
+
+    constexpr size_t kScanBytes = 0x400;
+    static uint64_t fields[kScanBytes / sizeof(uint64_t)];
+    if (!rd_buf(handler + 0x10, fields, sizeof(fields))) return;
+
+    uint64_t found_a = 0, found_b = 0;
+    for (size_t i = 0; i < kScanBytes / sizeof(uint64_t); ++i) {
+        const uint64_t wrapper = memio::untag(fields[i]);
+        if (!valid_obj(wrapper)) continue;
+        const uint64_t value = memio::untag(rd_ptr(wrapper + GUI_VALUE));
+        if (!gko_looks_real(value)) continue;
+        const uint64_t off = 0x10 + i * sizeof(uint64_t);
+        if (!found_a) found_a = off;
+        else if (!found_b) { found_b = off; break; }
+    }
+    if (!found_a) return;
+
+    s_ray_off_primary = found_a;
+    s_ray_off_fallback = found_b;
+    s_ray_off_known = true;
+    primary = found_a;
+    fallback = found_b;
+}
+
 bool read_local_melee_reach(MeleeReach& out) {
     out = MeleeReach{};
     if (g_pid <= 0 || !g_il2cpp_base) return false;
@@ -6521,6 +6611,9 @@ bool read_local_melee_reach(MeleeReach& out) {
     if (!valid_obj(klass)) return false;
     if (klass != s_melee_klass) {  // имя класса читаем один раз на предмет в руках
         s_melee_klass = klass;
+        // Другое орудие — другой объект обработчика: оффсеты обёрток
+        // перепроверяем (обычно они совпадут и поиск не запустится).
+        if (s_ray_cache_klass != klass) { s_ray_cache_klass = klass; s_ray_off_known = false; }
         s_melee_klass_ok = false;
         s_melee_klass_name[0] = '\0';
         const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
@@ -6602,8 +6695,14 @@ bool read_local_melee_reach(MeleeReach& out) {
         if (valid_obj(handler)) {
             out.event_handler = handler;
             uint64_t data = 0;
-            const uint64_t primary = rd_ptr(handler + GUM_RAYCAST_DATA);
-            const uint64_t fallback = rd_ptr(handler + GUM_AIM_RAYCAST);
+            // Оффсеты обёрток не прибиты гвоздями: если на этой сборке игры по
+            // 0x160/0x168 пусто, они ищутся по сигнатуре (см. ray_wrapper_offsets).
+            uint64_t off_primary = GUM_RAYCAST_DATA, off_fallback = GUM_AIM_RAYCAST;
+            ray_wrapper_offsets(handler, off_primary, off_fallback);
+            out.ray_off_primary = (int)off_primary;
+            out.ray_off_fallback = (int)off_fallback;
+            const uint64_t primary = off_primary ? rd_ptr(handler + off_primary) : 0;
+            const uint64_t fallback = off_fallback ? rd_ptr(handler + off_fallback) : 0;
             out.ray_primary_wrapper = valid_obj(primary) ? primary : 0;
             out.ray_fallback_wrapper = valid_obj(fallback) ? fallback : 0;
             if (valid_obj(primary)) data = rd_ptr(primary + GUI_VALUE);

@@ -885,10 +885,10 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgSHdr(XS("Состояние"));
         {
             struct InfoRow { const char* lbl; char val[48]; bool ok; };
-            InfoRow irows[9];
+            InfoRow irows[10];
             int n = 0;
             auto add = [&](const char* lbl, bool ok) -> char* {
-                if (n >= 9) { static char sink[48]; return sink; }
+                if (n >= 10) { static char sink[48]; return sink; }
                 InfoRow& r = irows[n++];
                 r.lbl = lbl; r.ok = ok; r.val[0] = 0;
                 return r.val;
@@ -931,6 +931,14 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             v = add(XS("Пин"), g_farmPinHold >= 50);
             if (g_farmPinHold < 0) snprintf(v, 48, "%s", XS("нет"));
             else                   snprintf(v, 48, "%d%%", g_farmPinHold);
+
+            // Где нашлись обёртки рейкаста. 0x160/0x168 — штатные оффсеты этой
+            // сборки игры; другие значения значит, что сработал автопоиск по
+            // сигнатуре (игру обновили и поля уехали).
+            if (g_farmRayOffA || g_farmRayOffB) {
+                v = add(XS("Поля луча"), g_farmRayOffA != 0);
+                snprintf(v, 48, "0x%X / 0x%X", g_farmRayOffA, g_farmRayOffB);
+            }
 
             // Причина простоя — ровно та, по которой чит сейчас молчит.
             if (g_farmNodes == 0) {

@@ -157,6 +157,8 @@ struct MeleeReach {
     // берёт distance именно оттуда. По нему видно, не перекрыт ли узел: луч
     // упёрся ближе, чем наша точка прицела, — значит удар уйдёт в перекрытие.
     uint64_t event_handler = 0;   // Gum (PlayerEventHandler) орудия; 0 — не найден
+    int   ray_off_primary = 0;    // где реально лежат обёртки GuI<GKo>
+    int   ray_off_fallback = 0;   // (0x160/0x168 по умолчанию, иначе найденные)
     bool  ray_valid = false;      // в активностях есть GKo
     bool  ray_hit_object = false; // у попадания есть GameObject
     float ray_distance = 0.0F;    // м от камеры вдоль прицела (0 = неизвестно)

@@ -42,6 +42,8 @@ extern int   g_farmIndexed;      // узлов разобрано в индек�
 extern int   g_farmNodesWorld;   // узлов в реестре (весь прогруженный мир)
 extern int   g_farmLearn;        // луч: 0 нет, 1 есть, 2 опознан как узел
 extern int   g_farmSwings;       // авто-ударов сделано за сессию
+extern int   g_farmRayOffA;      // найденные оффсеты обёрток рейкаста
+extern int   g_farmRayOffB;
 extern int   g_farmRayStage;     // стадия цепочки рейкаста игры (0..6)
 extern int   g_farmRayBest;      // лучшая стадия за сессию
 extern int   g_farmPinHold;      // % проверок, где подмена рейкаста уцелела

@@ -1270,6 +1270,8 @@ int esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
         info.fallback = reach.ray_fallback_wrapper;
         info.ray_ready = reach.ray_valid && reach.ray_data != 0 &&
                          (reach.ray_primary_wrapper || reach.ray_fallback_wrapper);
+        info.ray_off_primary = reach.ray_off_primary;
+        info.ray_off_fallback = reach.ray_off_fallback;
     }
 
     // Точка, от которой игра меряет дистанцию удара: ось выстрела, иначе поза
