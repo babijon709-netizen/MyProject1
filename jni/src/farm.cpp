@@ -200,6 +200,8 @@ static void UpdateFarmInner(float dt) {
     static float s_gainS1 = 0.f, s_gainS2 = 0.f, s_gainS3 = 0.f; // образцы
     static int   s_gainN = 0;         // сколько образцов принято
     static unsigned long long s_nodeId = 0;
+    // Hit template learned once from an ordinary ray on this exact node.
+    static unsigned long long s_magicData = 0, s_magicGo = 0, s_magicCollider = 0;
     static float s_settle = 0.f;      // пауза между целями (пальцы подняты)
     static float s_lostTime = 0.f;    // цель пропала: ждём, вдруг вернётся
     static float s_mineTime = 0.f;    // сколько бьём этот узел без прогресса
@@ -230,7 +232,9 @@ static void UpdateFarmInner(float dt) {
         s_lookHold = 0;
     };
     auto resetNode = [&]() {
+        esp_farm_magic_redirect(FarmTarget{}, false);
         s_nodeId = 0;
+        s_magicData = s_magicGo = s_magicCollider = 0;
         s_mineTime = 0.f; s_fracStart = -1.f; s_bestStreak = 0;
         s_healthStart = -1.f; s_blockedTime = 0.f; s_clearTime = 0.f;
         s_depletedFrames = 0;
@@ -407,6 +411,21 @@ static void UpdateFarmInner(float dt) {
         return;
     }
 
+    // Learn the node's actual GameObject/collider from one normal ray. Once
+    // learned, the camera no longer has to follow the hit-streak cross: every
+    // normal timed attack is redirected to this validated template.
+    if (tgt.id == s_nodeId && tgt.magic_ray_data && tgt.magic_hit_go && tgt.magic_collider) {
+        s_magicData = tgt.magic_ray_data;
+        s_magicGo = tgt.magic_hit_go;
+        s_magicCollider = tgt.magic_collider;
+    }
+    const bool magicLocked = s_magicData && s_magicGo && s_magicCollider;
+    if (magicLocked) {
+        tgt.magic_ray_data = s_magicData;
+        tgt.magic_hit_go = s_magicGo;
+        tgt.magic_collider = s_magicCollider;
+    }
+
     // Экранная метка ровно на той точке, по которой бот бьёт: зелёная — по
     // крестику, оранжевая — по корпусу (крестика ещё нет или он за стволом).
     // Заодно и диагностика: если метка не на том объекте, чинить надо подбор
@@ -561,8 +580,10 @@ static void UpdateFarmInner(float dt) {
     // слал по 1..2 px за кадр — крестик заметно дрожал. Полградуса на 0.8 м это
     // 7 мм, в разы меньше засчитываемой зоны крестика (15 см).
     const float pitchDead = inReach ? kPitchDeadSpot : kPitchDeadWalk;
-    const float pitchErr = fmaxf(fabsf(tgt.pitch) - pitchDead, 0.f);
-    const float errDeg = fmaxf(fabsf(tgt.yaw), pitchErr);
+    const float magicYaw = (magicLocked && inReach) ? 0.f : tgt.yaw;
+    const float magicPitch = (magicLocked && inReach) ? 0.f : tgt.pitch;
+    const float pitchErr = fmaxf(fabsf(magicPitch) - pitchDead, 0.f);
+    const float errDeg = fmaxf(fabsf(magicYaw), pitchErr);
 
     // В пределах удара — всегда MINE: прицел доводится тем же пальцем, а удар
     // удар запускается только когда «прицел сел». Вне пределов — идём, но если точка
@@ -573,9 +594,9 @@ static void UpdateFarmInner(float dt) {
 
     // ---- палец 1: камера ------------------------------------------------------
     {
-        const float wantYawPx = tgt.yaw * invGain;
+        const float wantYawPx = magicYaw * invGain;
         float wantPitchPx = 0.f;
-        if (fabsf(tgt.pitch) > pitchDead) wantPitchPx = -tgt.pitch * fabsf(invGain);
+        if (fabsf(magicPitch) > pitchDead) wantPitchPx = -magicPitch * fabsf(invGain);
 
         // Пропорциональный шаг: закрываем часть остатка ошибки (по крестику
         // больше — там точность важнее скорости). Предел шага по крестику урезан
@@ -784,9 +805,9 @@ static void UpdateFarmInner(float dt) {
         // Держим удар, пока прицел ещё едет на точку: тап посреди свайпа
         // прилетает туда, где камера была, — это и есть «не попал по крестику».
         // По корпусу допуск свободный (узел огромный), по крестику — жёсткий.
-        const bool aimSettled = atSpot
+        const bool aimSettled = magicLocked || (atSpot
             ? (fabsf(tgt.yaw) <= kSwingSpotYaw && fabsf(tgt.pitch) <= kSwingSpotPitch)
-            : (fabsf(tgt.yaw) <= kSwingBodyYaw);
+            : (fabsf(tgt.yaw) <= kSwingBodyYaw));
         // Ритм ударов — из самого орудия: FPMelee.m_TimeBetweenAttacks +
         // pauseAfterAttack (у каждого инструмента свои, сериализованы в
         // префабе). Тап раньше срока игра ставит в очередь, и он вылетает уже
@@ -803,7 +824,9 @@ static void UpdateFarmInner(float dt) {
         // GKo FPMelee.ZkX не может засчитать удар и играет один On_Woosh —
         // ровно те «удары в воздух», которые видно со стороны. Ждём не вечно
         // (kNoRaySwingAfter), а стик всё это время поджимает ближе к стволу.
-        const bool swingBlocked = tgt.ray_blocked || (noRay && s_noRayTime < kNoRaySwingAfter);
+        const bool swingBlocked = !magicLocked &&
+            (tgt.ray_blocked || (noRay && s_noRayTime < kNoRaySwingAfter));
+        if (magicLocked) esp_farm_magic_redirect(tgt, true);
         s_tapTimer -= (int)roundf(dt * 1000.f);
         if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
             s_tapTimer = 0;              // ждём камеру/обход, не теряя такт
