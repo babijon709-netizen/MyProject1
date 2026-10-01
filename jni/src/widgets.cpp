@@ -885,10 +885,10 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgSHdr(XS("Состояние"));
         {
             struct InfoRow { const char* lbl; char val[48]; bool ok; };
-            InfoRow irows[11];
+            InfoRow irows[12];
             int n = 0;
             auto add = [&](const char* lbl, bool ok) -> char* {
-                if (n >= 11) { static char sink[48]; return sink; }
+                if (n >= 12) { static char sink[48]; return sink; }
                 InfoRow& r = irows[n++];
                 r.lbl = lbl; r.ok = ok; r.val[0] = 0;
                 return r.val;
@@ -921,6 +921,14 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             v = add(XS("Луч игры"), rs >= 4);
             if (rb > rs) snprintf(v, 48, "%s (%s %d)", kRayStage[rs], XS("макс"), rb);
             else         snprintf(v, 48, "%s", kRayStage[rs]);
+
+            // Крестик цели: по нему считается серия, и именно он отличает
+            // «бьёт по дереву» от «бьёт по крестику».
+            v = add(XS("Крестик"), g_farmSpot > 0);
+            if (g_farmSpot > 0)
+                snprintf(v, 48, "%s %d", XS("серия"), g_farmStreak);
+            else
+                snprintf(v, 48, "%s", XS("нет"));
 
             v = add(XS("Ударов"), g_farmHits > 0);
             snprintf(v, 48, "%d / %d", g_farmHits, g_farmSwings);

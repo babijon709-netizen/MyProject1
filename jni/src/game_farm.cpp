@@ -445,8 +445,9 @@ static float farm_marker_life_left(uint64_t marker, uint64_t age_offset, float l
 // пусты» от «значения есть, но проверка их отвергла».
 // Сглаженный радиус ствола на высоте крестика (см. постановку прицела на кору
 // в esp_farm_get_target). Один узел за раз, поэтому хватает одной ячейки.
-static unsigned long long s_bark_id = 0;
-static float              s_bark_r  = -1.0F;
+// Сглаженный радиус держится на КАЖДЫЙ узел: в рое целей за кадр разбирается
+// до десятка деревьев, и одна ячейка просто перетиралась бы соседями.
+static std::unordered_map<unsigned long long, float> s_bark_radius;
 
 static Vec3  g_farmSpotRawA{}, g_farmSpotRawB{};
 static int   g_farmSpotRawWhy = 3;      // 0 A принят, 1 не конечен, 2 вне узла, 3 не читали
@@ -457,6 +458,88 @@ void esp_farm_spot_raw(float& ax, float& ay, float& az, float& bx, float& by, fl
     ax = g_farmSpotRawA.x; ay = g_farmSpotRawA.y; az = g_farmSpotRawA.z;
     bx = g_farmSpotRawB.x; by = g_farmSpotRawB.y; bz = g_farmSpotRawB.z;
     why = g_farmSpotRawWhy; len = g_farmSpotRawLen;
+}
+
+// --------------------------------------------------------------------------
+// Крестик дерева -> точка на коре.
+// Декаль X висит СНАРУЖИ коры (сдвиг по нормали против z-файта), поэтому
+// прицел по ней на боку ствола уходил мимо дерева: луч «глаз -> декаль» не
+// цеплял меш, GKo оставался пустым и FPMelee.ZkX играл один On_Woosh.
+// Первая поправка тянула прицел к оси ствола на 0.25 м — «сдвиг декали из
+// дампа». Замер по логу 14.09 (55 замахов с живым лучом игры, у которого
+// известны и точка попадания m_Point, и нормаль) показал, что 0.25 м —
+// много: декаль торчит из коры в среднем на 0.108 м, а прицел после
+// поправки уходил на 0.138 м ВНУТРЬ ствола (min 0.178, max +0.063 снаружи).
+// Урон при этом шёл (луч цеплял кору), но попадание оказывалось в 15 см от
+// крестика — за пределами 0.15 м, которыми игра меряет серию по X, поэтому
+// серия не росла: «крестик сбоку, а бот по нему мажет».
+// 
+// Правильная точка — пересечение направления на декаль с корой. Радиус
+// ствола на высоте X берём из того, что игра меряет сама, по убыванию
+// точности:
+// 1. точка попадания её же луча прицела (m_Point) — это буквально кора;
+// 2. локальный отрезок X (MTQ на оси ствола, MTu на коре): его длина —
+// радиус в локальных единицах, а масштаб дерева получается из высоты
+// декали над пивотом (декаль стоит на той же высоте, что и X). Замер:
+// локальный радиус 0.40 при коре 0.354 и 0.04 при коре 0.037 —
+// масштаб 0.885 и 0.93, оба сходятся с высотой (1.93 -> 1.74);
+// 3. ни луча, ни полей — декаль торчит примерно на 0.3 радиуса, то есть
+// кора это 0.77 от её вылета (по замеру 0.757..0.788 на двух деревьях).
+// Направление всегда от декали: нормаль ствола почти радиальна, а величина
+// сдвига по нормали нам как раз неизвестна — она и есть ошибка.
+static void farm_spot_pull_to_bark(const FarmEntity& node, Vec3& spot,
+                                   const MeleeReach& reach, bool has_spot) {
+    if (!has_spot || node.kind != 0) return;
+    {
+        const float cdx = spot.x - node.pos.x, cdz = spot.z - node.pos.z;
+        const float choriz = sqrtf(cdx * cdx + cdz * cdz);
+        if (choriz > 0.05F) {
+            float bark = -1.0F;
+            // 1) кора из луча самой игры. Попадание обязано быть на ЭТОМ стволе:
+            //    правдоподобный радиус, не дальше декали с запасом и рядом по
+            //    высоте — иначе это земля, соседнее дерево или крона.
+            if (reach.ray_point_valid && reach.ray_hit_object) {
+                const float hx = reach.ray_point.x - node.pos.x;
+                const float hz = reach.ray_point.z - node.pos.z;
+                const float rh = sqrtf(hx * hx + hz * hz);
+                if (std::isfinite(rh) && rh > 0.03F && rh < 2.5F &&
+                    rh < choriz * 1.6F && fabsf(reach.ray_point.y - spot.y) < 1.2F)
+                    bark = rh;
+            }
+            // 2) локальный отрезок X + масштаб дерева из высоты декали
+            if (bark < 0.0F && node.ext && node.ext_kind == FARM_EXT_TREE) {
+                const Vec3 la = rd_v3(node.ext + TREEHS_SPOT_A);
+                const Vec3 lb = rd_v3(node.ext + TREEHS_SPOT_B);
+                const float h_world = spot.y - node.pos.y;   // высота X над пивотом
+                if (vec3_is_finite(la) && vec3_is_finite(lb) && la.y > 0.25F && h_world > 0.25F) {
+                    const float scale = h_world / la.y;
+                    if (scale > 0.15F && scale < 6.0F) {
+                        const float dx = lb.x - la.x, dz = lb.z - la.z;
+                        const float r_local = sqrtf(dx * dx + dz * dz);
+                        if (r_local > 0.005F) bark = r_local * scale;
+                    }
+                }
+            }
+            // 3) совсем ничего не прочиталось
+            if (bark < 0.0F) bark = choriz * 0.77F;
+
+            if (std::isfinite(bark) && bark > 0.02F && bark < 2.5F) {
+                // Радиус ствола величина почти постоянная, а измерение по лучу
+                // шумит на сантиметры из кадра в кадр (луч попадает в разные
+                // места коры). Сглаживаем и держим на узел: иначе прицел
+                // ползает вместе с шумом, а точка подхода дёргается за ним.
+                if (s_bark_radius.size() > 256) s_bark_radius.clear();
+                float& smooth = s_bark_radius.emplace(node.identity, bark).first->second;
+                smooth += (bark - smooth) * 0.25F;
+                if (smooth > 0.02F && smooth < 2.5F && smooth < choriz * 1.6F) {
+                    const float k = smooth / choriz;
+                    spot.x = node.pos.x + cdx * k;
+                    spot.z = node.pos.z + cdz * k;
+                }
+            }
+        }
+    }
+
 }
 
 static bool farm_read_spot(const FarmEntity& entity, Vec3& out, int& source, int& streak, float& life_left) {
@@ -826,80 +909,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     const bool at_spot = has_spot && spot_front;
 
-    // ---- Точка крестика: поставить на кору, а не на декаль и не внутрь ствола --
-    // Декаль X висит СНАРУЖИ коры (сдвиг по нормали против z-файта), поэтому
-    // прицел по ней на боку ствола уходил мимо дерева: луч «глаз -> декаль» не
-    // цеплял меш, GKo оставался пустым и FPMelee.ZkX играл один On_Woosh.
-    // Первая поправка тянула прицел к оси ствола на 0.25 м — «сдвиг декали из
-    // дампа». Замер по логу 14.09 (55 замахов с живым лучом игры, у которого
-    // известны и точка попадания m_Point, и нормаль) показал, что 0.25 м —
-    // много: декаль торчит из коры в среднем на 0.108 м, а прицел после
-    // поправки уходил на 0.138 м ВНУТРЬ ствола (min 0.178, max +0.063 снаружи).
-    // Урон при этом шёл (луч цеплял кору), но попадание оказывалось в 15 см от
-    // крестика — за пределами 0.15 м, которыми игра меряет серию по X, поэтому
-    // серия не росла: «крестик сбоку, а бот по нему мажет».
-    //
-    // Правильная точка — пересечение направления на декаль с корой. Радиус
-    // ствола на высоте X берём из того, что игра меряет сама, по убыванию
-    // точности:
-    //   1. точка попадания её же луча прицела (m_Point) — это буквально кора;
-    //   2. локальный отрезок X (MTQ на оси ствола, MTu на коре): его длина —
-    //      радиус в локальных единицах, а масштаб дерева получается из высоты
-    //      декали над пивотом (декаль стоит на той же высоте, что и X). Замер:
-    //      локальный радиус 0.40 при коре 0.354 и 0.04 при коре 0.037 —
-    //      масштаб 0.885 и 0.93, оба сходятся с высотой (1.93 -> 1.74);
-    //   3. ни луча, ни полей — декаль торчит примерно на 0.3 радиуса, то есть
-    //      кора это 0.77 от её вылета (по замеру 0.757..0.788 на двух деревьях).
-    // Направление всегда от декали: нормаль ствола почти радиальна, а величина
-    // сдвига по нормали нам как раз неизвестна — она и есть ошибка.
-    if (has_spot && node.kind == 0) {
-        const float cdx = spot.x - node.pos.x, cdz = spot.z - node.pos.z;
-        const float choriz = sqrtf(cdx * cdx + cdz * cdz);
-        if (choriz > 0.05F) {
-            float bark = -1.0F;
-            // 1) кора из луча самой игры. Попадание обязано быть на ЭТОМ стволе:
-            //    правдоподобный радиус, не дальше декали с запасом и рядом по
-            //    высоте — иначе это земля, соседнее дерево или крона.
-            if (reach.ray_point_valid && reach.ray_hit_object) {
-                const float hx = reach.ray_point.x - node.pos.x;
-                const float hz = reach.ray_point.z - node.pos.z;
-                const float rh = sqrtf(hx * hx + hz * hz);
-                if (std::isfinite(rh) && rh > 0.03F && rh < 2.5F &&
-                    rh < choriz * 1.6F && fabsf(reach.ray_point.y - spot.y) < 1.2F)
-                    bark = rh;
-            }
-            // 2) локальный отрезок X + масштаб дерева из высоты декали
-            if (bark < 0.0F && node.ext && node.ext_kind == FARM_EXT_TREE) {
-                const Vec3 la = rd_v3(node.ext + TREEHS_SPOT_A);
-                const Vec3 lb = rd_v3(node.ext + TREEHS_SPOT_B);
-                const float h_world = spot.y - node.pos.y;   // высота X над пивотом
-                if (vec3_is_finite(la) && vec3_is_finite(lb) && la.y > 0.25F && h_world > 0.25F) {
-                    const float scale = h_world / la.y;
-                    if (scale > 0.15F && scale < 6.0F) {
-                        const float dx = lb.x - la.x, dz = lb.z - la.z;
-                        const float r_local = sqrtf(dx * dx + dz * dz);
-                        if (r_local > 0.005F) bark = r_local * scale;
-                    }
-                }
-            }
-            // 3) совсем ничего не прочиталось
-            if (bark < 0.0F) bark = choriz * 0.77F;
-
-            if (std::isfinite(bark) && bark > 0.02F && bark < 2.5F) {
-                // Радиус ствола величина почти постоянная, а измерение по лучу
-                // шумит на сантиметры из кадра в кадр (луч попадает в разные
-                // места коры). Сглаживаем и держим на узел: иначе прицел
-                // ползает вместе с шумом, а точка подхода дёргается за ним.
-                if (s_bark_id != node.identity) { s_bark_id = node.identity; s_bark_r = bark; }
-                else s_bark_r += (bark - s_bark_r) * 0.25F;
-                if (s_bark_r > 0.02F && s_bark_r < 2.5F && s_bark_r < choriz * 1.6F) {
-                    const float k = s_bark_r / choriz;
-                    spot.x = node.pos.x + cdx * k;
-                    spot.z = node.pos.z + cdz * k;
-                }
-            }
-        }
-    }
+    farm_spot_pull_to_bark(node, spot, reach, has_spot);
 
     // ---- Точка прицела -------------------------------------------------------
     Vec3 aim = at_spot ? spot : best->pos;
@@ -1394,6 +1404,11 @@ int esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
         float spot_life = -1.0F;
         farm_resolve_extension(node);
         const bool has_spot = farm_read_spot(node, spot, spot_source, streak, spot_life);
+        // Декаль крестика висит СНАРУЖИ коры, а серию игра считает по отрезку
+        // внутри ствола с допуском 0.15 м. Без этой поправки удар попадал по
+        // дереву (урон шёл), но мимо крестика — серия не росла. Та же
+        // поправка, что и в старом автофарме, теперь общая на оба пути.
+        if (has_spot && have_reach) farm_spot_pull_to_bark(node, spot, reach, has_spot);
         Vec3 aim = has_spot ? spot : node.pos;
         if (!has_spot) aim.y += (node.kind == 0) ? 1.15F : 0.15F;
         slot.at_spot = has_spot;
