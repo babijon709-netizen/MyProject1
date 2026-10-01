@@ -16,3 +16,9 @@ void stop_attach_thread();
 // Разобрать привязку при выходе: кэши игры сбрасываются, поток сможет
 // подключиться заново, когда процесс снова будет доступен.
 void process_detach();
+
+// CLI-команда dump (metadata_dump.h): тот же поиск кандидатов, что у потока
+// привязки, но одним проходом и без потока. Память игры здесь не трогается —
+// только /proc (cmdline, maps), как и в самом потоке.
+pid_t process_find_game_pid();
+int   process_find_unity_candidates(pid_t* out, int capacity);

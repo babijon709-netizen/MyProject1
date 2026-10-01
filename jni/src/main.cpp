@@ -17,6 +17,7 @@
 #include "app_state.h"
 #include "overlay_geometry.h"
 #include "mode_select.h"
+#include "metadata_dump.h"
 #include "mem_io.h"
 #include "kernel_io.h"
 #include "stealth.h"
@@ -35,6 +36,8 @@
 // Диагностика кернел-режима из терминала (Termux/adb), без оверлея и игры:
 //   su -c /data/local/tmp/xvcen --check-driver   — базовая проверка
 //   su -c /data/local/tmp/xvcen --scan-driver    — + полный скан кодов команд
+//   su -c /data/local/tmp/xvcen dump             — рантайм-дамп global-metadata.dat
+//                                                  запущенной игры в benzware/dump/
 // Печатает: root/не root, ядро, семейство сокета FT-драйвера и класс маячка,
 // живые пробы команд по собственной памяти (оба известных протокола FT),
 // QX-драйвер (/dev-узел) и RT-драйвер (хук syscall ioctl), выбранный
@@ -266,9 +269,15 @@ int main(int argc, char* argv[]) {
     // Проверка драйвера из терминала (Termux/adb): su -c ./xvcen --check-driver
     // (базовая) или --scan-driver (полный скан кодов команд) — без GUI,
     // до запуска оверлея и игры.
+    // dump — рантайм-дамп global-metadata.dat из памяти запущенной игры
+    // (metadata_dump.h): тоже без GUI и маскировки, короткоживущий процесс
+    // с терминальным выводом; транспорт — из .mode или аргумента, без
+    // фоллбэков.
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--check-driver") == 0) return driver_check::Run(false);
         if (strcmp(argv[i], "--scan-driver") == 0) return driver_check::Run(true);
+        if (strcmp(argv[i], "dump") == 0 || strcmp(argv[i], "--dump") == 0)
+            return metadump::Run(argc - i, argv + i);
     }
 
     // Страж-трейсер САМЫМ ПЕРВЫМ делом после разбора аргументов: процесс ещё

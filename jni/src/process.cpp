@@ -201,3 +201,10 @@ void process_detach() {
     g_target_pid = -1;
     g_alive_check_failures = 0;
 }
+
+// CLI-команда dump: тонкие обёртки над теми же поисками, что у потока
+// привязки (process.h), — без состояния потока и без чтения памяти.
+pid_t process_find_game_pid() { return find_game_pid(); }
+int process_find_unity_candidates(pid_t* out, int capacity) {
+    return find_renamed_release_candidates(out, capacity);
+}
