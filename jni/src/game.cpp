@@ -6598,6 +6598,7 @@ bool read_local_melee_reach(MeleeReach& out) {
             }
             if (valid_obj(data)) {
                 out.ray_valid = true;
+                out.ray_data = data;
                 // GameObject и Collider попадания держим указателями: по ним
                 // проверяется, не в сам ли узел упёрся луч (у камня точка
                 // прицела внутри породы, и без этого свой камень выглядит
@@ -6624,6 +6625,28 @@ bool read_local_melee_reach(MeleeReach& out) {
         }
     }
     return true;
+}
+
+bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
+    // The game refreshes GKo from its own raycaster every frame. We only touch
+    // the already validated live record immediately before the normal attack;
+    // no executable code, cooldown, damage or network method is patched.
+    if (!enabled) return true;
+    const uint64_t data = memio::untag((uint64_t)target.magic_ray_data);
+    const uint64_t go = memio::untag((uint64_t)target.magic_hit_go);
+    const uint64_t collider = memio::untag((uint64_t)target.magic_collider);
+    if (!valid_obj(data) || !valid_obj(go) || !valid_obj(collider)) return false;
+    const Vec3 point{target.aim_x, target.aim_y, target.aim_z};
+    if (!vec3_is_finite(point) || !position_looks_like_world_space(point)) return false;
+    float distance = target.aim_3d;
+    if (!std::isfinite(distance) || distance <= 0.0F || distance >= target.melee_reach)
+        distance = fmaxf(0.05F, target.melee_reach * 0.5F);
+    const uint64_t hit = data + GKO_RAYCAST_HIT;
+    const bool ok = wr_buf(data + GKO_HIT_OBJECT, &go, sizeof(go)) &&
+                    wr_buf(hit + RAYCASTHIT_POINT, &point, sizeof(point)) &&
+                    wr_buf(hit + RAYCASTHIT_DISTANCE, &distance, sizeof(distance)) &&
+                    wr_buf(hit + RAYCASTHIT_COLLIDER, &collider, sizeof(collider));
+    return ok;
 }
 
 float esp_camera_fov_deg() { return g_cam_fov_deg; }
