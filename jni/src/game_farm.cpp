@@ -922,23 +922,24 @@ bool esp_farm_get_target(FarmTarget& out) {
     const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
     const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
 
-    // Magic-Farm never follows the bonus cross with the camera. It looks at a
-    // stable point on the resource body once, validates that ordinary ray as
-    // belonging to this node, then redirects later hits to `aim` (the cross)
-    // without further camera movement.
-    Vec3 look = best->pos;
-    look.y += (best->kind == 0) ? 1.15F : 0.15F;
-    if (best->kind == 0) {
-        const float lo = origin.y - 0.9F, hi = origin.y + 0.1F;
-        if (look.y < lo) look.y = lo;
-        if (look.y > hi) look.y = hi;
-    } else {
-        const float lo = origin.y - 1.3F, hi = origin.y - 0.55F;
-        if (look.y < lo) look.y = lo;
-        if (look.y > hi) look.y = hi;
+    // Прицел по корпусу зажимаем в полосу вокруг ГЛАЗА игрока — единственной
+    // высоты, которая надёжна на всех префабах (пивот камня бывает на макушке,
+    // у дерева — в центре ствола).
+    if (!at_spot) {
+        if (best->kind == 0) {
+            // Дерево: грудь — чуть ниже глаза до уровня глаза.
+            const float lo = origin.y - 0.9F, hi = origin.y + 0.1F;
+            if (aim.y < lo) aim.y = lo;
+            if (aim.y > hi) aim.y = hi;
+        } else {
+            // Руда: от колена до пояса, заметно ниже глаза.
+            const float lo = origin.y - 1.3F, hi = origin.y - 0.55F;
+            if (aim.y < lo) aim.y = lo;
+            if (aim.y > hi) aim.y = hi;
+        }
     }
 
-    const Vec3 d = {look.x - origin.x, look.y - origin.y, look.z - origin.z};
+    const Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
     const float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
     const float rx = d.x * right.x + d.y * right.y + d.z * right.z;
     const float ux = d.x * up.x + d.y * up.y + d.z * up.z;
