@@ -174,6 +174,16 @@ struct MeleeReach {
     uint64_t ray_hit_go = 0;
     uint64_t ray_data = 0; // live GKo used by FPMelee for the next hit
     uint64_t ray_primary_wrapper = 0, ray_fallback_wrapper = 0;
+    // Живое орудие и его RaycastManager — адреса, в которые пишет Melee-TP
+    // (magic-farm): дальность удара FPMelee.m_MaxReach/hitRadius и геометрия
+    // луча взаимодействия RaycastManager.m_RayLength/m_AimRayLength/
+    // m_SphereCastRadius. Читаются здесь же, одним проходом по цепочке
+    // «игрок -> FPManager -> оружие», чтобы писателю TP не пришлось ходить по
+    // ней из своего потока.
+    uint64_t weapon = 0;
+    uint64_t raycast_manager = 0;
+    float aim_ray_length = 0.0F;  // RaycastManager.m_AimRayLength (0x3C)
+    float sphere_radius = 0.0F;   // RaycastManager.m_SphereCastRadius (0x40)
 };
 
 // Состояние ядра, общее со сканами (определено в game.cpp).
@@ -231,3 +241,6 @@ void reset_marker_caches();
 // Сброс скана автофарма (определены в game_farm.cpp) — зовётся при сбросе мира.
 void farm_scan_abort();
 void farm_scan_reset();
+// Сброс кеша шаблонов попадания Magic-Farm (пары GameObject/коллайдер узлов):
+// после смены мира managed-указатели недействительны.
+void farm_templates_reset();

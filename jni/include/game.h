@@ -179,9 +179,10 @@ bool        esp_local_player_is_aiming();
 // прочитан неверной цепочкой».
 int         esp_local_aim_source();
 
-// ---- Автофарм ---------------------------------------------------------------
-// Слой памяти только находит узел и говорит, куда смотреть и куда идти; сам
-// подход и удары делает контроллер на синтетических тачах в main.cpp.
+// ---- Magic-Farm --------------------------------------------------------------
+// Слой памяти находит узлы вокруг игрока, читает их живые «крестики» и отдаёт
+// контроллеру (farm.cpp) готовые шаблоны попадания. Ходит игрок сам — чит
+// только переписывает результат рейкаста игры и дальность удара.
 //
 // «Крестик» (hit-streak marker) — объект, который игра сама создаёт на ресурсе
 // после первого попадания и уничтожает через 15 секунд простоя. Его координаты
@@ -191,7 +192,7 @@ int         esp_local_aim_source();
 struct FarmTarget {
     bool  valid = false;
     unsigned long long id = 0;    // NetworkIdentity (для чёрного списка)
-    int   kind = 0;               // 0 дерево, 1 камень, 2 металл, 3 сера
+    int   kind = 0;               // 0 дерево, 1 камень, 2 металл, 3 сера, 4 бочка
     float fraction = -1.f;        // остаток ресурса 0..1, -1 = не читается
 
     // Точка прицела: крестик, пока он жив и с нашей стороны; иначе корпус узла
@@ -293,16 +294,81 @@ struct FarmTarget {
 // таймера: чёрный список, позиции узлов); суммы участков к нему не обязаны
 // сходиться в точности — подтаймеры нужны, чтобы найти виновника, а не свести
 // баланс.
-// Какие ресурсы добывать: bit0 дерево, bit1 камень, bit2 металл, bit3 сера.
+// Какие ресурсы добывать: bit0 дерево, bit1 камень, bit2 металл, bit3 сера,
+// bit4 бочки (MineableEntityType::Barrel — их тоже ломают ударом).
 // 0 выключает скан целиком (никакой лишней работы в кадре).
 void        esp_farm_set_resources(unsigned mask);
 // Радиус поиска узлов в метрах (зажимается в 10..300).
 void        esp_farm_set_range(float meters);
 // Ближайший подходящий узел по состоянию последнего esp_get_boxes() (нужна
-// его камера).
+// его камера). ЛЕГАСИ тач-бота: здесь считаются углы доворота камеры и точка
+// подхода, которые Magic-Farm не использует (ходит игрок). Оставлено как
+// диагностика геометрии узла и крестика — контроллер работает через
+// esp_farm_get_swarm().
 bool        esp_farm_get_target(FarmTarget& out);
-// Redirect the next normal melee hit to a previously validated point on the current node.
-bool        esp_farm_magic_redirect(const FarmTarget& target, bool enabled);
+
+// ---- Magic-Farm: узлы вокруг игрока -----------------------------------------
+// Один узел добычи в радиусе удара вместе со всем, что нужно, чтобы ударить по
+// нему молча: точка попадания (живой крестик, пока он есть) и шаблон попадания
+// (GameObject + коллайдер узла), которым подменяется результат рейкаста игры.
+struct FarmSwarmNode {
+    unsigned long long id = 0;      // NetworkIdentity узла
+    int   kind = 0;                 // 0 дерево, 1 камень, 2 металл, 3 сера, 4 бочка
+    float dist = 0.f;               // 3D-метры от глаза до точки попадания
+    float horiz = 0.f;              // метры по горизонтали до пивота узла
+    // Точка, в которую отправляется удар: живой крестик, иначе корпус узла.
+    float x = 0.f, y = 0.f, z = 0.f;
+    bool  at_spot = false;          // точка — крестик (попадание идёт в серию)
+    int   spot_source = 0;          // 1 маркер руды, 2 точка дерева, 3 декаль
+    int   streak = 0;               // hitstreakIndex: попаданий подряд в крестик
+    float spot_life = -1.f;         // сколько секунд крестику осталось жить
+    float health = -1.f, health_max = -1.f;
+    float fraction = -1.f;          // остаток ресурса 0..1
+    int   experience = 0;
+    bool  tool_ok = true;           // текущее орудие умеет брать этот ресурс
+    // Шаблон попадания. Пока он не выучен (луч игры ни разу не упирался в этот
+    // узел), молча бить по узлу нечем — контроллер его пропускает.
+    bool  have_template = false;
+    unsigned long long hit_object = 0, collider = 0;
+    // Проекция точки попадания на экран — для метки оверлея.
+    bool  on_screen = false;
+    float sx = 0.f, sy = 0.f;
+};
+// Общее на кадр: живой GKo, его обёртки и параметры орудия в руках.
+struct FarmSwarmInfo {
+    bool  ray_ready = false;        // у игры есть живой GKo (есть что подменять)
+    unsigned long long ray_data = 0, primary = 0, fallback = 0;
+    float melee_reach = 0.f;        // m_MaxReach + hitRadius (уже с Melee-TP)
+    float attack_period = 0.f;      // секунд между ударами орудия
+    int   tool_purposes = 0;        // что орудие умеет (флаги ToolPurpose)
+    int   tool_need = 0;            // что требуют отброшенные узлы
+    int   templates = 0;            // сколько шаблонов попадания в кеше
+};
+// Узлы в радиусе `radius_m` вокруг игрока, отсортированные по дистанции.
+// Возвращает их количество (не больше max_nodes).
+int         esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
+                               FarmSwarmInfo& info);
+
+// Запись попадания: следующий штатный удар придётся в `hit`, а не туда, куда
+// смотрит камера. Держится фоновым потоком до esp_magic_hit_release().
+struct MagicHit {
+    unsigned long long ray_data = 0;    // живой GKo, который читает FPMelee
+    unsigned long long primary = 0, fallback = 0;  // обёртки GuI<GKo>
+    unsigned long long hit_object = 0;  // GameObject узла
+    unsigned long long collider = 0;    // его коллайдер
+    float x = 0.f, y = 0.f, z = 0.f;    // точка удара (крестик)
+    float distance = 0.f;               // м; должна быть меньше дальности удара
+};
+bool               esp_magic_hit_pin(const MagicHit& hit);
+void               esp_magic_hit_release();
+unsigned long long esp_magic_hit_writes();
+
+// Melee-TP: пишет дальность удара орудия (FPMelee.m_MaxReach + hitRadius) и
+// геометрию луча взаимодействия (RaycastManager). reach_m — суммарная
+// дальность в метрах, sphere_m — радиус сферы, которой игра ищет попадание.
+// Выключение возвращает орудию исходные значения.
+bool        esp_melee_tp_update(bool enabled, float reach_m, float sphere_m);
+void        esp_melee_tp_status(float& reach, float& sphere, bool& active);
 // Сдаться на узле (недостижим / застряли) на `seconds`.
 void        esp_farm_blacklist(unsigned long long id, float seconds);
 // Почему последний esp_farm_get_target() ничего не вернул + сколько узлов

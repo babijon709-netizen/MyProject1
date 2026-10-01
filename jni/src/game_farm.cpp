@@ -129,6 +129,7 @@ void farm_scan_abort() {
 // Полный сброс скана: рабочий список чистит вызывающий, здесь — кеш и проход.
 void farm_scan_reset() {
     farm_scan_abort();
+    farm_templates_reset();
     g_farm_not_node.clear();
     g_farm_next_scan = 0.0;
 }
@@ -169,6 +170,11 @@ static int farm_classify_identity(uint64_t identity, uint64_t identity_class,
             case MineableEntityType::Stone:  kind = 1; break;
             case MineableEntityType::Iron:   kind = 2; break;
             case MineableEntityType::Sulfur: kind = 3; break;
+            // Бочки — такой же MineableObject, их именно ломают ударом. Для
+            // Magic-Farm это полноценная цель: игрок идёт мимо, а бочки вокруг
+            // разлетаются. Отдельный бит маски (16), чтобы обычный сбор ресурсов
+            // их не подбирал, пока пользователь не попросил.
+            case MineableEntityType::Barrel: kind = 4; break;
             default: break;
         }
         if (kind < 0 && !farm_kind_from_loot(component, kind)) kind = -1;
@@ -1113,4 +1119,218 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F)
                  ? fraction : -1.0F;
     return true;
+}
+
+// ======================= Magic-Farm: узлы вокруг игрока ======================
+//
+// Отличие от esp_farm_get_target() (та отдаёт ОДИН узел и всё, что нужно, чтобы
+// к нему дойти и навестись) — здесь нужен список: Magic-Farm бьёт по тому, что
+// оказалось в радиусе удара, пока игрок просто идёт. Камера не участвует вовсе,
+// поэтому углы, точка подхода и обходы препятствий тут не считаются.
+//
+// Шаблон попадания. Чтобы удар засчитался по конкретному узлу, в GKo должны
+// лежать ЕГО GameObject и коллайдер — managed-объекты, которых у нас нет: из
+// реестра Mirror достаётся только MineableObject и нативный Transform. Зато
+// игра сама приносит эти указатели в своём рейкасте, как только её луч упирается
+// в узел; с включённым Melee-TP (толстая сфера на несколько метров) это
+// происходит само собой, пока игрок проходит мимо. Поэтому каждый кадр мы
+// сверяем живой луч с ближайшими узлами (ray_hit_is_self_node — та же проверка,
+// что и у автофарма) и запоминаем пару {GameObject, коллайдер} на узел. Дальше
+// бить по узлу можно молча и из любого положения камеры.
+namespace {
+struct FarmHitTemplate {
+    uint64_t go = 0;
+    uint64_t collider = 0;
+    int      age = 0;      // кадров с последнего подтверждения
+};
+std::unordered_map<uint64_t, FarmHitTemplate> g_farm_templates;
+constexpr size_t kFarmTemplateMax = 256;
+// Сколько узлов за кадр сверяем с лучом игры. Проверка ходит по поддереву
+// трансформов попадания, поэтому на весь список её гонять нельзя.
+constexpr int kFarmTemplateProbes = 4;
+}  // namespace
+
+void farm_templates_reset() { g_farm_templates.clear(); }
+
+int esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
+                       FarmSwarmInfo& info) {
+    info = FarmSwarmInfo{};
+    if (!out || max_nodes <= 0) return 0;
+    if (!g_farm_mask) { g_farm_idle_reason = 1; return 0; }
+    if (g_pid <= 0 || !g_il2cpp_base) { g_farm_idle_reason = 2; return 0; }
+    if (!g_frame_local_valid || !g_frame_vp_valid) {
+        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
+            g_farm_idle_reason = 2;
+            return 0;
+        }
+    }
+    if (!std::isfinite(radius_m)) return 0;
+    if (radius_m < 0.5F) radius_m = 0.5F;
+    if (radius_m > 30.0F) radius_m = 30.0F;
+
+    // Чёрный список и скан реестра крутит тот, кого зовут каждый кадр. Теперь
+    // это мы: контроллер Magic-Farm больше не вызывает esp_farm_get_target().
+    for (auto it = g_farm_blacklist.begin(); it != g_farm_blacklist.end();) {
+        if (--(it->second) <= 0) it = g_farm_blacklist.erase(it);
+        else ++it;
+    }
+    farm_scan_tick();
+
+    // Орудие в руках: дальность (уже с поправкой Melee-TP, мы читаем живые
+    // поля), ритм ударов, умения и живой GKo, который подменяется при ударе.
+    MeleeReach reach{};
+    const bool have_reach = read_local_melee_reach(reach);
+    g_farm_tool_have = (have_reach && reach.purposes_valid) ? reach.tool_purposes : 0;
+    if (have_reach) {
+        info.melee_reach = reach.total;
+        info.tool_purposes = reach.purposes_valid ? reach.tool_purposes : 0;
+        if (reach.time_between_attacks > 0.0F)
+            info.attack_period = reach.time_between_attacks + reach.pause_after_attack;
+        info.ray_data = reach.ray_data;
+        info.primary = reach.ray_primary_wrapper;
+        info.fallback = reach.ray_fallback_wrapper;
+        info.ray_ready = reach.ray_valid && reach.ray_data != 0 &&
+                         (reach.ray_primary_wrapper || reach.ray_fallback_wrapper);
+    }
+
+    // Точка, от которой игра меряет дистанцию удара: ось выстрела, иначе поза
+    // камеры, иначе базис кадра (на части устройств поза не читается вовсе).
+    const bool ok_ref   = g_aim_ref_valid  && farm_cam_source_ok(g_aim_ref_origin);
+    const bool ok_pose  = g_cam_pose_valid && farm_cam_source_ok(g_cam_pos);
+    const bool ok_frame = g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos);
+    if (!ok_ref && !ok_pose && !ok_frame) { g_farm_idle_reason = 5; return 0; }
+    const Vec3& origin = ok_ref ? g_aim_ref_origin : ok_pose ? g_cam_pos : g_frame_cam_pos;
+
+    struct Candidate { FarmEntity* entity; float dist; };
+    std::vector<Candidate> candidates;
+    candidates.reserve(16);
+    int tool_need = 0;
+    for (FarmEntity& entity : g_farm_entities) {
+        if (!(g_farm_mask & (1u << entity.kind))) continue;
+        if (!entity.pos_valid) continue;
+        if (g_farm_blacklist.count(entity.identity)) continue;
+        const float dx = entity.pos.x - g_frame_local_pos.x;
+        const float dy = entity.pos.y - g_frame_local_pos.y;
+        const float dz = entity.pos.z - g_frame_local_pos.z;
+        const float dist = sqrtf(dx * dx + dz * dz);
+        if (!std::isfinite(dist) || dist > radius_m) continue;
+        if (!std::isfinite(dy) || fabsf(dy) > 6.0F) continue;   // другой уровень
+        if (have_reach && reach.purposes_valid && entity.required_purpose != 0 &&
+            (reach.tool_purposes & entity.required_purpose) == 0) {
+            tool_need |= entity.required_purpose;
+            continue;
+        }
+        candidates.push_back({&entity, dist});
+    }
+    info.tool_need = tool_need;
+    g_farm_tool_need = tool_need;
+    if (candidates.empty()) {
+        g_farm_idle_reason = tool_need ? 6 : (g_farm_entities.empty() ? 3 : 4);
+        return 0;
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.dist < b.dist; });
+    if ((int)candidates.size() > max_nodes) candidates.resize((size_t)max_nodes);
+
+    // Старение кеша шаблонов: узел могли добыть и заменить другим объектом по
+    // тому же адресу, поэтому запись живёт ограниченное время без подтверждения.
+    for (auto it = g_farm_templates.begin(); it != g_farm_templates.end();) {
+        if (++(it->second.age) > 3600) it = g_farm_templates.erase(it);
+        else ++it;
+    }
+
+    int probes = kFarmTemplateProbes;
+    int produced = 0;
+    for (const Candidate& candidate : candidates) {
+        FarmEntity& node = *candidate.entity;
+        FarmSwarmNode& slot = out[produced];
+        slot = FarmSwarmNode{};
+        slot.id = node.identity;
+        slot.kind = node.kind;
+        slot.horiz = candidate.dist;
+        slot.tool_ok = true;
+
+        // Крестик узла. Для Magic-Farm он важнее, чем для старого автофарма:
+        // точка попадания пишется в RaycastHit напрямую, никакой геометрии
+        // между нами и ней нет, поэтому попадание всегда идёт ровно в маркер
+        // (у дерева — в конец отрезка MTQ..MTu, у руды — в трансформ маркера).
+        Vec3 spot{};
+        int spot_source = 0, streak = 0;
+        float spot_life = -1.0F;
+        farm_resolve_extension(node);
+        const bool has_spot = farm_read_spot(node, spot, spot_source, streak, spot_life);
+        Vec3 aim = has_spot ? spot : node.pos;
+        if (!has_spot) aim.y += (node.kind == 0) ? 1.15F : 0.15F;
+        slot.at_spot = has_spot;
+        slot.spot_source = spot_source;
+        slot.streak = streak;
+        slot.spot_life = spot_life;
+        slot.x = aim.x; slot.y = aim.y; slot.z = aim.z;
+
+        const float ex = aim.x - origin.x, ey = aim.y - origin.y, ez = aim.z - origin.z;
+        const float d3 = sqrtf(ex * ex + ey * ey + ez * ez);
+        slot.dist = std::isfinite(d3) ? d3 : candidate.dist;
+
+        // Состояние узла: по здоровью видно, доходят ли удары, по остатку —
+        // пора ли переключаться на следующий.
+        float hp = 0.0F, hp_max = 0.0F;
+        if (rd_exact(node.component + MINEABLE_CURRENT_HEALTH, hp) &&
+            std::isfinite(hp) && hp >= 0.0F && hp < 1000000.0F) slot.health = hp;
+        if (rd_exact(node.component + MINEABLE_MAX_HEALTH, hp_max) &&
+            std::isfinite(hp_max) && hp_max > 0.0F && hp_max < 1000000.0F)
+            slot.health_max = hp_max;
+        const float fraction = rd<float>(node.component + MINEABLE_FRACTION);
+        slot.fraction = (std::isfinite(fraction) && fraction >= 0.0F && fraction <= 1.001F)
+                      ? fraction : -1.0F;
+        node.fraction = slot.fraction;
+        int32_t xp = 0;
+        if (rd_exact(node.component + MINEABLE_EXPERIENCE, xp) && xp >= 0 && xp < 1000000)
+            slot.experience = (int)xp;
+
+        // Шаблон попадания: сначала кеш, потом — попытка выучить его из живого
+        // луча игры. Проверку запускаем только для узлов, которых ещё нет в
+        // кеше, и не больше нескольких за кадр.
+        auto cached = g_farm_templates.find(node.identity);
+        if (cached != g_farm_templates.end() &&
+            valid_obj(cached->second.go) && valid_obj(cached->second.collider)) {
+            slot.have_template = true;
+            slot.hit_object = cached->second.go;
+            slot.collider = cached->second.collider;
+        } else if (probes > 0 && have_reach && reach.ray_hit_object &&
+                   reach.ray_hit_go && reach.ray_collider) {
+            --probes;
+            int why = 0;
+            if (ray_hit_is_self_node(reach, node, why)) {
+                FarmHitTemplate tpl;
+                tpl.go = reach.ray_hit_go;
+                tpl.collider = reach.ray_collider;
+                tpl.age = 0;
+                if (g_farm_templates.size() < kFarmTemplateMax)
+                    g_farm_templates[node.identity] = tpl;
+                slot.have_template = true;
+                slot.hit_object = tpl.go;
+                slot.collider = tpl.collider;
+            }
+        }
+        if (slot.have_template) {
+            auto fresh = g_farm_templates.find(node.identity);
+            if (fresh != g_farm_templates.end()) fresh->second.age = 0;
+        }
+
+        if (g_frame_vp_valid) {
+            Vec2 screen{};
+            if (w2s(g_frame_vp, aim, g_frame_sw, g_frame_sh, screen, false) &&
+                std::isfinite(screen.x) && std::isfinite(screen.y) &&
+                screen.x >= -64.0F && screen.x <= g_frame_sw + 64.0F &&
+                screen.y >= -64.0F && screen.y <= g_frame_sh + 64.0F) {
+                slot.on_screen = true;
+                slot.sx = screen.x;
+                slot.sy = screen.y;
+            }
+        }
+        ++produced;
+    }
+    info.templates = (int)g_farm_templates.size();
+    g_farm_idle_reason = produced ? 0 : 4;
+    return produced;
 }

@@ -44,14 +44,28 @@ struct AppState {
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
-    // Автофарм: главный выключатель + какие ресурсы добывать.
+    // Magic-Farm: главный выключатель + какие ресурсы ломать.
     bool  farm_on = false;
     bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
-    // Калибровка зон бота (доли экрана 0..1; -1 = не задано, берём дефолт).
-    // Джойстик движения и кнопка огня/атаки — у всех раскладки разные.
+    bool  farm_barrel = false;      // бочки: такой же MineableObject, ломается ударом
+    // Три части Magic-Farm, каждая отключается отдельно:
+    //   silent — подмена результата рейкаста (удар уходит в узел, куда бы ни
+    //            смотрела камера; точка попадания — живой крестик);
+    //   swing  — авто-удары тапом по кнопке атаки (выкл = чит обслуживает
+    //            удары самого игрока);
+    //   sweep  — «веер»: каждый следующий удар по следующему узлу в радиусе;
+    //   tp     — Melee TP: запись дальности удара и сферы луча.
+    bool  farm_silent = true;
+    bool  farm_swing = true;
+    bool  farm_sweep = false;
+    bool  farm_tp = true;
+    float farm_tp_radius = 3.0f;    // метры: дальность удара и радиус поиска целей
+    // Калибровка кнопки удара (доли экрана 0..1; -1 = дефолт справа по центру).
+    // farm_joy_* остались от тач-бота: Magic-Farm джойстик не трогает, но слот
+    // в .layout заморожен форматом файла (см. RememberLayout).
     float farm_joy_x = -1.f, farm_joy_y = -1.f;
     float farm_fire_x = -1.f, farm_fire_y = -1.f;
-    // Дальность поиска ресурсов, метры.
+    // Дальность скана реестра (метки/поиск узлов), метры.
     float farm_range = 100.f;
     // Иксрей: визуально срезает мир вокруг игрока (0 = выкл), метры.
     bool  xray_on = false;
@@ -101,12 +115,13 @@ struct AppState {
     float a_always_day = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
+    float a_farm_barrel = 0, a_farm_silent = 1, a_farm_swing = 1, a_farm_sweep = 0, a_farm_tp = 1;
     float a_xray_on = 0;
     float a_freecam_on = 0;
     float a_freecam_btn_show = 0;
     float a_fps_90 = 0, a_fps_120 = 0, a_fps_144 = 0, a_fps_rst = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_farm_tp, sl_xray, sl_freecam, sl_freecam_look_radius;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()

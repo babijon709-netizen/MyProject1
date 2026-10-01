@@ -6545,6 +6545,7 @@ bool read_local_melee_reach(MeleeReach& out) {
     out.max_reach = reach;
     out.hit_radius = radius;
     out.total = reach + radius;
+    out.weapon = weapon;
     strncpy(out.tool, s_melee_klass_name, sizeof(out.tool) - 1);
 
     // Длина луча, которым игра ищет точку взаимодействия (префаб
@@ -6553,9 +6554,19 @@ bool read_local_melee_reach(MeleeReach& out) {
     // (FPMelee.On_Draw -> RaycastManager.ZIj), поэтому интересен именно 0x38.
     const uint64_t rm = rd_ptr(weapon + FPOBJECT_RAYCAST_MANAGER);
     if (valid_obj(rm) && rd_ptr(rm + RAYCASTMAN_PLAYER) == local) {
+        out.raycast_manager = rm;
         float ray = 0.0F;
         if (rd_exact(rm + RAYCASTMAN_RAY_LENGTH, ray) && std::isfinite(ray) &&
             ray > 0.0F && ray < 500.0F) out.ray_length = ray;
+        // Те же два поля, но уже «прицельной» ветки: их FPMelee.On_Draw
+        // переписывает своими m_MaxReach/hitRadius, и именно по ним игра
+        // кастует сферу взаимодействия. Melee-TP увеличивает оба, поэтому их
+        // исходные значения нужно знать, чтобы вернуть всё как было.
+        float aim_ray = 0.0F, sphere = 0.0F;
+        if (rd_exact(rm + RAYCASTMAN_AIM_RAY_LENGTH, aim_ray) && std::isfinite(aim_ray) &&
+            aim_ray > 0.0F && aim_ray < 500.0F) out.aim_ray_length = aim_ray;
+        if (rd_exact(rm + RAYCASTMAN_SPHERE_RADIUS, sphere) && std::isfinite(sphere) &&
+            sphere >= 0.0F && sphere < 50.0F) out.sphere_radius = sphere;
     }
 
     // Ритм ударов. В конструкторе FPMelee стоят заглушки (0.85/0.15), настоящие
@@ -6628,7 +6639,39 @@ bool read_local_melee_reach(MeleeReach& out) {
     return true;
 }
 
+// ============================ Magic-Farm: ядро ==============================
+//
+// Magic-Farm состоит из двух независимых записей в память игры. Обе работают
+// по тем же полям, по которым решение принимает сама игра, поэтому урон,
+// кулдауны и выдача ресурсов остаются серверными — подменяется только то, КУДА
+// игра считает попавшим очередной штатный удар и НАСКОЛЬКО далеко он достаёт.
+//
+//  1) Запись попадания (Silent Melee + удары «по крестику»).
+//     FPMelee.ZkX (дизасм 0x6533a20) перед ударом берёт готовый результат
+//     рейкаста: data = handler[GUM_RAYCAST_DATA][GUI_VALUE], при null —
+//     handler[GUM_AIM_RAYCAST][GUI_VALUE]; если data != null и
+//     data.RaycastHit.distance < m_MaxReach + hitRadius, играет On_Hit(data),
+//     иначе On_Woosh. То есть удар полностью описывается содержимым GKo:
+//     GameObject попадания, коллайдер, точка и дистанция. Мы держим в этой
+//     структуре узел, который выбрал контроллер, и точку ровно в живом
+//     крестике (OreHitstreaks.MoW / TreeHitstreaks.MTQ) — игра засчитывает
+//     попадание в серию, хотя камера смотрит в другую сторону.
+//     Пин держится отдельным потоком: игра переписывает обёртку GuI<GKo>
+//     каждым своим кадром рейкаста, и один разовый write просто не доживает
+//     до удара. На отпускании восстанавливаем исходные значения обёрток, но
+//     только если там ещё лежит наш указатель.
+//
+//  2) Melee-TP (искусственная дальность удара).
+//     Те же самые поля, по которым игра меряет дистанцию: FPMelee.m_MaxReach и
+//     hitRadius, плюс геометрия луча взаимодействия RaycastManager —
+//     m_RayLength, m_AimRayLength и m_SphereCastRadius. Увеличенный радиус
+//     сферы означает, что собственный рейкаст игры начинает цеплять узлы,
+//     мимо которых игрок просто идёт: шаблон попадания (GameObject и коллайдер
+//     конкретного дерева/руды/бочки) прилетает сам, без наведения. Исходные
+//     значения запоминаются при первом применении к каждому орудию и
+//     возвращаются при выключении — префаб игры мы не портим.
 namespace {
+
 struct MagicHitPin {
     uint64_t data = 0, go = 0, collider = 0;
     uint64_t primary = 0, fallback = 0;
@@ -6640,11 +6683,52 @@ struct MagicHitPin {
 std::mutex g_magic_pin_mutex;
 MagicHitPin g_magic_pin;
 std::atomic<bool> g_magic_pin_active{false};
+// Восстановление обёрток делает тот же поток, что и запись: иначе отпускание
+// пина пришлось бы ждать прямо в кадре отрисовки (несколько миллисекунд на
+// каждый удар — заметный рывок на 120 fps).
+std::atomic<bool> g_magic_pin_restore{false};
+std::atomic<unsigned long long> g_magic_pin_writes{0};
 std::once_flag g_magic_pin_once;
+
+void magic_write_pin(const MagicHitPin& pin) {
+    // Pin both wrapper selection and the GKo payload. The game may replace
+    // GuI<GKo>.Value with a fresh object after updating its ray, so writing
+    // only the old GKo cannot redirect the attack that FPMelee actually reads.
+    if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
+    if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
+    esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
+    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
+                     &pin.point, sizeof(pin.point));
+    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
+                     &pin.distance, sizeof(pin.distance));
+    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
+                     &pin.collider, sizeof(pin.collider));
+    g_magic_pin_writes.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Вернуть обёрткам их собственные значения — но только если там ещё лежит наш
+// указатель: иначе игра уже опубликовала свежий рейкаст, и перезапись старым
+// объектом сломала бы ей взаимодействие.
+void magic_restore_wrappers(const MagicHitPin& pin) {
+    auto restore = [&](uint64_t wrapper, uint64_t original) {
+        if (!wrapper || !original) return;
+        uint64_t current = 0;
+        if (g_mem.read_quiet(wrapper + GUI_VALUE, &current, sizeof(current)) &&
+            memio::untag(current) == pin.data)
+            g_mem.write(wrapper + GUI_VALUE, &original, sizeof(original));
+    };
+    restore(pin.primary, pin.original_primary);
+    restore(pin.fallback, pin.original_fallback);
+}
 
 void magic_pin_worker() {
     for (;;) {
         if (!g_magic_pin_active.load(std::memory_order_acquire)) {
+            if (g_magic_pin_restore.exchange(false, std::memory_order_acq_rel)) {
+                MagicHitPin old;
+                { std::lock_guard<std::mutex> lock(g_magic_pin_mutex); old = g_magic_pin; }
+                magic_restore_wrappers(old);
+            }
             usleep(2000);
             continue;
         }
@@ -6657,60 +6741,96 @@ void magic_pin_worker() {
             g_magic_pin_active.store(false, std::memory_order_release);
             continue;
         }
-        // Pin both wrapper selection and the GKo payload. The game may replace
-        // GuI<GKo>.Value with a fresh object after updating its ray, so writing
-        // only the old GKo cannot redirect the attack that FPMelee actually reads.
-        if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
-        if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
-        esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
-                         &pin.point, sizeof(pin.point));
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
-                         &pin.distance, sizeof(pin.distance));
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
-                         &pin.collider, sizeof(pin.collider));
+        magic_write_pin(pin);
         usleep(1000);
     }
 }
+
+// ---- Melee-TP --------------------------------------------------------------
+struct MeleeTpPin {
+    uint64_t weapon = 0, rm = 0;
+    float reach = 0.f, hit_radius = 0.f;        // что пишем в FPMelee
+    float ray_len = 0.f, aim_len = 0.f, sphere = 0.f;  // что пишем в RaycastManager
+    float org_reach = 0.f, org_hit_radius = 0.f;
+    float org_ray_len = 0.f, org_aim_len = 0.f, org_sphere = 0.f;
+    bool  have_org = false;
+    int   pid = 0;
+};
+std::mutex g_tp_mutex;
+MeleeTpPin g_tp_pin;
+std::atomic<bool> g_tp_active{false};
+std::once_flag g_tp_once;
+
+void melee_tp_write(const MeleeTpPin& pin, bool original) {
+    const float reach  = original ? pin.org_reach : pin.reach;
+    const float radius = original ? pin.org_hit_radius : pin.hit_radius;
+    if (pin.weapon) {
+        esp_silent_write(pin.weapon + FPMELEE_MAX_REACH, &reach, sizeof(reach));
+        esp_silent_write(pin.weapon + FPMELEE_HIT_RADIUS, &radius, sizeof(radius));
+    }
+    if (pin.rm) {
+        const float ray_len = original ? pin.org_ray_len : pin.ray_len;
+        const float aim_len = original ? pin.org_aim_len : pin.aim_len;
+        const float sphere  = original ? pin.org_sphere : pin.sphere;
+        if (ray_len > 0.f) esp_silent_write(pin.rm + RAYCASTMAN_RAY_LENGTH, &ray_len, sizeof(ray_len));
+        if (aim_len > 0.f) esp_silent_write(pin.rm + RAYCASTMAN_AIM_RAY_LENGTH, &aim_len, sizeof(aim_len));
+        if (sphere >= 0.f) esp_silent_write(pin.rm + RAYCASTMAN_SPHERE_RADIUS, &sphere, sizeof(sphere));
+    }
+}
+
+void melee_tp_worker() {
+    for (;;) {
+        if (!g_tp_active.load(std::memory_order_acquire)) {
+            usleep(4000);
+            continue;
+        }
+        MeleeTpPin pin;
+        {
+            std::lock_guard<std::mutex> lock(g_tp_mutex);
+            pin = g_tp_pin;
+        }
+        if (!pin.pid || !pin.weapon || !esp_silent_target(pin.pid)) {
+            g_tp_active.store(false, std::memory_order_release);
+            continue;
+        }
+        // Игра возвращает свои значения при каждом доставании орудия
+        // (FPMelee.On_Draw -> RaycastManager.ZIj), поэтому пишем постоянно, а
+        // не один раз на включение.
+        melee_tp_write(pin, false);
+        usleep(8000);
+    }
+}
+
 } // namespace
 
-bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
-    if (!enabled) {
-        if (!g_magic_pin_active.exchange(false, std::memory_order_acq_rel)) return true;
-        // Let an iteration that already copied the payload finish before restore.
-        usleep(3000);
-        MagicHitPin old;
-        { std::lock_guard<std::mutex> lock(g_magic_pin_mutex); old = g_magic_pin; }
-        // Restore wrapper values only while they still contain our pointer;
-        // otherwise the game has already published newer legitimate data.
-        auto restore_wrapper = [&](uint64_t wrapper, uint64_t original) {
-            if (!wrapper) return;
-            uint64_t current = 0;
-            if (g_mem.read_quiet(wrapper + GUI_VALUE, &current, sizeof(current)) &&
-                memio::untag(current) == old.data)
-                g_mem.write(wrapper + GUI_VALUE, &original, sizeof(original));
-        };
-        restore_wrapper(old.primary, old.original_primary);
-        restore_wrapper(old.fallback, old.original_fallback);
-        return true;
-    }
+bool esp_magic_hit_pin(const MagicHit& hit) {
     MagicHitPin pin;
-    pin.data = memio::untag((uint64_t)target.magic_ray_data);
-    pin.go = memio::untag((uint64_t)target.magic_hit_go);
-    pin.collider = memio::untag((uint64_t)target.magic_collider);
-    pin.primary = memio::untag((uint64_t)target.magic_primary_wrapper);
-    pin.fallback = memio::untag((uint64_t)target.magic_fallback_wrapper);
-    if (pin.primary) pin.original_primary = rd_ptr(pin.primary + GUI_VALUE);
-    if (pin.fallback) pin.original_fallback = rd_ptr(pin.fallback + GUI_VALUE);
-    pin.point = {target.aim_x, target.aim_y, target.aim_z};
-    pin.distance = target.aim_3d;
+    pin.data = memio::untag((uint64_t)hit.ray_data);
+    pin.go = memio::untag((uint64_t)hit.hit_object);
+    pin.collider = memio::untag((uint64_t)hit.collider);
+    pin.primary = memio::untag((uint64_t)hit.primary);
+    pin.fallback = memio::untag((uint64_t)hit.fallback);
+    pin.point = {hit.x, hit.y, hit.z};
+    pin.distance = hit.distance;
     pin.pid = g_pid;
     if (!valid_obj(pin.data) || !valid_obj(pin.go) || !valid_obj(pin.collider) ||
         !vec3_is_finite(pin.point) || !position_looks_like_world_space(pin.point)) return false;
-    if (!std::isfinite(pin.distance) || pin.distance <= 0.f || pin.distance >= target.melee_reach)
-        pin.distance = fmaxf(0.05F, target.melee_reach * 0.5F);
+    if (!std::isfinite(pin.distance) || pin.distance <= 0.f) pin.distance = 0.25f;
+    // Исходные значения обёрток запоминаем ОДИН раз на серию: повторный
+    // esp_magic_hit_pin на следующем кадре уже видел бы там наш собственный
+    // GKo, и восстанавливать стало бы нечего.
     {
         std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
+        const bool same_series = g_magic_pin_active.load(std::memory_order_acquire) &&
+                                 g_magic_pin.primary == pin.primary &&
+                                 g_magic_pin.fallback == pin.fallback;
+        if (same_series) {
+            pin.original_primary = g_magic_pin.original_primary;
+            pin.original_fallback = g_magic_pin.original_fallback;
+        } else {
+            if (pin.primary) pin.original_primary = rd_ptr(pin.primary + GUI_VALUE);
+            if (pin.fallback) pin.original_fallback = rd_ptr(pin.fallback + GUI_VALUE);
+        }
         g_magic_pin = pin;
     }
     std::call_once(g_magic_pin_once, [] {
@@ -6718,16 +6838,98 @@ bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
     });
     g_magic_pin_active.store(true, std::memory_order_release);
     // Do not wait for the worker's first cycle.
-    if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
-    if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
-    esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
-                     &pin.point, sizeof(pin.point));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
-                     &pin.distance, sizeof(pin.distance));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
-                     &pin.collider, sizeof(pin.collider));
+    magic_write_pin(pin);
     return true;
+}
+
+void esp_magic_hit_release() {
+    if (!g_magic_pin_active.exchange(false, std::memory_order_acq_rel)) return;
+    // Саму запись возвращает поток пина: он гарантированно не держит в этот
+    // момент незаконченный проход, и кадр отрисовки его не ждёт. Контроллер
+    // отпускает пин после каждого удара, так что цена важна.
+    g_magic_pin_restore.store(true, std::memory_order_release);
+}
+
+unsigned long long esp_magic_hit_writes() {
+    return g_magic_pin_writes.load(std::memory_order_relaxed);
+}
+
+bool esp_melee_tp_update(bool enabled, float reach_m, float sphere_m) {
+    if (!enabled) {
+        if (!g_tp_active.exchange(false, std::memory_order_acq_rel)) return true;
+        usleep(10000);   // дать писателю закончить текущий проход
+        MeleeTpPin old;
+        { std::lock_guard<std::mutex> lock(g_tp_mutex); old = g_tp_pin; }
+        if (old.have_org) melee_tp_write(old, true);
+        { std::lock_guard<std::mutex> lock(g_tp_mutex); g_tp_pin = MeleeTpPin{}; }
+        return true;
+    }
+    if (!std::isfinite(reach_m) || !std::isfinite(sphere_m)) return false;
+    // Потолки — не вкусовщина: дальность удара уходит в серверную проверку
+    // попадания, а радиус сферы начинает цеплять геометрию за спиной игрока.
+    if (reach_m < 0.5f) reach_m = 0.5f;
+    if (reach_m > 12.0f) reach_m = 12.0f;
+    if (sphere_m < 0.05f) sphere_m = 0.05f;
+    if (sphere_m > 4.0f) sphere_m = 4.0f;
+
+    MeleeReach live{};
+    if (!read_local_melee_reach(live) || !live.weapon) {
+        // Орудия в руках нет (или оно не ближнего боя) — писать некуда. Пин не
+        // сбрасываем: игрок переключит инструмент, и запись возобновится.
+        g_tp_active.store(false, std::memory_order_release);
+        return false;
+    }
+
+    MeleeTpPin pin;
+    {
+        std::lock_guard<std::mutex> lock(g_tp_mutex);
+        pin = g_tp_pin;
+    }
+    const bool fresh_weapon = (pin.weapon != live.weapon) || !pin.have_org;
+    if (fresh_weapon) {
+        // Орудие сменилось: то, что сейчас лежит в полях, — значения самой
+        // игры (к этому экземпляру мы ещё не писали). Если старое орудие было
+        // нашим, вернём ему исходные числа, прежде чем забыть о нём.
+        if (pin.have_org && pin.weapon && pin.weapon != live.weapon) melee_tp_write(pin, true);
+        pin = MeleeTpPin{};
+        pin.weapon = live.weapon;
+        pin.rm = live.raycast_manager;
+        pin.org_reach = live.max_reach;
+        pin.org_hit_radius = live.hit_radius;
+        pin.org_ray_len = live.ray_length;
+        pin.org_aim_len = live.aim_ray_length;
+        pin.org_sphere = live.sphere_radius;
+        pin.have_org = true;
+    }
+    pin.rm = live.raycast_manager ? live.raycast_manager : pin.rm;
+    pin.pid = g_pid;
+    // m_MaxReach + hitRadius — ровно тот порог, с которым FPMelee сравнивает
+    // дистанцию попадания, поэтому запрошенный радиус кладём в сумму.
+    pin.hit_radius = sphere_m;
+    pin.reach = (reach_m > sphere_m) ? (reach_m - sphere_m) : 0.1f;
+    // Луч взаимодействия должен доставать дальше удара, иначе собственный
+    // рейкаст игры не доносит до узла ни GameObject, ни коллайдер.
+    pin.ray_len = reach_m + 0.5f;
+    pin.aim_len = reach_m + 0.5f;
+    pin.sphere = sphere_m;
+    {
+        std::lock_guard<std::mutex> lock(g_tp_mutex);
+        g_tp_pin = pin;
+    }
+    std::call_once(g_tp_once, [] {
+        std::thread(melee_tp_worker).detach();
+    });
+    g_tp_active.store(true, std::memory_order_release);
+    melee_tp_write(pin, false);
+    return true;
+}
+
+void esp_melee_tp_status(float& reach, float& sphere, bool& active) {
+    MeleeTpPin pin;
+    { std::lock_guard<std::mutex> lock(g_tp_mutex); pin = g_tp_pin; }
+    active = g_tp_active.load(std::memory_order_acquire) && pin.weapon != 0;
+    reach = active ? (pin.reach + pin.hit_radius) : 0.f;
+    sphere = active ? pin.sphere : 0.f;
 }
 
 float esp_camera_fov_deg() { return g_cam_fov_deg; }

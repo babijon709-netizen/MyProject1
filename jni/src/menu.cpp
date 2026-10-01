@@ -198,11 +198,11 @@ float TabContent(int tab, float dt, float cW) {
 
         // ---- Тач-зона аима -------------------------------------------------
         // Где именно лежит палец, которым аимбот водит камеру. Выбирается
-        // тапом по экрану — как зоны автофарма, только точка одна: меню
-        // прячется, первый тап записывает её в долях экрана. В режимах записи
-        // в память пальца нет вовсе, поэтому секции здесь нет.
+        // тапом по экрану — как кнопка удара Magic-Farm: меню прячется, первый
+        // тап записывает точку в долях экрана. В режимах записи в память
+        // пальца нет вовсе, поэтому секции здесь нет.
         if (g_state.aim_mode == AIM_MODE_TOUCH) {
-            SHdr(XS("Зоны бота"));
+            SHdr(XS("Тач-зона"));
             {
                 const float rowH = Layout::RowH;
                 const float inset = Layout::Inset, padX = Layout::PadX;
@@ -881,7 +881,7 @@ float TabContent(int tab, float dt, float cW) {
         // Разное: каждая крупная функция — своя карточка-«вкладка»,
         // открывающая отдельное окно (как «Ещё настройки» в ESP).
         SHdr(XS("Функции"));
-        CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
+        CollapsibleHeader("##fnfarm", XS("Magic-Farm"), 5);
         CardBg(Layout::RowH * 2);
         ColorRow("##fsp", XS("Метка фарма"), &cfg::esp::farm_spot_col, false);
         ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
@@ -1765,6 +1765,11 @@ void RenderMenu() {
     Tick(g_state.a_farm_stone,  g_state.farm_stone,  dt);
     Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
+    Tick(g_state.a_farm_barrel, g_state.farm_barrel, dt);
+    Tick(g_state.a_farm_silent, g_state.farm_silent, dt);
+    Tick(g_state.a_farm_swing,  g_state.farm_swing,  dt);
+    Tick(g_state.a_farm_sweep,  g_state.farm_sweep,  dt);
+    Tick(g_state.a_farm_tp,     g_state.farm_tp,     dt);
     Tick(g_state.a_custom_fov, g_state.viewmodel.fov_enabled, dt);
     Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
@@ -1796,8 +1801,9 @@ void RenderMenu() {
 
     // ---- Режим калибровки зон вводом с экрана ------------------------------
     // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):
-    // зону джойстика/огня автофарма, точку, из которой аимбот водит палец,
-    // центр джойстика фрикама (4) или счётчика игроков (5).
+    // кнопку удара Magic-Farm (2), точку, из которой аимбот водит палец,
+    // центр джойстика фрикама (4) или счётчика игроков (5). Режим 1 (джойстик
+    // движения) ушёл вместе с тач-ботом: Magic-Farm никуда не ходит сам.
     if (g_calibMode != 0) {
         float dw = 0.f, dh = 0.f;
         VisibleScreen(dw, dh);
@@ -1810,9 +1816,8 @@ void RenderMenu() {
 
         // Подпись, что тапать.
         auto* fn = ImGui::GetFont();
-        const char* title = (g_calibMode == 1)
-            ? XS("Тапни по центру джойстика движения")
-            : (g_calibMode == 2) ? XS("Тапни по кнопке огня / атаки")
+        const char* title = (g_calibMode == 2)
+            ? XS("Тапни по кнопке удара / атаки")
             : (g_calibMode == 4) ? XS("Тапни куда поставить джойстик фрикама")
             : (g_calibMode == 5) ? XS("Тапни куда поставить счётчик игроков")
             : (g_calibMode == 6) ? XS("Тапни куда поставить кнопку фрикама")
@@ -1834,7 +1839,6 @@ void RenderMenu() {
         // Пульсирующий маркер текущей сохранённой точки (если есть).
         {
             float zx = -1.f, zy = -1.f;
-            if (g_calibMode == 1 && g_state.farm_joy_x >= 0.f) { zx = g_state.farm_joy_x * dw; zy = g_state.farm_joy_y * dh; }
             if (g_calibMode == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
             if (g_calibMode == 4) {
                 if (g_state.freecam_joy_x >= 0.f) { zx = g_state.freecam_joy_x * dw; zy = g_state.freecam_joy_y * dh; }
@@ -1913,17 +1917,14 @@ void RenderMenu() {
         if (io.MouseReleased[0]) {
             float rx = io.MousePos.x / dw, ry = io.MousePos.y / dh;
             if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
-                const bool farm = (g_calibMode == 1 || g_calibMode == 2);
+                const bool farm = (g_calibMode == 2);
                 const bool hud  = (g_calibMode == 5);
                 const bool fcb  = (g_calibMode == 6);
                 const bool fcj  = (g_calibMode == 4);
                 const bool fcl  = (g_calibMode == 7);
-                if (g_calibMode == 1) {
-                    g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
-                    ShowToast(XS("Зона джойстика сохранена"));
-                } else if (g_calibMode == 2) {
+                if (g_calibMode == 2) {
                     g_state.farm_fire_x = rx; g_state.farm_fire_y = ry;
-                    ShowToast(XS("Зона огня сохранена"));
+                    ShowToast(XS("Кнопка удара сохранена"));
                 } else if (g_calibMode == 4) {
                     g_state.freecam_joy_x = rx; g_state.freecam_joy_y = ry;
                     ShowToast(XS("Джойстик фрикама сохранён"));
@@ -1950,10 +1951,10 @@ void RenderMenu() {
                 RememberLayout();
                 g_calibMode = 0;
                 menu_open = true;
-                // Вернуться туда, откуда калибровку запускали: зоны автофарма —
-                // в окно автофарма, точка аима — на вкладку «Аим», счётчик —
+                // Вернуться туда, откуда калибровку запускали: кнопка удара —
+                // в окно Magic-Farm, точка аима — на вкладку «Аим», счётчик —
                 // на вкладку «Опции», джойстик и кнопка фрикама — в «Разное».
-                if (farm)            PopoverOpen(XS("Автофарм"), 5);
+                if (farm)            PopoverOpen(XS("Magic-Farm"), 5);
                 else if (hud)        g_state.cur_tab = 5;
                 else if (fcb || fcj || fcl) g_state.cur_tab = 3;
                 else                 g_state.cur_tab = 1;
@@ -2581,8 +2582,8 @@ void RenderMenu() {
 }
 
 
-// Калибровка зон вводом с экрана: 0 — нет, 1 — ждём тап по джойстику
-// автофарма, 2 — по кнопке огня, 3 — по точке, из которой аимбот водит палец,
+// Калибровка зон вводом с экрана: 0 — нет, 2 — ждём тап по кнопке удара
+// Magic-Farm, 3 — по точке, из которой аимбот водит палец,
 // 4 — по центру джойстика фрикама, 5 — куда поставить счётчик игроков,
 // 6 — куда поставить кнопку фрикама. Пока калибровка активна, меню скрыто
 // и первый тап по экрану пишет позицию (в долях экрана) в g_state.

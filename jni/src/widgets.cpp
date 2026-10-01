@@ -776,39 +776,52 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgSliderRow(XS("Толщина"),   &g_state.esp_thick, 0.5f, 5.f,   "%.1f",     true, g_state.sl_esp_thick);
 
     } else if (secId == 5) {
-        // Автофарм: всё управление ботом в одном окне.
+        // Magic-Farm: всё управление в одном окне.
         // (secId 4 занят палитрой цветов — там скролл выключен.)
-        FgSHdr(XS("Автофарм"));
+        FgSHdr(XS("Magic-Farm"));
         FgCardBg(rH * 1);
-        FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true);
+        FgToggleRow(XS("Magic-Farm"), &g_state.farm_on, g_state.a_farm_on, true);
 
-        FgSHdr(XS("Что добывать"));
-        FgCardBg(rH * 4);
+        FgSHdr(XS("Что ломать"));
+        FgCardBg(rH * 5);
         FgToggleRow(XS("Дерево"), &g_state.farm_wood,   g_state.a_farm_wood,   false);
         FgToggleRow(XS("Камень"), &g_state.farm_stone,  g_state.a_farm_stone,  false);
         FgToggleRow(XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
-        FgToggleRow(XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
+        FgToggleRow(XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, false);
+        FgToggleRow(XS("Бочки"),  &g_state.farm_barrel, g_state.a_farm_barrel, true);
+
+        // Три части чита. Silent Melee — подмена результата рейкаста игры:
+        // удар уходит в узел и в его крестик, куда бы ни смотрела камера.
+        // Melee TP — запись дальности удара и сферы луча: ресурсы ломаются
+        // просто вокруг игрока. Авто-удары — единственный синтетический ввод.
+        FgSHdr(XS("Как бить"));
+        FgCardBg(rH * 4);
+        FgToggleRow(XS("Silent Melee"), &g_state.farm_silent, g_state.a_farm_silent, false);
+        FgToggleRow(XS("Melee TP"),     &g_state.farm_tp,     g_state.a_farm_tp,     false);
+        FgToggleRow(XS("Авто-удары"),   &g_state.farm_swing,  g_state.a_farm_swing,  false);
+        FgToggleRow(XS("Веер по кругу"),&g_state.farm_sweep,  g_state.a_farm_sweep,  true);
 
         FgSHdr(XS("Дальность"));
-        FgCardBg(Layout::SliderH);
+        FgCardBg(Layout::SliderH * 2);
+        FgSliderRow(XS("Радиус TP"), &g_state.farm_tp_radius, 0.5f, 12.f,
+                    XS("%.1f м"), false, g_state.sl_farm_tp);
         FgSliderRow(XS("Искать до"), &g_state.farm_range, 10.f, 300.f,
                     XS("%.0f м"), true, g_state.sl_farm_range);
 
-        // Зоны бота: куда жать джойстик движения и кнопку огня.
-        FgSHdr(XS("Зоны бота"));
+        // Кнопка удара: куда тапать, когда включены авто-удары.
+        FgSHdr(XS("Кнопка удара"));
         {
             struct ZoneRow {
                 const char* lbl;
                 int   calib;         // g_calibMode для этой зоны
                 float zx, zy;        // сохранённые доли экрана (-1 = нет)
             };
-            const ZoneRow zrows[2] = {
-                {XS("Зона джойстика"), 1, g_state.farm_joy_x,  g_state.farm_joy_y},
-                {XS("Зона огня"),      2, g_state.farm_fire_x, g_state.farm_fire_y},
+            const ZoneRow zrows[1] = {
+                {XS("Кнопка атаки"), 2, g_state.farm_fire_x, g_state.farm_fire_y},
             };
 
-            FgCardBg(rH * 2);
-            for (int zi = 0; zi < 2; ++zi) {
+            FgCardBg(rH * 1);
+            for (int zi = 0; zi < 1; ++zi) {
                 const ZoneRow& z = zrows[zi];
 
                 if (!blocked && !g_scrollPop.dragging && mouseReleased
@@ -837,15 +850,11 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                 if (set)
                     fg->AddCircleFilled({stx - 16.f, cy2}, 5.f, C::UA(C::Acc(), alpha), 16);
 
-                if (zi == 0 && g_state.ui_show_sep)
-                    fg->AddLine({cX + inset + padX, curY + rH - 0.5f},
-                                {cX + cW - inset - padX, curY + rH - 0.5f},
-                                C::UA(C::Sep(), alpha), 0.8f);
                 curY += rH;
             }
 
-            // Сброс зон к дефолту (если наставил мимо).
-            if (g_state.farm_joy_x >= 0.f || g_state.farm_fire_x >= 0.f) {
+            // Сброс к дефолту (если наставил мимо).
+            if (g_state.farm_fire_x >= 0.f) {
                 curY += 8.f;
                 FgCardBg(rH * 1);
                 if (!blocked && !g_scrollPop.dragging && mouseReleased
@@ -853,10 +862,9 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                     && mousePos.y >= curY && mousePos.y <= curY + rH
                     && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
                     && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
-                    g_state.farm_joy_x = g_state.farm_joy_y = -1.f;
                     g_state.farm_fire_x = g_state.farm_fire_y = -1.f;
                     RememberLayout();
-                    ShowToast(XS("Зоны сброшены"));
+                    ShowToast(XS("Кнопка сброшена"));
                     PlaySound(SND_CLICK);
                 }
                 const char* rt = XS("Сброс");

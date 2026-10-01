@@ -396,13 +396,14 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         }
     }
     // Magic-Farm keeps the verified normal hit path (and therefore server-side
-    // harvesting/cooldowns), but hides every non-ADS first-person tool pose
-    // while mining. To the player only the crosshair and hit-streak marker are
-    // visible; there is no local swing animation. Walking and aiming remain the
-    // existing touch controller, and the user's own hands setting is restored
-    // immediately outside the mining phase.
+    // harvesting/cooldowns), but hides the first-person tool pose while it is
+    // working a node: the hits are redirected in memory, so the local swing
+    // animation would be the only thing betraying them. Условие по фазе, а не
+    // по самому тапу (phase 3 длится ~85 мс из каждого такта) — иначе руки
+    // мигали бы с частотой ударов. Вне радиуса узлов и с выключенным Silent
+    // Melee настройка рук сразу возвращается пользовательской.
     ViewmodelSettings visible_settings = settings;
-    if (g_farmActive && !g_farmPaused && g_farmPhase == 3) {
+    if (g_farmActive && !g_farmPaused && g_farmPhase >= 2 && g_state.farm_silent) {
         visible_settings.hands_enabled = true;
         visible_settings.x = 0.f;
         visible_settings.y = -50.f;
