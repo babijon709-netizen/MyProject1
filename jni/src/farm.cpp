@@ -803,7 +803,11 @@ static void UpdateFarmInner(float dt) {
         // GKo FPMelee.ZkX не может засчитать удар и играет один On_Woosh —
         // ровно те «удары в воздух», которые видно со стороны. Ждём не вечно
         // (kNoRaySwingAfter), а стик всё это время поджимает ближе к стволу.
-        const bool swingBlocked = tgt.ray_blocked || (noRay && s_noRayTime < kNoRaySwingAfter);
+        // Never attack arbitrary geometry. The live collider/GameObject must
+        // be proven to belong to the selected resource; distance alone is not
+        // evidence (walls inside melee reach caused endless building hits).
+        const bool swingBlocked = !tgt.ray_self || tgt.ray_blocked ||
+                                  (noRay && s_noRayTime < kNoRaySwingAfter);
         s_tapTimer -= (int)roundf(dt * 1000.f);
         if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
             s_tapTimer = 0;              // ждём камеру/обход, не теряя такт
