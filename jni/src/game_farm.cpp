@@ -922,24 +922,21 @@ bool esp_farm_get_target(FarmTarget& out) {
     const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
     const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
 
-    // Прицел по корпусу зажимаем в полосу вокруг ГЛАЗА игрока — единственной
-    // высоты, которая надёжна на всех префабах (пивот камня бывает на макушке,
-    // у дерева — в центре ствола).
-    if (!at_spot) {
-        if (best->kind == 0) {
-            // Дерево: грудь — чуть ниже глаза до уровня глаза.
-            const float lo = origin.y - 0.9F, hi = origin.y + 0.1F;
-            if (aim.y < lo) aim.y = lo;
-            if (aim.y > hi) aim.y = hi;
-        } else {
-            // Руда: от колена до пояса, заметно ниже глаза.
-            const float lo = origin.y - 1.3F, hi = origin.y - 0.55F;
-            if (aim.y < lo) aim.y = lo;
-            if (aim.y > hi) aim.y = hi;
-        }
+    // Camera acquisition is always on the stable resource body, never on the
+    // moving bonus cross. The cross remains `aim` only for redirected hits.
+    Vec3 look = best->pos;
+    look.y += (best->kind == 0) ? 1.15F : 0.15F;
+    if (best->kind == 0) {
+        const float lo = origin.y - 0.9F, hi = origin.y + 0.1F;
+        if (look.y < lo) look.y = lo;
+        if (look.y > hi) look.y = hi;
+    } else {
+        const float lo = origin.y - 1.3F, hi = origin.y - 0.55F;
+        if (look.y < lo) look.y = lo;
+        if (look.y > hi) look.y = hi;
     }
 
-    const Vec3 d = {aim.x - origin.x, aim.y - origin.y, aim.z - origin.z};
+    const Vec3 d = {look.x - origin.x, look.y - origin.y, look.z - origin.z};
     const float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
     const float rx = d.x * right.x + d.y * right.y + d.z * right.z;
     const float ux = d.x * up.x + d.y * up.y + d.z * up.z;
@@ -1045,30 +1042,7 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (out.ray_blocked) {
             out.ray_self = ray_hit_is_self_node(reach, node, out.ray_self_why);
             if (out.ray_self) out.ray_blocked = false;
-            // Страховка для руды, по которой ещё не было ни одного удара.
-            // Крестика нет (spot 0) — значит, прицел стоит в ПИВОТЕ камня, то
-            // есть внутри породы, а луч игры останавливается на её поверхности
-            // заметно раньше. Проверки выше к такому лучу применимы только
-            // после первого удара (коллайдер крестика заполняется в gir, а
-            // поддерево узла может быть устроено иначе, чем представляется по
-            // дампу), поэтому здесь работает признак, который даёт сама игра:
-            // FPMelee.ZkX сравнивает с m_MaxReach + hitRadius дистанцию ЭТОГО
-            // луча, и если он остановился в пределах дальности удара, удар
-            // засчитается — по камню, в который мы и целимся вдоль оси прицела.
-            // Такой узел надо бить, а не обходить: обход на 2 с водит камеру,
-            // узел остаётся нетронутым и после четырёх обходов уходит в чёрный
-            // список (ровно это и видно в логе 15.09.2026 по руде: 0 тапов).
-            // Дерево сюда не попадает (kind == 0): у него прицел ставится на
-            // кору, и «луч раньше точки прицела» там означает честное
-            // перекрытие. От «бьём в чужой камень» страхует watchdog: ударов
-            // нет прогресса — узел уйдёт в чёрный список.
-            if (!out.ray_self && out.ray_blocked && node.kind != 0 && !at_spot &&
-                out.melee_reach > 0.2F && reach.ray_distance > 0.0F &&
-                reach.ray_distance <= out.melee_reach) {
-                out.ray_self = true;
-                out.ray_self_why = 4;
-                out.ray_blocked = false;
-            }
+            // Distance alone never proves ownership: nearby buildings are also inside reach.
             // Якорь точки удара (MineableObject.LXX) — замер для лога: если его
             // мировая позиция совпадает с точкой попадания луча, это готовая
             // точка прицела на поверхности камня ещё до первого удара.

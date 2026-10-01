@@ -6627,26 +6627,81 @@ bool read_local_melee_reach(MeleeReach& out) {
     return true;
 }
 
+namespace {
+struct MagicHitPin {
+    uint64_t data = 0, go = 0, collider = 0;
+    Vec3 point{};
+    float distance = 0.f;
+    int pid = 0;
+};
+std::mutex g_magic_pin_mutex;
+MagicHitPin g_magic_pin;
+std::atomic<bool> g_magic_pin_active{false};
+std::once_flag g_magic_pin_once;
+
+void magic_pin_worker() {
+    for (;;) {
+        if (!g_magic_pin_active.load(std::memory_order_acquire)) {
+            usleep(2000);
+            continue;
+        }
+        MagicHitPin pin;
+        {
+            std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
+            pin = g_magic_pin;
+        }
+        if (!pin.pid || !esp_silent_target(pin.pid)) {
+            g_magic_pin_active.store(false, std::memory_order_release);
+            continue;
+        }
+        // RaycastManager refreshes GKo between the overlay tick and attack
+        // handling. Keep the validated record pinned only during the short
+        // synthetic fire press, using the selected memory transport.
+        esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
+        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
+                         &pin.point, sizeof(pin.point));
+        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
+                         &pin.distance, sizeof(pin.distance));
+        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
+                         &pin.collider, sizeof(pin.collider));
+        usleep(1000);
+    }
+}
+} // namespace
+
 bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
-    // The game refreshes GKo from its own raycaster every frame. We only touch
-    // the already validated live record immediately before the normal attack;
-    // no executable code, cooldown, damage or network method is patched.
-    if (!enabled) return true;
-    const uint64_t data = memio::untag((uint64_t)target.magic_ray_data);
-    const uint64_t go = memio::untag((uint64_t)target.magic_hit_go);
-    const uint64_t collider = memio::untag((uint64_t)target.magic_collider);
-    if (!valid_obj(data) || !valid_obj(go) || !valid_obj(collider)) return false;
-    const Vec3 point{target.aim_x, target.aim_y, target.aim_z};
-    if (!vec3_is_finite(point) || !position_looks_like_world_space(point)) return false;
-    float distance = target.aim_3d;
-    if (!std::isfinite(distance) || distance <= 0.0F || distance >= target.melee_reach)
-        distance = fmaxf(0.05F, target.melee_reach * 0.5F);
-    const uint64_t hit = data + GKO_RAYCAST_HIT;
-    const bool ok = wr_buf(data + GKO_HIT_OBJECT, &go, sizeof(go)) &&
-                    wr_buf(hit + RAYCASTHIT_POINT, &point, sizeof(point)) &&
-                    wr_buf(hit + RAYCASTHIT_DISTANCE, &distance, sizeof(distance)) &&
-                    wr_buf(hit + RAYCASTHIT_COLLIDER, &collider, sizeof(collider));
-    return ok;
+    if (!enabled) {
+        g_magic_pin_active.store(false, std::memory_order_release);
+        return true;
+    }
+    MagicHitPin pin;
+    pin.data = memio::untag((uint64_t)target.magic_ray_data);
+    pin.go = memio::untag((uint64_t)target.magic_hit_go);
+    pin.collider = memio::untag((uint64_t)target.magic_collider);
+    pin.point = {target.aim_x, target.aim_y, target.aim_z};
+    pin.distance = target.aim_3d;
+    pin.pid = g_pid;
+    if (!valid_obj(pin.data) || !valid_obj(pin.go) || !valid_obj(pin.collider) ||
+        !vec3_is_finite(pin.point) || !position_looks_like_world_space(pin.point)) return false;
+    if (!std::isfinite(pin.distance) || pin.distance <= 0.f || pin.distance >= target.melee_reach)
+        pin.distance = fmaxf(0.05F, target.melee_reach * 0.5F);
+    {
+        std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
+        g_magic_pin = pin;
+    }
+    std::call_once(g_magic_pin_once, [] {
+        std::thread(magic_pin_worker).detach();
+    });
+    g_magic_pin_active.store(true, std::memory_order_release);
+    // Do not wait for the worker's first cycle.
+    esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
+    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
+                     &pin.point, sizeof(pin.point));
+    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
+                     &pin.distance, sizeof(pin.distance));
+    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
+                     &pin.collider, sizeof(pin.collider));
+    return true;
 }
 
 float esp_camera_fov_deg() { return g_cam_fov_deg; }

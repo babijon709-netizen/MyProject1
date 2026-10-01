@@ -228,6 +228,7 @@ static void UpdateFarmInner(float dt) {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
         if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
         if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
+        esp_farm_magic_redirect(FarmTarget{}, false);
         s_haveLast = false;
         s_lookHold = 0;
     };
@@ -825,8 +826,8 @@ static void UpdateFarmInner(float dt) {
         // ровно те «удары в воздух», которые видно со стороны. Ждём не вечно
         // (kNoRaySwingAfter), а стик всё это время поджимает ближе к стволу.
         const bool swingBlocked = !magicLocked &&
-            (tgt.ray_blocked || (noRay && s_noRayTime < kNoRaySwingAfter));
-        if (magicLocked) esp_farm_magic_redirect(tgt, true);
+            (!tgt.ray_self || tgt.ray_blocked ||
+             (noRay && s_noRayTime < kNoRaySwingAfter));
         s_tapTimer -= (int)roundf(dt * 1000.f);
         if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
             s_tapTimer = 0;              // ждём камеру/обход, не теряя такт
@@ -836,17 +837,20 @@ static void UpdateFarmInner(float dt) {
                 // экрана подальше от камерного пальца.
                 const float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
                 const float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
+                if (magicLocked) esp_farm_magic_redirect(tgt, true);
                 Touch_Down_N(2, fx, fy);
                 s_tapDown = true;
                 s_tapTimer = (int)tapDownMs;
             } else {
                 Touch_Up_N(2);
+                esp_farm_magic_redirect(FarmTarget{}, false);
                 s_tapDown = false;
                 s_tapTimer = (int)tapUpMs;
             }
         }
     } else {
         if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
+        esp_farm_magic_redirect(FarmTarget{}, false);
         s_tapTimer = 0;
     }
 
