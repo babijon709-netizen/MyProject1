@@ -65,7 +65,7 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     // fast pickup, so a v1/v2 file that still carries the retired bit loads
     // with the feature off instead of turning it on.
     if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3) ||
-        e.size != sizeof(e) || (e.flags & ~127u)) return s;
+        e.size != sizeof(e) || (e.flags & ~1023u)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
     const int fps_modes[] = {0, 144, 90, 120};

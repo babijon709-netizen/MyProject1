@@ -37,6 +37,9 @@ static bool g_markers_pickup_enabled = false;
 static bool g_markers_vehicle_enabled = false;
 static bool g_markers_bot_enabled = false;
 static bool g_markers_scrap_enabled = false;
+static bool g_markers_turret_enabled = false;
+static bool g_markers_backpack_enabled = false;
+static bool g_markers_sleeper_enabled = false;
 // Аим по ботам: скан и позиции ботов живут, даже когда их маркеры выключены.
 static bool g_bot_aim_enabled = false;
 static float g_marker_max_distance = 150.0F;
@@ -79,7 +82,8 @@ static std::vector<uint8_t> g_marker_scan_buffer;
 static void marker_scan_abort();
 
 void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
-                             bool vehicles, bool bots, bool scrap) {
+                             bool vehicles, bool bots, bool scrap, bool turrets,
+                             bool backpacks, bool sleepers) {
     // Loot containers and ground pickups are filtered out during the registry
     // walk, so switching a category on has to invalidate the cached list.
     if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled ||
@@ -94,6 +98,9 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
     g_markers_vehicle_enabled = vehicles;
     g_markers_bot_enabled = bots;
     g_markers_scrap_enabled = scrap;
+    g_markers_turret_enabled = turrets;
+    g_markers_backpack_enabled = backpacks;
+    g_markers_sleeper_enabled = sleepers;
     // Машины и боты опознаются при скане всегда (как руда и животные) и
     // отфильтровываются при отрисовке — инвалидация кэша им не нужна.
 }
@@ -221,6 +228,14 @@ static MarkerLook bot_look(const char* label) {
 static MarkerLook vehicle_look(const char* label) {
     MarkerLook look;
     look.kind = ESP_MARKER_VEHICLE;
+    look.label = label;
+    look.has_color = false;
+    return look;
+}
+
+static MarkerLook special_look(int kind, const char* label) {
+    MarkerLook look;
+    look.kind = kind;
     look.label = label;
     look.has_color = false;
     return look;
@@ -366,6 +381,18 @@ static bool skip_object_name(const char* raw) {
 // Одно слово говорит «машина»: целые слова, не префикс — "car" начинает
 // cargo, carpet, cardboard и carepackage. Список один на имя префаба и на
 // имя класса компонента (см. marker_class_of).
+static bool backpack_look_from_object_name(const char* raw, MarkerLook& look) {
+    return for_each_name_token(raw, [&](const char* word) {
+        if (strcmp(word, "backpack") == 0 || strcmp(word, "deathbag") == 0 ||
+            strcmp(word, "lootbag") == 0 || strcmp(word, "dropbag") == 0 ||
+            strcmp(word, "droppedbackpack") == 0) {
+            look = special_look(ESP_MARKER_BACKPACK, "Рюкзак");
+            return true;
+        }
+        return false;
+    });
+}
+
 static bool is_vehicle_word(const char* word) {
     return strcmp(word, "car") == 0 || strcmp(word, "cars") == 0 ||
            strcmp(word, "vehicle") == 0 || strcmp(word, "vehicles") == 0;
@@ -704,6 +731,79 @@ static const char* pickup_label_for_item(const char* short_name) {
         key[n++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
     }
     key[n] = '\0';
+    // Exact short names from the release ItemDatabase. They run before the
+    // fuzzy fallback so distinct items no longer collapse to generic labels
+    // such as «Оружие», «Одежда» or an untranslated English display name.
+    static const struct { const char* key; const char* ru; } kExact[] = {
+        {"plank","Доски"}, {"stick","Палки"}, {"metal.ore","Металлическая руда"},
+        {"metal.fragment","Фрагменты металла"}, {"sulfur.ore","Серная руда"},
+        {"fat.animal","Животный жир"}, {"hq.metal.ore","Руда металла HQ"},
+        {"building.plan","План постройки"}, {"building.hammer","Строительный молоток"},
+        {"saw.ripper","Пила"}, {"chainsaw","Бензопила"}, {"jackhammer","Отбойный молоток"},
+        {"campfire","Костёр"}, {"storage.box","Ящик"}, {"storage.box.large","Большой ящик"},
+        {"furnace","Печь"}, {"sleeping.bag","Спальный мешок"}, {"bed","Кровать"},
+        {"wooden.door","Деревянная дверь"}, {"door.metal","Металлическая дверь"},
+        {"door.armored","Бронированная дверь"}, {"cupboard.tool","Шкаф"},
+        {"workbench","Верстак"}, {"anvil","Наковальня"}, {"ceiling.light","Потолочная лампа"},
+        {"turret","Турель"}, {"sam.turret","ПВО-турель"}, {"guntrap","Оружейная ловушка"},
+        {"snowball.turret","Снежная турель"}, {"vending.machine","Торговый автомат"},
+        {"mining.quarry","Карьер"}, {"sawmill.clan","Лесопилка"},
+        {"scrap.recycler.clan","Переработчик"}, {"raw.meat","Сырое мясо"},
+        {"cooked.meat","Жареное мясо"}, {"rotten.meat","Тухлое мясо"},
+        {"raw.fish","Сырая рыба"}, {"cooked.fish","Жареная рыба"},
+        {"raw.mushroms","Сырые грибы"}, {"cooked.mushroms","Жареные грибы"},
+        {"blueberries","Черника"}, {"candy.cane","Леденец"},
+        {"halloween.candy","Хэллоуинская конфета"}, {"ice.shard","Осколок льда"},
+        {"event.cupids.potion","Зелье Купидона"}, {"event.love.elixir","Эликсир любви"},
+        {"event.warming.potion","Согревающее зелье"}, {"event.chocolates","Шоколадные конфеты"},
+        {"event.heart.fragment","Осколок сердца"}, {"easter.egg","Пасхальное яйцо"},
+        {"aloe.food","Алоэ"}, {"cactus.food","Кактус"}, {"event.cheese","Сыр"},
+        {"keylock","Ключевой замок"}, {"codelock","Кодовый замок"},
+        {"high.wooden.wall","Высокая стена"},
+        {"high.wooden.gates","Высокие ворота"}, {"window.wood","Окно"},
+        {"wooden.spiked.club","Шипастая дубина"}, {"assault.rifle","Штурмовая винтовка"},
+        {"desert.eagle","Дезерт Игл"}, {"hunting.rifle","Охотничья винтовка"},
+        {"submachine.gun","Пистолет-пулемёт"}, {"flare.gun","Ракетница"},
+        {"rocket.launcher","РПГ"}, {"explosive.charge","Взрывной заряд"},
+        {"thompson","Томпсон"}, {"dmr","Винтовка DMR"}, {"winchester","Винчестер"},
+        {"dvl","Снайперская винтовка"}, {"hmlmg","Пулемёт"},
+        {"handmade.pistol","Самодельный пистолет"}, {"kriss.vector","Вектор"},
+        {"steel.ball.gun","Шаромёт"}, {"fn.fal","Автомат FAL"},
+        {"ammo.rifle","Патроны 5.56"}, {"ammo.pistol","Пистолетные патроны"},
+        {"ammo.shotgun","Картечь 12 калибра"}, {"ammo.handmade.shell","Самодельные патроны"},
+        {"sam.rocket","Ракета ПВО"}, {"event.grenade.smoke","Дымовая граната"},
+        {"event.grenade.makeshift","Самодельная граната"}, {"tactical.air.marker","Авиамаркер"},
+        {"grenade.military","Военная граната"}, {"weapon.mod.simple.scope","Простой прицел"},
+        {"weapon.mod.holosight","Коллиматор"}, {"weapon.mod.optical.scope","Оптический прицел"},
+        {"weapon.mod.compensator","Компенсатор"}, {"weapon.mod.muzzle.brake","Дульный тормоз"},
+        {"weapon.mod.ext.magazine","Увеличенный магазин"}, {"cctv.camera","Камера наблюдения"},
+        {"empty.beans.can","Пустая банка фасоли"}, {"empty.propane.tank","Пустой баллон"},
+        {"empty.tuna.can","Пустая банка тунца"}, {"fuel.bottle","Бутылка топлива"},
+        {"metal.blade","Металлическое лезвие"}, {"metal.pipe","Металлическая труба"},
+        {"metal.spring","Метал. пружина"}, {"rifle.body","Корпус винтовки"},
+        {"smg.body","Корпус ПП"}, {"dmr.body","Корпус DMR"}, {"road.signs","Дорожные знаки"},
+        {"sewing.kit","Швейный набор"}, {"targeting.computer","Компьютер наведения"},
+        {"hard.drive","Жёсткий диск"}, {"microprocessor","Микропроцессор"},
+        {"portable.playstation","Портативная консоль"}, {"wires","Провода"},
+        {"wooden.helmet","Деревянный шлем"}, {"bone.helmet","Костяной шлем"},
+        {"leather.helmet","Кожаный шлем"}, {"metal.helmet","Металлическая маска"},
+        {"wood.chestplate","Деревянный нагрудник"}, {"bone.chestplate","Костяной нагрудник"},
+        {"leather.chestplate","Кожаный нагрудник"}, {"metal.chestplate","Метал. нагрудник"},
+        {"wooden.leggings","Деревянные поножи"}, {"bone.leggings","Костяные поножи"},
+        {"leather.leggings","Кожаные поножи"}, {"metal.leggings","Металлические поножи"},
+        {"wooden.sandals","Деревянные сандалии"}, {"leather.boots","Кожаные ботинки"},
+        {"metal.boots","Метал. ботинки"}, {"bone.boots","Костяные ботинки"},
+        {"backpack","Рюкзак"}, {"backpack.big","Большой рюкзак"},
+        {"hazmat","Химзащита"}, {"military.suit","Военный костюм"},
+        {"christmas.lights","Гирлянда"}, {"fireworks","Фейерверк"},
+        {"scarecrow","Пугало"}, {"christmas.tree","Ёлка"}, {"snow.machine","Снежная машина"},
+        {"ice.statue","Ледяная статуя"}, {"statue.shop.stone","Каменная статуя"},
+        {"winter.sleigh.frosty.shop","Сани"}, {"pinata.decor","Пиньята"},
+        {"owl.statue","Статуя совы"}, {"event.textbook","Учебник"}, {"event.whistle","Свисток"},
+    };
+    if (!lang::english())
+        for (const auto& item : kExact)
+            if (strcmp(key, item.key) == 0) return item.ru;
     for (const auto& item : kItems)
         if (strstr(key, item.key)) return item.ru;
     return nullptr;
@@ -812,6 +912,9 @@ uint8_t marker_class_of(uint64_t klass) {
         if (name.rfind("Mineable", 0) == 0)                       kind = MARKER_CLASS_MINEABLE;
         else if (name == "LootObject" || name == "PumpkinTrick")  kind = MARKER_CLASS_LOOT;
         else if (name == "ItemPickup")                            kind = MARKER_CLASS_PICKUP;
+        else if (name == "AutoTurret" || name == "AutoSnowballTurret" ||
+                 name == "AutoTurretShotgun" || name == "SamTurret")                             kind = MARKER_CLASS_TURRET;
+        else if (name == "DisconnectedSleeper")                   kind = MARKER_CLASS_SLEEPER;
         // Smashable scrap barrels: on this build their component class is
         // "LootDestroyable" (log: skip-class 'LootDestroyable' go='Barrel_v2') —
         // not a Mineable and not a LootObject. Any class that says Barrel out
@@ -955,7 +1058,21 @@ static bool rebuild_marker_entities() {
             managed_component_gameobject_name(component, object_name, sizeof(object_name));
             managed_component_gameobject_name(identity, root_name, sizeof(root_name));
             bool known = false;
-            if ((component_class == MARKER_CLASS_PICKUP || family_unknown) &&
+            if (component_class == MARKER_CLASS_TURRET) {
+                look = special_look(ESP_MARKER_TURRET, "Турель");
+                known = true;
+            } else if (component_class == MARKER_CLASS_SLEEPER) {
+                look = special_look(ESP_MARKER_SLEEPER, "Спящий");
+                known = true;
+            }
+            // DroppedBackpackContainer itself is a MonoBehaviour and is not in
+            // Mirror's behaviour array; its LootObject is. Distinguish it by
+            // the component/root GameObject name before generic loot filtering.
+            if (!known && (component_class == MARKER_CLASS_LOOT || family_unknown) &&
+                (backpack_look_from_object_name(object_name, look) ||
+                 backpack_look_from_object_name(root_name, look)))
+                known = true;
+            if (!known && (component_class == MARKER_CLASS_PICKUP || family_unknown) &&
                 g_markers_pickup_enabled) {
                 known = pickup_marker(component, pickup_text, sizeof(pickup_text));
                 if (known) {
@@ -1108,7 +1225,9 @@ std::vector<EspMarker> esp_get_markers() {
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
         !g_markers_loot_enabled && !g_markers_pickup_enabled &&
         !g_markers_vehicle_enabled && !g_markers_bot_enabled &&
-        !g_markers_scrap_enabled && !g_bot_aim_enabled) {
+        !g_markers_scrap_enabled && !g_markers_turret_enabled &&
+        !g_markers_backpack_enabled && !g_markers_sleeper_enabled &&
+        !g_bot_aim_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_next_scan = 0.0;
         marker_scan_abort();   // не тащить незавершённую порцию через выключенный ESP
@@ -1188,6 +1307,9 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
         if (entity.kind == ESP_MARKER_VEHICLE && !g_markers_vehicle_enabled) continue;
         if (entity.kind == ESP_MARKER_BOT && !g_markers_bot_enabled) continue;
+        if (entity.kind == ESP_MARKER_TURRET && !g_markers_turret_enabled) continue;
+        if (entity.kind == ESP_MARKER_BACKPACK && !g_markers_backpack_enabled) continue;
+        if (entity.kind == ESP_MARKER_SLEEPER && !g_markers_sleeper_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
         // Animals and bots DO move — throttled re-reads, see marker_track_position.
         marker_track_position(entity);
@@ -1208,7 +1330,10 @@ std::vector<EspMarker> esp_get_markers() {
                   : (entity.kind == ESP_MARKER_SCRAP)   ? 0.6F
                   : (entity.kind == ESP_MARKER_PICKUP)  ? 0.4F
                   : (entity.kind == ESP_MARKER_BOT)     ? 1.4F
-                  : (entity.kind == ESP_MARKER_VEHICLE) ? 1.2F : 0.9F;
+                  : (entity.kind == ESP_MARKER_VEHICLE) ? 1.2F
+                  : (entity.kind == ESP_MARKER_TURRET)   ? 1.3F
+                  : (entity.kind == ESP_MARKER_SLEEPER)  ? 0.8F
+                  : (entity.kind == ESP_MARKER_BACKPACK) ? 0.5F : 0.9F;
         if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
         if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
         if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;

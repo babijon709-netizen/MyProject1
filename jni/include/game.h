@@ -79,7 +79,7 @@ struct EspBox {
 // labelled pill at the object's screen position. All come from the same
 // networked source (Oxide.MineableObject in Mirror's client registry),
 // so one struct covers them.
-enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1, ESP_MARKER_LOOT = 2, ESP_MARKER_PICKUP = 3, ESP_MARKER_BOT = 4, ESP_MARKER_VEHICLE = 5, ESP_MARKER_SCRAP = 6 };
+enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1, ESP_MARKER_LOOT = 2, ESP_MARKER_PICKUP = 3, ESP_MARKER_BOT = 4, ESP_MARKER_VEHICLE = 5, ESP_MARKER_SCRAP = 6, ESP_MARKER_TURRET = 7, ESP_MARKER_BACKPACK = 8, ESP_MARKER_SLEEPER = 9 };
 struct EspMarker {
     float x = 0.0F, y = 0.0F;   // screen position (top-centre of the pill)
     float distance = 0.0F;      // metres from the local player
@@ -143,7 +143,9 @@ void        esp_set_skeleton_enabled(bool enabled);
 // Enable the ore / animal / loot / pickup / vehicle / bot marker scan
 // (all off = no work, unless the bot aim feed below is on).
 void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
-                                    bool vehicles, bool bots, bool scrap = false);
+                                    bool vehicles, bool bots, bool scrap = false,
+                                    bool turrets = false, bool backpacks = false,
+                                    bool sleepers = false);
 // «Всегда день»: время суток удерживается в полдне (клиентский визуал).
 void        esp_set_always_day(bool enabled);
 // Markers further away than this (metres) are dropped. Keeps the screen clean

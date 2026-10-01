@@ -34,6 +34,7 @@ struct AppState {
     bool  esp_pickup = false;
     bool  esp_bots = false, esp_vehicles = false;
     bool  esp_scrap = false;              // бочки и дорожные знаки
+    bool  esp_turrets = false, esp_backpacks = false, esp_sleepers = false;
     ViewmodelSettings viewmodel;
     bool fast_fire = false, fast_reload = false;
     float a_custom_fov = 0.f, a_custom_hands = 0.f, a_no_recoil = 0.f, a_no_spread = 0.f,
@@ -96,6 +97,7 @@ struct AppState {
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
     float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0;
+    float a_esp_turrets = 0, a_esp_backpacks = 0, a_esp_sleepers = 0;
     float a_always_day = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;

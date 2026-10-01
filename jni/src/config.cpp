@@ -332,6 +332,9 @@ static void ConfigSaveToPath(const std::string& path) {
     if (f) {
         f.write((char*)buf, sizeof(buf));
         auto extension = viewmodel::encode(g_state.viewmodel);
+        extension.flags |= (g_state.esp_turrets ? 128u : 0u) |
+                           (g_state.esp_backpacks ? 256u : 0u) |
+                           (g_state.esp_sleepers ? 512u : 0u);
         uint8_t extra[sizeof(extension)];
         memcpy(extra, &extension, sizeof(extra));
         XorBuf(extra, sizeof(extra));
@@ -386,6 +389,17 @@ void ConfigLoad(int idx, bool announce) {
 
     XorBuf(extra, extraGot);
     g_state.viewmodel = viewmodel::decode(extra, extraGot);
+    g_state.esp_turrets = g_state.esp_backpacks = g_state.esp_sleepers = false;
+    if (extraGot == sizeof(viewmodel::ConfigExtension)) {
+        viewmodel::ConfigExtension extension;
+        memcpy(&extension, extra, sizeof(extension));
+        if (extension.magic == 0x31574d56u && extension.version == 3 &&
+            extension.size == sizeof(extension)) {
+            g_state.esp_turrets = (extension.flags & 128u) != 0;
+            g_state.esp_backpacks = (extension.flags & 256u) != 0;
+            g_state.esp_sleepers = (extension.flags & 512u) != 0;
+        }
+    }
     g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
     g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
     g_state.aim_touch   = s.aim_touch;
