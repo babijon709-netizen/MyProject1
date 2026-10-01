@@ -2,6 +2,7 @@
 #include "weapon_tuning_memory.h"
 #include "weapon_speed_memory.h"
 #include "loot_memory.h"
+#include "bhop_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
 #include "maps_lookup.h"
@@ -211,6 +212,7 @@ HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 weapon_speed::Controller<HeapMemory> weapon_speeds(heap_memory);
 fast_loot::Controller<HeapMemory> loot(heap_memory);
+bhop::Controller<HeapMemory> bhop_controller(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -285,6 +287,8 @@ void esp_viewmodel_reset(bool restore) {
     if (!weapon_speeds.reset(restore && g_mem.bound()))
         LogLine("weapon speed: originals could not all be restored before disconnect; restart game");
     loot.reset();
+    if (!bhop_controller.reset(restore && g_mem.bound()))
+        LogLine("b-hop: original endurance values could not be restored before disconnect; restart game");
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
     invalidate_maps_snapshot();
@@ -296,7 +300,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
-        weapon_speeds.reset(false); loot.reset();
+        weapon_speeds.reset(false); loot.reset(); bhop_controller.reset(false);
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
@@ -318,7 +322,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || want_no_spread || weapons.has_state() ||
-        g_state.fast_fire || g_state.fast_reload || weapon_speeds.has_state()) {
+        g_state.fast_fire || g_state.fast_reload || weapon_speeds.has_state() ||
+        settings.bhop || bhop_controller.has_state()) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
             return candidate>=0x10000 && memory.is(candidate,"PlayerManager") &&
@@ -364,7 +369,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     const unsigned weapon_flags = (settings.no_recoil ? 1u : 0u) |
                                   (want_no_spread ? 2u : 0u) |
                                   (g_state.fast_fire ? 4u : 0u) |
-                                  (g_state.fast_reload ? 8u : 0u);
+                                  (g_state.fast_reload ? 8u : 0u) |
+                                  (settings.bhop ? 16u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -376,6 +382,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
         weapon_speeds.tick(epoch, g_il2cpp_base, player,
                            g_state.fast_fire, g_state.fast_reload);
+        bhop_controller.tick(epoch, player, settings.bhop);
     }
     {
         // Ступень, на которой оборвалась цепочка отдачи/разброса. Логируем

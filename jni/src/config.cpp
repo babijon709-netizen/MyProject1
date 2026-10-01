@@ -393,7 +393,7 @@ void ConfigLoad(int idx, bool announce) {
     if (extraGot == sizeof(viewmodel::ConfigExtension)) {
         viewmodel::ConfigExtension extension;
         memcpy(&extension, extra, sizeof(extension));
-        if (extension.magic == 0x31574d56u && extension.version == 3 &&
+        if (extension.magic == 0x31574d56u && (extension.version == 3 || extension.version == 4) &&
             extension.size == sizeof(extension)) {
             g_state.esp_turrets = (extension.flags & 128u) != 0;
             g_state.esp_backpacks = (extension.flags & 256u) != 0;

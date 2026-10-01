@@ -14,6 +14,7 @@ struct ViewmodelSettings {
     // Быстрый подбор: не трогает код игры, обнуляет только точный 0.35f
     // cadence активных UniTask promises в управляемой куче.
     bool fast_loot = false;
+    bool bhop = false; // no auto-jump; only removes jump-endurance recovery delay
 };
 
 namespace viewmodel {
@@ -40,7 +41,7 @@ inline ViewmodelSettings sanitize(ViewmodelSettings s) {
 // missing/truncated/unknown trailers load disabled defaults, never stale state.
 struct ConfigExtension {
     uint32_t magic = 0x31574d56u; // VMW1
-    uint32_t version = 3;
+    uint32_t version = 4;
     uint32_t size = 32;
     uint32_t flags = 0;
     float fov = 90.f, x = 0.f, y = 0.f, z = 0.f;
@@ -52,7 +53,8 @@ inline ConfigExtension encode(ViewmodelSettings s) {
     // Bits 2..3: 0 = default, 1 = 144 (legacy toggle), 2 = 90, 3 = 120.
     const uint32_t fps_mode = s.fps_limit == 144 ? 1u : s.fps_limit == 90 ? 2u : s.fps_limit == 120 ? 3u : 0u;
     e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2) |
-              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u);
+              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u) |
+              (s.bhop ? 1024u : 0u);
     e.fov = s.fov; e.x = s.x; e.y = s.y; e.z = s.z;
     return e;
 }
@@ -64,8 +66,8 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     // retired, bits 5..6 opt into the object-data implementations. v3: bit 4 is
     // fast pickup, so a v1/v2 file that still carries the retired bit loads
     // with the feature off instead of turning it on.
-    if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3) ||
-        e.size != sizeof(e) || (e.flags & ~1023u)) return s;
+    if (e.magic != 0x31574d56u || (e.version < 1 || e.version > 4) ||
+        e.size != sizeof(e) || (e.flags & ~2047u)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
     const int fps_modes[] = {0, 144, 90, 120};
@@ -73,6 +75,7 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     s.no_recoil = e.version >= 2 && (e.flags & 32u) != 0;
     s.no_spread = e.version >= 2 && (e.flags & 64u) != 0;
     s.fast_loot = e.version >= 3 && (e.flags & 16u) != 0;
+    s.bhop = e.version >= 4 && (e.flags & 1024u) != 0;
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
     return sanitize(s);
 }
