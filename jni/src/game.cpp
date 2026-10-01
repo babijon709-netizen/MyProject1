@@ -6516,10 +6516,90 @@ static char     s_melee_klass_name[24] = {};
 // содержимому: ссылка на объект, внутри которого лежит правдоподобный
 // UnityEngine.RaycastHit (мировая точка, конечная дистанция, коллайдер) и
 // GameObject попадания. Найденное кешируется на класс орудия.
+// Разметка самого GKo тоже не константа. На сборке, где GameObject попадания
+// и RaycastHit лежат не по 0x18/0x48, чит видел «GKo есть, попадания нет» и
+// не мог ни выучить шаблон, ни подменить удар. Поэтому оба оффсета
+// определяются по содержимому — один раз, на первом же живом попадании.
+uint64_t g_gko_hit_off = GKO_HIT_OBJECT;    // GameObject попадания
+uint64_t g_gko_rh_off  = GKO_RAYCAST_HIT;   // UnityEngine.RaycastHit
+bool     g_gko_layout_known = false;
+
+// RaycastHit опознаётся по нормали: три флота единичной длины рядом с
+// правдоподобной мировой точкой, конечной дистанцией и указателем на
+// коллайдер — такого совпадения в чужих полях практически не бывает.
+static bool rayhit_signature_at(const unsigned char* buf, size_t cap, size_t off) {
+    if (off + 0x30 > cap) return false;
+    Vec3 point{}, normal{};
+    float distance = 0.0F;
+    uint64_t collider = 0;
+    memcpy(&point,    buf + off + RAYCASTHIT_POINT,    sizeof(point));
+    memcpy(&normal,   buf + off + RAYCASTHIT_NORMAL,   sizeof(normal));
+    memcpy(&distance, buf + off + RAYCASTHIT_DISTANCE, sizeof(distance));
+    memcpy(&collider, buf + off + RAYCASTHIT_COLLIDER, sizeof(collider));
+    if (!vec3_is_finite(point) || !position_looks_like_world_space(point)) return false;
+    if (fabsf(point.x) + fabsf(point.y) + fabsf(point.z) < 0.001F) return false;
+    if (!vec3_is_finite(normal)) return false;
+    const float len = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+    if (!(len > 0.85F && len < 1.15F)) return false;
+    if (!std::isfinite(distance) || distance <= 0.01F || distance > 500.0F) return false;
+    return valid_obj(memio::untag(collider));
+}
+
+// Найти в GKo RaycastHit и GameObject попадания. Работает только в момент,
+// когда луч игры во что-то упёрся: по пустому результату опознавать нечего.
+static bool gko_probe_layout(uint64_t data) {
+    if (!valid_obj(data)) return false;
+    constexpr size_t kProbe = 0x100;
+    unsigned char buf[kProbe];
+    if (!rd_buf(data, buf, sizeof(buf))) return false;
+
+    size_t rh = SIZE_MAX;
+    for (size_t off = 0x10; off + 0x30 <= kProbe; off += 4) {
+        if (rayhit_signature_at(buf, kProbe, off)) { rh = off; break; }
+    }
+    if (rh == SIZE_MAX) return false;
+
+    // GameObject попадания: единственное поле-указатель, у которого класс
+    // так и называется. Проверяем только поля перед самим RaycastHit.
+    size_t go_off = SIZE_MAX;
+    uint64_t collider = 0;
+    memcpy(&collider, buf + rh + RAYCASTHIT_COLLIDER, sizeof(collider));
+    collider = memio::untag(collider);
+    for (size_t off = 0x10; off + 8 <= rh; off += 8) {
+        uint64_t field = 0;
+        memcpy(&field, buf + off, sizeof(field));
+        field = memio::untag(field);
+        if (!valid_obj(field) || field == collider) continue;
+        const uint64_t klass = rd_ptr(field);
+        if (!valid_obj(klass)) continue;
+        const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME));
+        if (name == "GameObject") { go_off = off; break; }
+    }
+
+    g_gko_rh_off = (uint64_t)rh;
+    if (go_off != SIZE_MAX) g_gko_hit_off = (uint64_t)go_off;
+    g_gko_layout_known = (go_off != SIZE_MAX);
+    return g_gko_layout_known;
+}
+
 static bool gko_looks_real(uint64_t data) {
     if (!valid_obj(data)) return false;
+    if (!g_gko_layout_known) {
+        // Разметка ещё не опознана. Пробуем по бюджету, а не по таймеру:
+        // за один проход поиска обёрток кандидатов бывает несколько, и
+        // жёсткий интервал отдал бы всю попытку первому попавшемуся.
+        static int    budget = 0;
+        static double refill = 0.0;
+        const double now = mono_seconds();
+        if (now >= refill) { refill = now + 0.5; budget = 8; }
+        if (budget > 0) {
+            --budget;
+            if (gko_probe_layout(data)) return true;
+        }
+        return false;
+    }
     unsigned char blob[0x30];
-    if (!rd_buf(data + GKO_RAYCAST_HIT, blob, sizeof(blob))) return false;
+    if (!rd_buf(data + g_gko_rh_off, blob, sizeof(blob))) return false;
     Vec3 point{};
     float distance = 0.0F;
     uint64_t collider = 0;
@@ -6529,7 +6609,7 @@ static bool gko_looks_real(uint64_t data) {
     if (!vec3_is_finite(point) || !position_looks_like_world_space(point)) return false;
     if (!std::isfinite(distance) || distance <= 0.0F || distance > 500.0F) return false;
     if (!valid_obj(memio::untag(collider))) return false;
-    return valid_obj(memio::untag(rd_ptr(data + GKO_HIT_OBJECT)));
+    return valid_obj(memio::untag(rd_ptr(data + g_gko_hit_off)));
 }
 
 // Кеш на класс орудия: пока в руках то же самое, поиск не повторяется.
@@ -6571,12 +6651,19 @@ static void ray_wrapper_offsets(uint64_t handler, uint64_t& primary, uint64_t& f
     if (now < s_ray_scan_next) return;
     s_ray_scan_next = now + 1.0;
 
+    // Объект обработчика может оказаться короче блока, который мы просим:
+    // чтение через границу неотображённой страницы провалится целиком,
+    // поэтому пробуем от большего к меньшему.
     constexpr size_t kScanBytes = 0x400;
     static uint64_t fields[kScanBytes / sizeof(uint64_t)];
-    if (!rd_buf(handler + 0x10, fields, sizeof(fields))) return;
+    size_t scan = 0;
+    for (size_t want : {kScanBytes, (size_t)0x200, (size_t)0x100}) {
+        if (rd_buf(handler + 0x10, fields, want)) { scan = want; break; }
+    }
+    if (!scan) return;
 
     uint64_t found_a = 0, found_b = 0;
-    for (size_t i = 0; i < kScanBytes / sizeof(uint64_t); ++i) {
+    for (size_t i = 0; i < scan / sizeof(uint64_t); ++i) {
         const uint64_t wrapper = memio::untag(fields[i]);
         if (!valid_obj(wrapper)) continue;
         const uint64_t value = memio::untag(rd_ptr(wrapper + GUI_VALUE));
@@ -6715,21 +6802,21 @@ bool read_local_melee_reach(MeleeReach& out) {
                 // проверяется, не в сам ли узел упёрся луч (у камня точка
                 // прицела внутри породы, и без этого свой камень выглядит
                 // стеной — бот вечно обходил его, не сделав ни удара).
-                const uint64_t hit_go = rd_ptr(data + GKO_HIT_OBJECT);
+                const uint64_t hit_go = rd_ptr(data + g_gko_hit_off);
                 out.ray_hit_go = valid_obj(hit_go) ? hit_go : 0;
                 out.ray_hit_object = (out.ray_hit_go != 0);
-                const uint64_t hit_col = rd_ptr(data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER);
+                const uint64_t hit_col = rd_ptr(data + g_gko_rh_off + RAYCASTHIT_COLLIDER);
                 out.ray_collider = valid_obj(hit_col) ? hit_col : 0;
                 float dist = 0.0F;
-                if (rd_exact(data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE, dist) &&
+                if (rd_exact(data + g_gko_rh_off + RAYCASTHIT_DISTANCE, dist) &&
                     std::isfinite(dist) && dist > 0.0F && dist < 1000.0F)
                     out.ray_distance = dist;
                 Vec3 rp{}, rn{};
-                if (rd_exact(data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT, rp) &&
+                if (rd_exact(data + g_gko_rh_off + RAYCASTHIT_POINT, rp) &&
                     vec3_is_finite(rp) && position_looks_like_world_space(rp)) {
                     out.ray_point = rp;
                     out.ray_point_valid = true;
-                    if (rd_exact(data + GKO_RAYCAST_HIT + RAYCASTHIT_NORMAL, rn) &&
+                    if (rd_exact(data + g_gko_rh_off + RAYCASTHIT_NORMAL, rn) &&
                         vec3_is_finite(rn))
                         out.ray_normal = rn;
                 }
@@ -6787,6 +6874,9 @@ struct MagicHitPin {
     // рейкаст между нашей записью и чтением в FPMelee.
     unsigned char blob[0x30]{};
     bool blob_valid = false;
+    // Разметка GKo, опознанная на этой сборке игры (см. gko_probe_layout).
+    uint64_t hit_off = GKO_HIT_OBJECT;
+    uint64_t rh_off = GKO_RAYCAST_HIT;
 };
 std::mutex g_magic_pin_mutex;
 MagicHitPin g_magic_pin;
@@ -6812,16 +6902,16 @@ void magic_write_pin(const MagicHitPin& pin) {
     if (pin.blob_valid) {
         // Одна запись на весь RaycastHit вместо трёх: точка, дистанция и
         // коллайдер меняются вместе и атомарно с точки зрения игры.
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT, pin.blob, sizeof(pin.blob));
+        esp_silent_write(pin.data + pin.rh_off, pin.blob, sizeof(pin.blob));
     } else {
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
+        esp_silent_write(pin.data + pin.rh_off + RAYCASTHIT_POINT,
                          &pin.point, sizeof(pin.point));
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
+        esp_silent_write(pin.data + pin.rh_off + RAYCASTHIT_DISTANCE,
                          &pin.distance, sizeof(pin.distance));
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
+        esp_silent_write(pin.data + pin.rh_off + RAYCASTHIT_COLLIDER,
                          &pin.collider, sizeof(pin.collider));
     }
-    esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
+    esp_silent_write(pin.data + pin.hit_off, &pin.go, sizeof(pin.go));
     if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
     if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
     g_magic_pin_writes.fetch_add(1, std::memory_order_relaxed);
@@ -6874,7 +6964,7 @@ void magic_pin_worker() {
         if (++cycle >= 8) {
             cycle = 0;
             uint64_t live_go = 0;
-            if (esp_silent_read(pin.data + GKO_HIT_OBJECT, &live_go, sizeof(live_go))) {
+            if (esp_silent_read(pin.data + pin.hit_off, &live_go, sizeof(live_go))) {
                 if (memio::untag(live_go) == pin.go)
                     g_magic_pin_held.fetch_add(1, std::memory_order_relaxed);
                 else
@@ -6964,13 +7054,15 @@ bool esp_magic_hit_pin(const MagicHit& hit) {
     pin.distance = hit.distance;
     pin.pid = g_pid;
     pin.hot = hit.hot;
+    pin.hit_off = g_gko_hit_off;
+    pin.rh_off = g_gko_rh_off;
     if (!valid_obj(pin.data) || !valid_obj(pin.go) || !valid_obj(pin.collider) ||
         !vec3_is_finite(pin.point) || !position_looks_like_world_space(pin.point)) return false;
     if (!std::isfinite(pin.distance) || pin.distance <= 0.f) pin.distance = 0.25f;
 
     // Снимок RaycastHit целиком: нормаль, faceID и uv остаются родные (их
     // читают эффекты удара), подменяются только точка, дистанция и коллайдер.
-    if (rd_buf(pin.data + GKO_RAYCAST_HIT, pin.blob, sizeof(pin.blob))) {
+    if (rd_buf(pin.data + pin.rh_off, pin.blob, sizeof(pin.blob))) {
         memcpy(pin.blob + RAYCASTHIT_POINT, &pin.point, sizeof(pin.point));
         memcpy(pin.blob + RAYCASTHIT_DISTANCE, &pin.distance, sizeof(pin.distance));
         memcpy(pin.blob + RAYCASTHIT_COLLIDER, &pin.collider, sizeof(pin.collider));
@@ -7012,6 +7104,12 @@ void esp_magic_hit_release() {
 
 unsigned long long esp_magic_hit_writes() {
     return g_magic_pin_writes.load(std::memory_order_relaxed);
+}
+
+void esp_gko_layout(int& hit_off, int& rh_off, bool& known) {
+    hit_off = (int)g_gko_hit_off;
+    rh_off = (int)g_gko_rh_off;
+    known = g_gko_layout_known;
 }
 
 void esp_magic_hit_stats(unsigned& held, unsigned& lost) {

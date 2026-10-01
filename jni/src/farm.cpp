@@ -72,6 +72,9 @@ int   g_farmNodesWorld = 0;
 int   g_farmLearn = 0;
 int   g_farmHits = 0;
 int   g_farmSwings = 0;
+int   g_farmGkoHit = 0;          // оффсеты внутри GKo, опознанные по содержимому
+int   g_farmGkoRh = 0;
+bool  g_farmGkoKnown = false;
 int   g_farmRayOffA = 0;         // оффсеты обёрток GuI<GKo>, которые сейчас в деле
 int   g_farmRayOffB = 0;
 int   g_farmRayStage = 0;        // где обрывается цепочка рейкаста игры
@@ -286,6 +289,7 @@ void UpdateFarm(float dt) {
     g_farmRayBest = info.ray_stage_best;
     g_farmRayOffA = info.ray_off_primary;
     g_farmRayOffB = info.ray_off_fallback;
+    esp_gko_layout(g_farmGkoHit, g_farmGkoRh, g_farmGkoKnown);
     {
         unsigned held = 0, lost = 0;
         esp_magic_hit_stats(held, lost);

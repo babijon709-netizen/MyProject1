@@ -380,6 +380,9 @@ unsigned long long esp_magic_hit_writes();
 // Сколько раз сверка нашла в GKo наш объект попадания (held) и сколько раз
 // игра успела вернуть свой (lost). По этой паре видно, выигрываем ли мы гонку.
 void               esp_magic_hit_stats(unsigned& held, unsigned& lost);
+// Разметка GKo, опознанная на этой сборке игры: GameObject попадания и
+// RaycastHit. known == false — живого попадания ещё не видели.
+void               esp_gko_layout(int& hit_off, int& rh_off, bool& known);
 
 // Melee-TP: пишет дальность удара орудия (FPMelee.m_MaxReach + hitRadius) и
 // геометрию луча взаимодействия (RaycastManager). reach_m — суммарная
