@@ -789,14 +789,6 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgToggleRow(XS("Металл"), &g_state.farm_metal,  g_state.a_farm_metal,  false);
         FgToggleRow(XS("Сера"),   &g_state.farm_sulfur, g_state.a_farm_sulfur, true);
 
-        // Орудие: прочность не тратится. Поле прочности предмета выучивается
-        // по дельтам от ударов бота и удерживается записью (game_farm.cpp),
-        // поэтому тумблер переживает обновления игры без новых офсетов.
-        FgSHdr(XS("Орудие"));
-        FgCardBg(rH * 1);
-        FgToggleRow(XS("Бесконечная прочность"), &g_state.farm_durability,
-                    g_state.a_farm_durability, true);
-
         FgSHdr(XS("Дальность"));
         FgCardBg(Layout::SliderH);
         FgSliderRow(XS("Искать до"), &g_state.farm_range, 10.f, 300.f,

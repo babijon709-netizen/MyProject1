@@ -143,10 +143,6 @@ struct MeleeReach {
     float total = 0.0F;       // порог засчёта удара, 3D-метры от глаза
     float ray_length = 0.0F;  // RaycastManager.m_RayLength (0x38)
     char  tool[24] = {};      // имя класса орудия
-    // Предмет инвентаря в руках (FPObject.Item -> Oxide.Item): в нём живут
-    // счётчики предмета — количество, прочность. Нужен «бесконечной
-    // прочности» (game_farm.cpp), валидируется по ItemData.
-    uint64_t item = 0;
     // Ритм ударов этого орудия: FPMelee.m_TimeBetweenAttacks (0x130) и
     // pauseAfterAttack (0x134). Всё, что чаще первого, игра ставит в очередь
     // и съедает, так что такт бота берётся отсюда, а не из миллисекунд «на глаз».
