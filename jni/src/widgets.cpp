@@ -9,6 +9,7 @@
 #include "menu.h"                // g_calibMode (калибровка зон)
 #include "Blur/Blur.h"
 #include "lang.h"
+#include "farm.h"              // состояние Magic-Farm в попровере
 #include <cfloat>
 #include <cmath>
 
@@ -873,6 +874,85 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                     {cX + (cW - rsz.x) * 0.5f, curY + (rH - rsz.y) * 0.5f},
                     C::UA(C::Dim(), alpha), rt);
                 curY += rH;
+            }
+        }
+
+        // ---- Состояние -------------------------------------------------------
+        // Без этих строк чит немой: «включил, подошёл к дереву, ничего не
+        // происходит» выглядит одинаково и когда узлов нет в реестре, и когда
+        // орудие не в руках, и когда шаблон попадания ещё не выучен, и когда
+        // кнопка атаки задана мимо. Теперь видно, на каком шаге всё встало.
+        FgSHdr(XS("Состояние"));
+        {
+            struct InfoRow { const char* lbl; char val[48]; bool ok; };
+            InfoRow irows[8];
+            int n = 0;
+            auto add = [&](const char* lbl, bool ok) -> char* {
+                if (n >= 8) { static char sink[48]; return sink; }
+                InfoRow& r = irows[n++];
+                r.lbl = lbl; r.ok = ok; r.val[0] = 0;
+                return r.val;
+            };
+
+            char* v = add(XS("Узлы рядом"), g_farmNodes > 0);
+            snprintf(v, 48, "%d / %d", g_farmNodes, g_farmNodesWorld);
+
+            v = add(XS("Шаблоны ударов"), g_farmTemplates > 0);
+            snprintf(v, 48, "%d / %d", g_farmTemplates, g_farmIndexed);
+
+            const bool have_tool = g_farmReach > 0.3f;
+            v = add(XS("Орудие"), have_tool);
+            if (have_tool) snprintf(v, 48, "%.2f %s", (double)g_farmReach, XS("м"));
+            else           snprintf(v, 48, "%s", XS("нет в руках"));
+
+            v = add(XS("Melee TP"), g_farmTpActive);
+            if (g_farmTpActive) snprintf(v, 48, "%.1f %s", (double)g_farmTpReach, XS("м"));
+            else                snprintf(v, 48, "%s", XS("выкл"));
+
+            v = add(XS("Луч игры"), g_farmLearn > 0);
+            snprintf(v, 48, "%s", g_farmLearn == 2 ? XS("на ресурсе")
+                                 : g_farmLearn == 1 ? XS("в стороне") : XS("нет"));
+
+            v = add(XS("Ударов"), g_farmHits > 0);
+            snprintf(v, 48, "%d / %d", g_farmHits, g_farmSwings);
+
+            // Причина простоя — ровно та, по которой чит сейчас молчит.
+            if (g_farmNodes == 0) {
+                const char* why =
+                    g_farmReason == 1 ? XS("не выбран ресурс") :
+                    g_farmReason == 2 ? XS("нет игры") :
+                    g_farmReason == 3 ? XS("реестр пуст") :
+                    g_farmReason == 4 ? XS("далеко") :
+                    g_farmReason == 5 ? XS("нет камеры") :
+                    g_farmReason == 6 ? XS("не то орудие") : XS("—");
+                v = add(XS("Простой"), false);
+                snprintf(v, 48, "%s", why);
+            }
+
+            FgCardBg(rH * (float)n);
+            for (int ri = 0; ri < n; ++ri) {
+                const InfoRow& r = irows[ri];
+                float cy2 = curY + rH * 0.5f;
+                fg->AddText(fn, fs * 1.05f,
+                    {cX + inset + padX, cy2 - fs * 1.05f * 0.5f},
+                    C::UA(C::Dim(), alpha), r.lbl);
+                auto vsz = fn->CalcTextSizeA(fs * 1.05f, FLT_MAX, 0, r.val);
+                fg->AddText(fn, fs * 1.05f,
+                    {cX + cW - inset - padX - vsz.x, cy2 - vsz.y * 0.5f},
+                    C::UA(r.ok ? C::Acc() : C::Txt(), alpha), r.val);
+                curY += rH;
+            }
+
+            // Короткая подсказка по самому частому случаю: шаблон удара
+            // выучивается, когда собственный луч игры хотя бы раз упирается в
+            // ресурс, поэтому на новом месте достаточно разок глянуть на него.
+            if (g_state.farm_on && g_farmNodes > 0 && g_farmTemplates == 0) {
+                curY += 6.f;
+                const char* hint = XS("Посмотрите на ресурс — чит запомнит удар");
+                auto hsz = fn->CalcTextSizeA(fs * 0.95f, cW - inset * 2.f - padX * 2.f, 0, hint);
+                fg->AddText(fn, fs * 0.95f, {cX + inset + padX, curY},
+                            C::UA(C::Dim(), alpha), hint);
+                curY += hsz.y + 6.f;
             }
         }
 

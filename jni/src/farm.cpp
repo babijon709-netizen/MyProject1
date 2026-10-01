@@ -9,6 +9,7 @@
 #include "widgets.h"             // g_sheet, g_pop (пауза при открытом окне)
 #include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
+#include "logfile.h"             // LogLine (no-op, пока лог выключен)
 #include <cmath>
 
 // ============================== Magic-Farm ===================================
@@ -66,7 +67,11 @@ int   g_farmToolHave = 0;
 int   g_farmToolNeed = 0;
 int   g_farmXp = 0;
 int   g_farmTemplates = 0;
+int   g_farmIndexed = 0;
+int   g_farmNodesWorld = 0;
+int   g_farmLearn = 0;
 int   g_farmHits = 0;
+int   g_farmSwings = 0;
 
 namespace {
 
@@ -99,9 +104,12 @@ constexpr float kPlainRadiusPad = 0.35f;
 // Сфера луча взаимодействия как доля радиуса TP. Радиус нужен не для урона (за
 // него отвечает дальность), а чтобы собственный рейкаст игры цеплял узлы
 // рядом с линией взгляда и приносил их шаблоны попадания.
-constexpr float kSphereFraction = 0.35f;
-constexpr float kSphereMin = 0.15f;
-constexpr float kSphereMax = 2.50f;
+// Слишком толстая сфера вредна: пущенная из глаз, она начинает цеплять стены,
+// пол и собственный корпус, попадание возвращается с дистанцией около нуля —
+// и ломается не только Magic-Farm, но и обычные удары с подсказками игрока.
+constexpr float kSphereFraction = 0.15f;
+constexpr float kSphereMin = 0.10f;
+constexpr float kSphereMax = 0.50f;
 
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -135,6 +143,12 @@ void draw_node(const FarmSwarmNode& node, bool target) {
 // бонус), затем близость. Выбитые узлы уходят в конец и тут же в чёрный список.
 float node_score(const FarmSwarmNode& node) {
     float score = node.dist;
+    // Узел с выученным шаблоном предпочтительнее, но узел без шаблона целью
+    // быть ТОЖЕ обязан: удар по нему идёт без подмены рейкаста (бьёт то, во
+    // что упёрся удлинённый луч игры) и как раз этим шаблон и выучивается.
+    // Пока эта проверка была жёстким «continue», на свежей местности цель не
+    // находилась никогда и чит молча простаивал.
+    if (!node.have_template) score += 1.5f;
     if (node.at_spot) score -= 2.0f;
     if (node.kind == 4) score -= 0.5f;   // бочка ломается в пару ударов
     return score;
@@ -260,6 +274,25 @@ void UpdateFarm(float dt) {
     g_farmToolHave = info.tool_purposes;
     g_farmToolNeed = info.tool_need;
     g_farmTemplates = info.templates;
+    g_farmIndexed = info.indexed;
+    g_farmNodesWorld = info.nodes_total;
+    g_farmLearn = info.learn_state;
+
+    // Раз в секунду пишем состояние в лог: без этой строки «включил, подошёл,
+    // ничего не происходит» неотличимо от «узлы не найдены», «нет орудия»,
+    // «шаблон не выучен» и «кнопка атаки не там».
+    {
+        static float s_logTime = 0.f;
+        s_logTime -= dt;
+        if (s_logTime <= 0.f) {
+            s_logTime = 1.f;
+            LogLine("[farm] nodes=%d/%d near=%d tpl=%d idx=%d learn=%d reach=%.2f tp=%d/%.2f "
+                    "tool=%d/%d reason=%d swings=%d pins=%d",
+                    info.nodes_near, info.nodes_total, count, info.templates, info.indexed,
+                    info.learn_state, info.melee_reach, tpActive ? 1 : 0, tpReach,
+                    info.tool_purposes, info.tool_need, g_farmReason, g_farmSwings, g_farmHits);
+        }
+    }
 
     // Живой GKo запоминаем: он нужен, даже когда в этом кадре луч игры ушёл в
     // небо (обёртка пуста). Сам объект при этом никуда не девается — он
@@ -289,7 +322,6 @@ void UpdateFarm(float dt) {
             esp_farm_blacklist(node.id, 120.f);
             continue;
         }
-        if (!node.have_template) continue;   // бить нечем: шаблон не выучен
         const float score = node_score(node);
         if (score < bestScore) { bestScore = score; best = i; }
     }
@@ -302,7 +334,6 @@ void UpdateFarm(float dt) {
         for (int step = 0; step < count; ++step) {
             const int idx = (s_sweepIdx + step) % count;
             const FarmSwarmNode& node = nodes[idx];
-            if (!node.have_template) continue;
             if (node.fraction >= 0.f && node.fraction < kDepletedFrac) continue;
             target = idx;
             break;
@@ -341,7 +372,7 @@ void UpdateFarm(float dt) {
     // и отпускается сразу после, возвращая обёрткам исходные значения. С
     // выключенными авто-ударами момент удара нам неизвестен, и пин держится
     // постоянно: это сознательный размен, о котором говорит сам переключатель.
-    const bool canPin = g_state.farm_silent && s_rayData != 0 &&
+    const bool canPin = g_state.farm_silent && tgt.have_template && s_rayData != 0 &&
                         (s_rayPrimary != 0 || s_rayFallback != 0);
     auto pinTarget = [&]() {
         if (!canPin) { if (s_pinned) releasePin(); return; }
@@ -388,6 +419,7 @@ void UpdateFarm(float dt) {
             const float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
             const float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
             Touch_Down_N(2, fx, fy);
+            ++g_farmSwings;
             s_tapDown = true;
             s_tapTimer = (int)tapDownMs;
             g_farmPhase = 3;

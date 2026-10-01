@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace go_active;
@@ -1141,16 +1142,92 @@ namespace {
 struct FarmHitTemplate {
     uint64_t go = 0;
     uint64_t collider = 0;
-    int      age = 0;      // кадров с последнего подтверждения
+    double   stamp = 0.0;   // когда шаблон подтверждали в последний раз
 };
 std::unordered_map<uint64_t, FarmHitTemplate> g_farm_templates;
-constexpr size_t kFarmTemplateMax = 256;
-// Сколько узлов за кадр сверяем с лучом игры. Проверка ходит по поддереву
-// трансформов попадания, поэтому на весь список её гонять нельзя.
-constexpr int kFarmTemplateProbes = 4;
+constexpr size_t kFarmTemplateMax = 512;
+constexpr double kFarmTemplateTtl = 180.0;   // с без подтверждения — забываем
+
+// Как узнать, ЧЕЙ узел сейчас под лучом.
+//
+// Первая версия сверяла луч с каждым узлом из радиуса удара через
+// ray_hit_is_self_node(). Это оказалось и дорого, и бесполезно: проверка №3
+// собирает поддерево трансформов узла (до 128 штук) на КАЖДУЮ пару
+// (узел, трансформ попадания), а её memo — одна ячейка, так что несколько
+// узлов за кадр затирали друг друга. И главное — узел, на который игрок
+// смотрит, но который ещё не попал в радиус удара, не проверялся вовсе, то
+// есть шаблон не выучивался никогда, и Magic-Farm молча не делал НИЧЕГО.
+//
+// Теперь наоборот: поддерево каждого узла разбирается ОДИН раз и
+// раскладывается в общий индекс «трансформ -> узел». Дальше каждый кадр
+// достаточно вычислить трансформ попадания луча (3-4 чтения) и заглянуть в
+// индекс. Индексация идёт по паре узлов за кадр и в радиусе шире ударного,
+// так что шаблон выучивается ещё на подходе, а не в упор.
+std::unordered_map<uint64_t, uint64_t> g_farm_subtree_owner;  // трансформ -> identity
+std::unordered_set<uint64_t> g_farm_indexed;                  // какие узлы разобраны
+constexpr size_t kFarmSubtreeMax   = 48;    // трансформов на узел
+constexpr size_t kFarmOwnerMax     = 16384; // потолок индекса
+constexpr int    kFarmIndexPerTick = 2;     // узлов за кадр
+
+// Диагностика последнего кадра (для строки состояния в меню).
+int    g_farm_learn_state = 0;   // 0 луча нет, 1 луч есть, 2 луч опознан как узел
 }  // namespace
 
-void farm_templates_reset() { g_farm_templates.clear(); }
+void farm_templates_reset() {
+    g_farm_templates.clear();
+    g_farm_subtree_owner.clear();
+    g_farm_indexed.clear();
+    g_farm_learn_state = 0;
+}
+
+// Разобрать поддерево узла в общий индекс. Дорого (десятки чтений), поэтому
+// строго по бюджету и один раз на узел.
+static void farm_index_node(const FarmEntity& entity) {
+    if (!entity.transform) return;
+    if (!g_farm_indexed.insert(entity.identity).second) return;
+    if (g_farm_subtree_owner.size() >= kFarmOwnerMax) return;
+    static std::vector<uint64_t> subtree;
+    collect_transform_subtree(entity.transform, subtree, kFarmSubtreeMax);
+    for (uint64_t t : subtree) {
+        if (t) g_farm_subtree_owner[t] = entity.identity;
+    }
+    // GameObject корня узла тоже ключ: у части узлов коллайдер висит прямо на
+    // нём, и трансформ попадания совпадает с корневым.
+    const uint64_t go = rd_ptr(entity.transform + COMPONENT_GAMEOBJECT);
+    if (go) g_farm_subtree_owner[go] = entity.identity;
+}
+
+// Выучить шаблон попадания из живого луча игры. Возвращает identity узла, в
+// который луч упёрся прямо сейчас (0 — не наш узел / луча нет).
+static uint64_t farm_learn_from_ray(const MeleeReach& reach) {
+    g_farm_learn_state = 0;
+    if (!reach.ray_valid || !reach.ray_hit_go || !reach.ray_collider) return 0;
+    g_farm_learn_state = 1;
+    const uint64_t hit_transform = ray_hit_transform(reach);
+    uint64_t owner = 0;
+    if (hit_transform) {
+        auto it = g_farm_subtree_owner.find(hit_transform);
+        if (it != g_farm_subtree_owner.end()) owner = it->second;
+    }
+    if (!owner) {
+        // Запасной путь: GameObject попадания сам по себе (коллайдер мог не
+        // отдать трансформ) — он тоже лежит в индексе.
+        const uint64_t go = managed_object_native(reach.ray_hit_go);
+        if (go) {
+            auto it = g_farm_subtree_owner.find(go);
+            if (it != g_farm_subtree_owner.end()) owner = it->second;
+        }
+    }
+    if (!owner) return 0;
+    g_farm_learn_state = 2;
+    FarmHitTemplate tpl;
+    tpl.go = reach.ray_hit_go;
+    tpl.collider = reach.ray_collider;
+    tpl.stamp = mono_seconds();
+    if (g_farm_templates.size() < kFarmTemplateMax || g_farm_templates.count(owner))
+        g_farm_templates[owner] = tpl;
+    return owner;
+}
 
 int esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
                        FarmSwarmInfo& info) {
@@ -1224,6 +1301,33 @@ int esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
     }
     info.tool_need = tool_need;
     g_farm_tool_need = tool_need;
+    info.nodes_total = (int)g_farm_entities.size();
+    info.nodes_near  = (int)candidates.size();
+
+    // Обучение шаблонам идёт ШИРЕ ударного радиуса и ДО всех ранних выходов:
+    // крестик надо знать ещё на подходе к дереву, иначе Magic-Farm включается
+    // в упор и выглядит как «ничего не происходит».
+    {
+        const float learn_radius = std::min(radius_m + 10.0F, 25.0F);
+        int budget = kFarmIndexPerTick;
+        static size_t cursor = 0;
+        const size_t total = g_farm_entities.size();
+        for (size_t step = 0; step < total && budget > 0; ++step) {
+            FarmEntity& entity = g_farm_entities[(cursor + step) % total];
+            if (!entity.pos_valid || !entity.transform) continue;
+            if (g_farm_indexed.count(entity.identity)) continue;
+            const float dx = entity.pos.x - g_frame_local_pos.x;
+            const float dz = entity.pos.z - g_frame_local_pos.z;
+            if (dx * dx + dz * dz > learn_radius * learn_radius) continue;
+            farm_index_node(entity);
+            --budget;
+            cursor = (cursor + step + 1) % total;
+        }
+        if (have_reach) farm_learn_from_ray(reach);
+    }
+    info.indexed = (int)g_farm_indexed.size();
+    info.learn_state = g_farm_learn_state;
+
     if (candidates.empty()) {
         g_farm_idle_reason = tool_need ? 6 : (g_farm_entities.empty() ? 3 : 4);
         return 0;
@@ -1234,12 +1338,14 @@ int esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
 
     // Старение кеша шаблонов: узел могли добыть и заменить другим объектом по
     // тому же адресу, поэтому запись живёт ограниченное время без подтверждения.
-    for (auto it = g_farm_templates.begin(); it != g_farm_templates.end();) {
-        if (++(it->second.age) > 3600) it = g_farm_templates.erase(it);
-        else ++it;
+    {
+        const double now = mono_seconds();
+        for (auto it = g_farm_templates.begin(); it != g_farm_templates.end();) {
+            if (now - it->second.stamp > kFarmTemplateTtl) it = g_farm_templates.erase(it);
+            else ++it;
+        }
     }
 
-    int probes = kFarmTemplateProbes;
     int produced = 0;
     for (const Candidate& candidate : candidates) {
         FarmEntity& node = *candidate.entity;
@@ -1287,34 +1393,16 @@ int esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
         if (rd_exact(node.component + MINEABLE_EXPERIENCE, xp) && xp >= 0 && xp < 1000000)
             slot.experience = (int)xp;
 
-        // Шаблон попадания: сначала кеш, потом — попытка выучить его из живого
-        // луча игры. Проверку запускаем только для узлов, которых ещё нет в
-        // кеше, и не больше нескольких за кадр.
+        // Шаблон попадания из кеша (учится выше, в общем проходе по лучу).
+        // Нет шаблона — узел всё равно остаётся целью: удар без подмены
+        // RaycastHit всё ещё бьёт по тому, во что упёрся удлинённый луч игры,
+        // и именно так шаблон в итоге и выучивается.
         auto cached = g_farm_templates.find(node.identity);
         if (cached != g_farm_templates.end() &&
             valid_obj(cached->second.go) && valid_obj(cached->second.collider)) {
             slot.have_template = true;
             slot.hit_object = cached->second.go;
             slot.collider = cached->second.collider;
-        } else if (probes > 0 && have_reach && reach.ray_hit_object &&
-                   reach.ray_hit_go && reach.ray_collider) {
-            --probes;
-            int why = 0;
-            if (ray_hit_is_self_node(reach, node, why)) {
-                FarmHitTemplate tpl;
-                tpl.go = reach.ray_hit_go;
-                tpl.collider = reach.ray_collider;
-                tpl.age = 0;
-                if (g_farm_templates.size() < kFarmTemplateMax)
-                    g_farm_templates[node.identity] = tpl;
-                slot.have_template = true;
-                slot.hit_object = tpl.go;
-                slot.collider = tpl.collider;
-            }
-        }
-        if (slot.have_template) {
-            auto fresh = g_farm_templates.find(node.identity);
-            if (fresh != g_farm_templates.end()) fresh->second.age = 0;
         }
 
         if (g_frame_vp_valid) {

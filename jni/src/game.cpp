@@ -6709,13 +6709,16 @@ void magic_write_pin(const MagicHitPin& pin) {
 // Вернуть обёрткам их собственные значения — но только если там ещё лежит наш
 // указатель: иначе игра уже опубликовала свежий рейкаст, и перезапись старым
 // объектом сломала бы ей взаимодействие.
+// Вызывается с рабочего потока, поэтому идёт через esp_silent_* (KERNEL.md
+// §4.2): транспорт берётся у g_mem по месту, цель задаётся esp_silent_target.
 void magic_restore_wrappers(const MagicHitPin& pin) {
+    if (pin.pid <= 0 || !esp_silent_target(pin.pid)) return;
     auto restore = [&](uint64_t wrapper, uint64_t original) {
         if (!wrapper || !original) return;
         uint64_t current = 0;
-        if (g_mem.read_quiet(wrapper + GUI_VALUE, &current, sizeof(current)) &&
+        if (esp_silent_read(wrapper + GUI_VALUE, &current, sizeof(current)) &&
             memio::untag(current) == pin.data)
-            g_mem.write(wrapper + GUI_VALUE, &original, sizeof(original));
+            esp_silent_write(wrapper + GUI_VALUE, &original, sizeof(original));
     };
     restore(pin.primary, pin.original_primary);
     restore(pin.fallback, pin.original_fallback);

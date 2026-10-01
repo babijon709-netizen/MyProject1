@@ -38,6 +38,10 @@ extern int   g_farmToolNeed;     // что нужно отброшенным у�
 extern int   g_farmXp;           // опыт за текущий узел
 extern int   g_farmTemplates;    // выучено шаблонов попадания (узлов)
 extern int   g_farmHits;         // перенаправлено ударов за сессию
+extern int   g_farmIndexed;      // узлов разобрано в индекс попаданий
+extern int   g_farmNodesWorld;   // узлов в реестре (весь прогруженный мир)
+extern int   g_farmLearn;        // луч: 0 нет, 1 есть, 2 опознан как узел
+extern int   g_farmSwings;       // авто-ударов сделано за сессию
 
 // Калибровка зон вводом с экрана (меню прячется, тап записывает точку):
 // 0 — нет, 2 — кнопка удара Magic-Farm, 3 — точка аима, 4 — джойстик фрикама,
