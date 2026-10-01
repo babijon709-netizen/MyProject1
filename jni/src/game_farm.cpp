@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -542,6 +543,227 @@ void esp_farm_debug(int& nodes_cached, int& idle_reason) {
 void esp_farm_tool_info(int& purposes_have, int& purposes_need) {
     purposes_have = g_farm_tool_have;
     purposes_need = g_farm_tool_need;
+}
+
+// ==== Бесконечная прочность инструмента ======================================
+// Тумблер в окне автофарма («Орудие»). Офсета поля прочности в дампе нет, а
+// имена полей обфускатор перекатывает на каждом обновлении игры. Зато
+// прочность — единственное поле предмета в руке, которое от каждого удара
+// немного убывает и само не подрастает: фарм бьёт сам и знает каждый свой
+// тап, поэтому поле ВЫУЧИВАЕТСЯ в рантайме по дельтам (как TOD_Sky ищется по
+// структуре, а не по имени) и переживает обновления игры без пересбора
+// офсетов.
+//
+// Окно кандидатов — инстанс-поля Oxide.Item (FPObject.Item, внутри ItemData
+// на 0x20): item+0x10..0xA0, слоты по 4 байта. Правила отбора:
+//   - интерпретация слота (float или int32) выбирается по первому
+//     правдоподобному значению (0.001..10000 / 1..100000) и не меняется;
+//   - «шаг удара» — убавление не больше 50 единиц, замеченное в окне 1.2 с
+//     после НАШЕГО тапа (esp_farm_durability_swing): еда/расходники и чужие
+//     таймеры в зачёт не попадают;
+//   - мелкое подрастание (<=50) — таймер/кулдаун: слот отбраковывается
+//     навсегда; крупный скачок вверх — починка/подмена: статистика слота
+//     с нуля;
+//   - поле найдено, когда у лучшего слота 4 шага и он единственный, либо 8
+//     шагов при любом раскладе (двух убывающих полей сразу не бывает, а если
+//     бывает — оба про износ: топливо пилы и прочность, заморозка любого
+//     безобидна).
+// Дальше каждый кадр: значение убавилось — откатываем записью
+// esp_silent_write (те же 4 байта, что читаем), подросло — принимаем новым
+// максимумом. Пока поле не выучено, ничего не пишем: удары и фарм от
+// тумблера не зависят. Если игра хранит прочность не в Item или списывает
+// её только на сервере — поле просто не выучится (state == 1), фарм
+// продолжит работать как раньше.
+namespace {
+
+constexpr unsigned kDurabWinBegin = 0x10;  // после klass+monitor головы объекта
+constexpr unsigned kDurabWinEnd   = 0xA0;  // Item маленький (ItemData на 0x20)
+constexpr int  kDurabSlots = (int)((kDurabWinEnd - kDurabWinBegin) / 4);
+constexpr float kDurabMaxStep  = 50.f;     // единиц за удар (с запасом на пару ударов между кадрами оверлея)
+constexpr float kDurabSwingWin = 1.2f;     // сек после тапа: в этом окне списывается прочность
+constexpr int   kDurabNeed     = 4;        // шагов до решения; kDurabNeed*2 — при неоднозначности
+
+struct DurabSlot {
+    int  drops = 0;         // сколько «шагов удара» насчитано
+    bool dead = false;      // подрастало — таймер, не прочность
+    bool typed = false;     // интерпретация уже выбрана
+    bool is_float = false;  // float (true) или int32 (false)
+};
+DurabSlot s_durab_slots[kDurabSlots];
+uint32_t  s_durab_raw[kDurabSlots] = {};
+bool      s_durab_have = false;     // есть прошлый снимок окна
+uint64_t  s_durab_item = 0;         // Oxide.Item в руках
+uint64_t  s_durab_klass = 0;        // его класс (смена = другой предмет)
+int       s_durab_learned = -1;     // выученный слот или -1
+uint32_t  s_durab_hold = 0;         // удерживаемое значение (сырые байты)
+bool      s_durab_on = false;
+double    s_durab_swing_until = 0.0;
+
+float durab_f(uint32_t raw) {
+    float f;
+    std::memcpy(&f, &raw, sizeof(f));
+    return f;
+}
+
+bool durab_plausible(uint32_t raw, bool is_float) {
+    if (is_float) {
+        const float f = durab_f(raw);
+        return std::isfinite(f) && f >= 0.001f && f <= 10000.f;
+    }
+    const int32_t v = (int32_t)raw;
+    return v >= 1 && v <= 100000;
+}
+
+void durab_reset_item() {
+    for (int i = 0; i < kDurabSlots; ++i) s_durab_slots[i] = DurabSlot{};
+    s_durab_have = false;
+    s_durab_learned = -1;
+    s_durab_hold = 0;
+}
+
+}  // namespace
+
+void esp_farm_durability_set(bool on) {
+    if (on == s_durab_on) return;
+    s_durab_on = on;
+    if (!on) {
+        // Выключили — ничего не восстанавливаем и не дописываем: износ и так
+        // не случился, просто отпускаем предмет.
+        s_durab_item = 0;
+        s_durab_klass = 0;
+        durab_reset_item();
+    }
+}
+
+void esp_farm_durability_swing() {
+    // Контроллер отправил тап удара: в этом окне игра списывает прочность.
+    s_durab_swing_until = mono_seconds() + kDurabSwingWin;
+}
+
+int esp_farm_durability_state() {
+    if (!s_durab_on) return 0;
+    if (!s_durab_item) return 3;             // орудия/предмета нет в руках
+    return s_durab_learned >= 0 ? 2 : 1;     // держим / ещё учимся
+}
+
+void esp_farm_durability_tick() {
+    if (!s_durab_on) return;
+    MeleeReach reach{};
+    if (!read_local_melee_reach(reach) || !reach.item) {
+        if (s_durab_item != 0) {
+            s_durab_item = 0;
+            s_durab_klass = 0;
+            durab_reset_item();
+        }
+        return;
+    }
+    const uint64_t klass = rd_ptr(reach.item);
+    if (!valid_obj(klass) || reach.item != s_durab_item || klass != s_durab_klass) {
+        // Взяли другой предмет (или адрес отдали чужому объекту) — учим
+        // заново: поля и прочность у каждого предмета свои.
+        s_durab_item = reach.item;
+        s_durab_klass = klass;
+        durab_reset_item();
+    }
+
+    uint32_t raw[kDurabSlots] = {};
+    if (!rd_buf(s_durab_item + kDurabWinBegin, raw, sizeof(raw))) return;
+
+    if (!s_durab_have) {
+        std::memcpy(s_durab_raw, raw, sizeof(raw));
+        s_durab_have = true;
+        return;
+    }
+
+    const bool in_swing_window = mono_seconds() < s_durab_swing_until;
+    bool learned_broke = false;
+    for (int i = 0; i < kDurabSlots; ++i) {
+        DurabSlot& s = s_durab_slots[i];
+        const uint32_t a = s_durab_raw[i], b = raw[i];
+        if (!s.typed) {
+            // Интерпретацию выбирает первое правдоподобное значение.
+            const float f = durab_f(b);
+            if (std::isfinite(f) && f >= 0.001f && f <= 10000.f) {
+                s.typed = true;
+                s.is_float = true;
+            } else {
+                const int32_t v = (int32_t)b;
+                if (v >= 1 && v <= 100000) {
+                    s.typed = true;
+                    s.is_float = false;
+                }
+            }
+            continue;    // дельту сравниваем со следующего кадра
+        }
+        if (s.dead || a == b) continue;
+
+        // Выученный слот со сломанным значением — предмет подменили.
+        if (i == s_durab_learned && b != 0 && !durab_plausible(b, s.is_float)) {
+            learned_broke = true;
+            continue;
+        }
+        if (s.is_float) {
+            const float fa = durab_f(a), fb = durab_f(b);
+            if (fb > fa) {
+                if (fb - fa <= kDurabMaxStep) s.dead = true;   // таймер
+                else s.drops = 0;                              // починили
+            } else if (fa - fb <= kDurabMaxStep) {
+                if (in_swing_window) ++s.drops;                // наш удар
+            }
+        } else {
+            const int32_t ia = (int32_t)a, ib = (int32_t)b;
+            if (ib > ia) {
+                if (ib - ia <= (int)kDurabMaxStep) s.dead = true;
+                else s.drops = 0;
+            } else if (ia - ib <= (int)kDurabMaxStep) {
+                if (in_swing_window) ++s.drops;
+            }
+        }
+    }
+    std::memcpy(s_durab_raw, raw, sizeof(raw));
+    if (learned_broke) {
+        durab_reset_item();
+        return;
+    }
+
+    if (s_durab_learned < 0) {
+        int best = -1, best_drops = 0, ties = 0;
+        for (int i = 0; i < kDurabSlots; ++i) {
+            const DurabSlot& s = s_durab_slots[i];
+            if (s.dead || !s.typed) continue;
+            if (s.drops > best_drops) {
+                best_drops = s.drops;
+                best = i;
+                ties = 0;
+            } else if (s.drops == best_drops && s.drops > 0) {
+                ++ties;
+            }
+        }
+        if (best >= 0 && best_drops >= kDurabNeed &&
+            (ties == 0 || best_drops >= kDurabNeed * 2)) {
+            s_durab_learned = best;
+            s_durab_hold = raw[best];
+        }
+        return;
+    }
+
+    // Держим: убавилось — возвращаем записью, подросло — новый максимум.
+    const int i = s_durab_learned;
+    if (s_durab_slots[i].dead) {
+        durab_reset_item();
+        return;
+    }
+    const uint32_t cur = raw[i];
+    if (cur == s_durab_hold) return;
+    const bool decreased = s_durab_slots[i].is_float
+        ? (durab_f(cur) < durab_f(s_durab_hold))
+        : ((int32_t)cur < (int32_t)s_durab_hold);
+    if (decreased) {
+        const uint64_t addr = s_durab_item + kDurabWinBegin + (unsigned)i * 4;
+        (void)esp_silent_write(addr, &s_durab_hold, sizeof(s_durab_hold));
+    } else {
+        s_durab_hold = cur;
+    }
 }
 
 // Упёрся ли луч прицела в САМ узел добычи, а не в перекрытие.

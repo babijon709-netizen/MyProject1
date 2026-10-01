@@ -1765,6 +1765,7 @@ void RenderMenu() {
     Tick(g_state.a_farm_stone,  g_state.farm_stone,  dt);
     Tick(g_state.a_farm_metal,  g_state.farm_metal,  dt);
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
+    Tick(g_state.a_farm_durability, g_state.farm_durability, dt);
     Tick(g_state.a_custom_fov, g_state.viewmodel.fov_enabled, dt);
     Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);

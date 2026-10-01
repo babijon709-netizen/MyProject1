@@ -274,6 +274,14 @@ static void UpdateFarmInner(float dt) {
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
 
+    // ---- Бесконечная прочность инструмента ---------------------------------
+    // Тумблер из окна автофарма работает независимо от самого бота: поле
+    // прочности предмета выучивается по дельтам после НАШИХ ударов (тапы
+    // отмечаются ниже, в пальце 2) и удерживается записью (game_farm.cpp).
+    // Пока поле не выучено, ничего не пишется — фарм от него не зависит.
+    esp_farm_durability_set(g_state.farm_durability);
+    esp_farm_durability_tick();
+
     unsigned mask = 0;
     if (g_state.farm_on) {
         if (g_state.farm_wood)   mask |= 1u;
@@ -934,6 +942,7 @@ static void UpdateFarmInner(float dt) {
                 Touch_Down_N(2, fx, fy);
                 s_tapDown = true;
                 s_tapTimer = (int)tapDownMs;
+                esp_farm_durability_swing();   // окно: игра спишет прочность
                 if (!tgt.ray_valid) {      // замах вслепую — под контроль
                     s_blindHp = tgt.node_health;
                     ++s_blindSwings;

@@ -47,6 +47,9 @@ struct AppState {
     // Автофарм: главный выключатель + какие ресурсы добывать.
     bool  farm_on = false;
     bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
+    // Бесконечная прочность инструмента (тумблер «Орудие» в окне автофарма):
+    // поле прочности выучивается по ударам и удерживается записью.
+    bool  farm_durability = false;
     // Калибровка зон бота (доли экрана 0..1; -1 = не задано, берём дефолт).
     // Джойстик движения и кнопка огня/атаки — у всех раскладки разные.
     float farm_joy_x = -1.f, farm_joy_y = -1.f;
@@ -101,6 +104,7 @@ struct AppState {
     float a_always_day = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
+    float a_farm_durability = 0;
     float a_xray_on = 0;
     float a_freecam_on = 0;
     float a_freecam_btn_show = 0;

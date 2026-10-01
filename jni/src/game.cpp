@@ -6547,6 +6547,16 @@ bool read_local_melee_reach(MeleeReach& out) {
     out.total = reach + radius;
     strncpy(out.tool, s_melee_klass_name, sizeof(out.tool) - 1);
 
+    // Предмет инвентаря (Oxide.Item) — FPObject.Item, с проверкой по ItemData
+    // (мусорный указатель после апдейта раскладки она отсеивает). Прочность и
+    // прочие счётчики предмета живут в нём — см. «бесконечную прочность» в
+    // game_farm.cpp.
+    {
+        const uint64_t item = rd_ptr(weapon + FPOBJECT_ITEM);
+        if (valid_obj(item) && valid_obj(rd_ptr(item + ITEM_DATA)))
+            out.item = item;
+    }
+
     // Длина луча, которым игра ищет точку взаимодействия (префаб
     // RaycastManager, default 1.5). m_AimRayLength (0x3C) и радиус сферы (0x40)
     // при доставании орудия перезаписываются его же m_MaxReach/hitRadius
