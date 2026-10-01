@@ -28,14 +28,21 @@
 // добычу ресурса — без анимации замаха; сетевую механику попадания не подменяем.
 //
 // Фазы кадра:
-//   TURN  — доворачиваем камеру (при |walk_yaw| > 72° стик «вперёд» уводит
-//           от цели, поэтому сначала поворот, потом шаг);
-//   WALK  — держим джойстик к точке подхода, пока не дотянемся до цели;
+//   WALK  — идём к точке подхода С ПЕРВОГО ЖЕ кадра: стик давит прямо в
+//           сторону цели относительно камеры (полный аналог, 360°), камера
+//           доворачивается на узел параллельно, ходьба её не ждёт;
 //   MINE  — стоим, удерживаем прицел на крестике и тапаем удар;
 //   узел добыт / потерян / недостижим — берём следующий (чёрный список).
+//
+// Удар по посторонней геометрии (постройка!) запрещён на нескольких уровнях:
+// тап уходит только когда луч игры подтверждённо стоит в САМОМ узле (или
+// magic-шаблон записан в память с проверкой), ритм никогда не обгоняет
+// кулдаун орудия (очередь тапов игры выстреливает в уведённую камеру), а
+// мёртвый узел снимается с цели до того, как его адреса успеет занять чужой
+// объект (см. проверку живости в game_farm.cpp).
 
 bool g_farmActive = false;   // статус для строки в окне автофарма
-int  g_farmPhase = 0;        // 0 простой, 1 поворот, 2 подход, 3 удар
+int  g_farmPhase = 0;        // 0 простой, 2 подход, 3 удар (1 — поворот — больше не используется)
 int  g_farmNodes = 0;        // узлов насчитал последний скан реестра
 int  g_farmReason = 1;       // причина простоя из esp_farm_debug()
 float g_farmTgtDist = 0.f;   // метры до точки прицела
@@ -92,18 +99,19 @@ constexpr float kReachLiveMin = 0.70f;
 // урона луча не было в 43. Поэтому (а) тап держим, пока луч не появится, но не
 // дольше kNoRaySwingAfter — вдруг на этой сборке обёртка просто не читается, и
 // (б) стик тем временем поджимает ближе, к kNoRayCloseTo, где луч живёт.
-constexpr float kNoRaySwingAfter = 2.5f;   // с без луча — больше не ждём, бьём
+constexpr float kNoRaySwingAfter = 1.5f;   // с без луча — потом пробный замах
 constexpr float kNoRayCloseTo    = 0.50f;  // м: докуда поджимаем, пока луча нет
                                            // (ровно тот aim3d, где луч жил в 97%)
 
 // Допуск наведения, градусы. По крестику жёстко: 2° промаха на 1.5 м — это
 // 5 см в стороне, а засчитываемая зона у дерева всего 15 см.
 constexpr float kAimSpotStart = 1.20f;
-constexpr float kAimSpotStop  = 0.35f;
+constexpr float kAimSpotStop  = 0.30f;
 constexpr float kAimBodyStart = 4.00f;
 constexpr float kAimBodyStop  = 1.50f;
-constexpr float kAimWalkStart = 10.0f;   // на подходе правим только заметный увод
-constexpr float kAimWalkStop  = 4.00f;
+constexpr float kAimWalkStart = 6.00f;   // на подходе правим только заметный увод
+constexpr float kAimWalkStop  = 2.50f;   // (камеру ведём сразу: стик больше не
+                                         //  ждёт доворота, см. фазу WALK)
 constexpr float kPitchDeadWalk = 18.0f;  // и только сильно задранную камеру
 
 // Удар — только когда прицел сел на точку (иначе тап уходит туда, где камера
@@ -112,17 +120,19 @@ constexpr float kSwingSpotYaw   = 1.60f;
 constexpr float kSwingSpotPitch = 2.00f;
 constexpr float kSwingBodyYaw   = 8.00f;
 
-constexpr float kTurnBeforeWalk = 72.f;  // |walk_yaw| больше — сначала доворот
-constexpr float kCreepYaw       = 18.f;  // но если почти лицом и очень далеко — шагаем
-constexpr float kCreepDist      = 8.f;
 constexpr float kArriveWalk     = 0.15f; // дошли до точки подхода
 constexpr float kWalkOffHold    = 0.25f; // гистерезис отпускания джойстика, с
 
-constexpr float kTapDownMs = 85.f;       // ритм ударов: веримый быстрый тап,
-constexpr float kTapUpMs   = 230.f;      // лишние игра просто ставит в очередь
+// Ритм ударов, когда ритм орудия не прочитался из памяти. Безопасный такт
+// 600 мс: лишние тапы игра ставит В ОЧЕРЕДЬ и выстреливает их по кулдауну
+// уже в уведённую камеру — на узле, который только что закончился, это удар
+// по тому, что оказалось перед прицелом (своя постройка у места фарма).
+// Быстрый фолбэк 315 мс обгонял кулдаун большинства орудий.
+constexpr float kTapDownMs = 60.f;       // веримый быстрый тап,
+constexpr float kTapUpMs   = 540.f;      // пауза до следующего (600 мс цикл)
 
-constexpr float kSettleTime    = 0.70f;  // пауза при смене узла
-constexpr float kLostHold      = 0.80f;  // цель может мигнуть на рескане реестра
+constexpr float kSettleTime    = 0.25f;  // пауза при смене узла (пальцы подняты)
+constexpr float kLostHold      = 0.60f;  // цель может мигнуть на рескане реестра
 // Смена узла тоже дебаунсится: новый обязан продержаться «лучшим» несколько
 // кадров подряд. Лог 14.09.2026 — узел в 20 м перехватывал цель ровно на один
 // кадр 9 раз за 150 с, и каждая смена в обе стороны стоила 0.7 с паузы
@@ -132,18 +142,18 @@ constexpr int   kNodeDebounce  = 3;      // кадров подряд на но�
 constexpr float kFlickerGiveUp = 1.0f;   // с прыжков — больше не держимся
 constexpr float kDepletedFrac  = 0.03f;
 constexpr int   kDepletedFrames = 10;    // дебаунс сырого чтения остатка
-constexpr float kStuckTime     = 3.00f;  // нет продвижения к точке подхода
+constexpr float kStuckTime     = 2.20f;  // нет продвижения к точке подхода
 constexpr float kEvadeTime     = 1.70f;  // ~0.6 назад + ~1.1 вбок
 constexpr int   kEvadeMax      = 4;
-constexpr float kBlockedTime   = 0.45f;  // узел перекрыт дольше — пробуем обойти
+constexpr float kBlockedTime   = 0.30f;  // узел перекрыт дольше — пробуем обойти
 // Сколько линия удара должна быть чистой подряд, чтобы простить счётчик обходов
 // перекрытого узла. Мгновенное прощение (как было) означало бесконечный бюджет:
 // «перекрыт» мигает кадр-другой, счётчик обнуляется, обход начинается заново с
 // той же стороны — и бот вечно кружит вокруг узла (лог 14.09, камень 86a3c0:
 // два «обход #1 (вправо)» подряд и ни одного удара).
 constexpr float kBlockedClear  = 1.20f;
-constexpr float kGiveUpDrain   = 20.f;   // бьём, а остаток не падает
-constexpr float kGiveUpBlind   = 45.f;   // то же, но остаток не читается
+constexpr float kGiveUpDrain   = 12.f;   // бьём, а остаток не падает
+constexpr float kGiveUpBlind   = 25.f;   // то же, но остаток не читается
 
 // град/px, пока коэффициент не выучен, берётся из чувствительности настроек
 // клиента — AimSensitivityGain() (для настройки 2.0 это измеренные по логу
@@ -167,10 +177,14 @@ constexpr float kLookWaitMax   = 0.10f;  // с: дольше ответа не �
 constexpr float kGainLo        = 0.035f; // град/px
 constexpr float kGainHi        = 0.350f;
 constexpr float kGainMinPx     = 12.f;   // короче свайп — отношение тонет в шуме
-constexpr float kAimStepSpot   = 0.42f;  // доля остатка ошибки, закрываемая шагом:
-constexpr float kAimStepWalk   = 0.28f;  // по крестику резче, на подходе плавнее
-constexpr float kStepSpotFrac  = 0.030f; // доля высоты экрана на один шаг доводки
-constexpr float kStepWalkFrac  = 0.075f; // (прежние 0.075 = 81 px = 8° рывком)
+// Такт с подтверждением гарантирует, что шаги НЕ складываются (следующий
+// шаг — только после ответа камеры), поэтому долю остатка и предел шага можно
+// держать крупнее: сходимость остаётся монотонной, без раскачки.
+constexpr float kAimStepSpot   = 0.55f;  // доля остатка ошибки, закрываемая шагом:
+constexpr float kAimStepWalk   = 0.45f;  // по крестику резче, на подходе плавнее
+constexpr float kStepSpotFrac  = 0.045f; // доля высоты экрана на один шаг доводки
+constexpr float kStepWalkFrac  = 0.090f; // (при одном шаге за ответ камеры
+                                         //  сложения шагов больше нет)
 constexpr float kPitchDeadSpot = 0.50f;  // град: субградусный pitch в упор не доводим
 constexpr float kStepQuantumPx = 1.0f;   // px: шаг мельче кванта цифрователя не доходит
 
@@ -221,6 +235,8 @@ static void UpdateFarmInner(float dt) {
     static float s_walkOffTime = 0.f; // гистерезис отпускания джойстика
     static float s_stickPx = 0.f, s_stickPy = 0.f; // сглаженная позиция стика
     static float s_noRayTime = 0.f;   // сколько подряд у игры нет луча прицела
+    static int   s_blindSwings = 0;   // замахов вслепую (без луча) уже ушло
+    static float s_blindHp = -1.f;    // здоровье узла перед последним слепым
     static unsigned long long s_candId = 0; // узел-кандидат на смену цели
     static int   s_candFrames = 0;    // сколько кадров подряд он лучший
     static float s_flickerTime = 0.f; // сколько держимся прежнего, с
@@ -244,6 +260,7 @@ static void UpdateFarmInner(float dt) {
         s_lastWalk = 1e9f; s_stuckTime = 0.f;
         s_evadeTime = 0.f; s_evadeCount = 0; s_evadeWhy = 0;
         s_walkOffTime = 0.f; s_noRayTime = 0.f;
+        s_blindSwings = 0; s_blindHp = -1.f;
         s_candId = 0; s_candFrames = 0; s_flickerTime = 0.f;
     };
 
@@ -339,8 +356,9 @@ static void UpdateFarmInner(float dt) {
     // Есть ли у игры данные рейкаста прицела. FPMelee.ZkX берёт distance из
     // GKo (RaycastData/AimRaycast); пока обёртка пуста, удар не засчитывается
     // вовсе — играет один On_Woosh. Лог 14.09.2026: 43 из 48 замахов без урона
-    // шли вообще без луча, а из 39 результативных луч был в 37.
-    const bool noRay = tgt.at_spot && !tgt.ray_valid;
+    // шли вообще без луча, а из 39 результативных луч был в 37. Отсутствие
+    // луча не привязано к крестику: по корпусу узла луч нужен ровно так же.
+    const bool noRay = !tgt.ray_valid;
     s_noRayTime = noRay ? (s_noRayTime + dt) : 0.f;
 
     if (!driving) {
@@ -424,7 +442,26 @@ static void UpdateFarmInner(float dt) {
         s_magicPrimary = tgt.magic_primary_wrapper;
         s_magicFallback = tgt.magic_fallback_wrapper;
     }
-    const bool magicLocked = s_magicData && s_magicGo && s_magicCollider;
+    // Обёртки (GuI<GKo>) обязательны: без них пин не сможет подменить выбор
+    // игры, и удар уйдёт по её настоящему лучу — при упоре в постройку это
+    // чужая геометрия. Шаблон без обёрток не считается запертым вовсе.
+    // Жив ли пин: если последний цикл перенаправления не смог записаться в
+    // память (сбой транспорта), удар по настоящему лучу может уйти в постройку.
+    // Шаблон разучиваем, палец удара поднимаем немедленно — и только потом
+    // считаем magicLocked для этого кадра.
+    if (s_magicData && s_magicGo && s_magicCollider &&
+        (s_magicPrimary || s_magicFallback) && !esp_farm_magic_healthy()) {
+        s_magicData = s_magicGo = s_magicCollider = 0;
+        s_magicPrimary = s_magicFallback = 0;
+        if (s_tapDown) {
+            Touch_Up_N(2);
+            esp_farm_magic_redirect(FarmTarget{}, false);
+            s_tapDown = false;
+            s_tapTimer = 150;   // короткая пауза: ждём переподтверждения лучом
+        }
+    }
+    const bool magicLocked = s_magicData && s_magicGo && s_magicCollider &&
+                             (s_magicPrimary || s_magicFallback);
     if (magicLocked) {
         tgt.magic_ray_data = s_magicData;
         tgt.magic_hit_go = s_magicGo;
@@ -509,6 +546,20 @@ static void UpdateFarmInner(float dt) {
                 s_gainYaw = next;
             }
         }
+        // ВАЖНО: pend чистится только при настоящем ответе (см. camResponded
+        // ниже), иначе покачивание камеры при ходьбе «съедало» накопление и
+        // обучатель делил поворот на часть суммы.
+    }
+    // Подтверждение шага по yaw: камера повернулась В ТУ СТОРОНУ, куда давили.
+    // Любое движение (прежнее правило) во время ходьбы ловит собственное
+    // покачивание камеры и «подтверждает» шаг, которого игра не увидела —
+    // тогда шаги складываются и камеру перебрасывает через цель. Если по yaw
+    // ничего не послано (шаг только по pitch) — достаточно любого движения.
+    // Оси с инверсией это замедляет до такта таймаута (10 шагов/с), но не
+    // ломает: таймаут kLookWaitMax сам перепосылает шаг.
+    const bool yawPend = fabsf(s_gainPendDx) >= 1.f;
+    const bool camResponded = camMoved && (!yawPend || camYawDelta * s_gainPendDx > 0.f);
+    if (camResponded) {
         s_gainPendDx = s_gainPendDy = 0.f;   // ответ получен — копим с нуля
     }
     if (haveCam) {
@@ -593,11 +644,20 @@ static void UpdateFarmInner(float dt) {
     const float errDeg = fmaxf(fabsf(magicYaw), pitchErr);
 
     // В пределах удара — всегда MINE: прицел доводится тем же пальцем, а удар
-    // удар запускается только когда «прицел сел». Вне пределов — идём, но если точка
-    // подхода сильно в стороне, сначала доворачиваем камеру (стик «вперёд»
-    // смотрит по камере, и на yaw 90° он уводил бота вдоль узла).
-    const int phase = inReach ? 3 : ((fabsf(tgt.walk_yaw) <= kTurnBeforeWalk) ? 2 : 1);
+    // запускается только когда «прицел сел». Вне пределов — идём. Отдельной
+    // фазы поворота больше нет: стик давит прямо в сторону цели относительно
+    // камеры (полный аналог, 360°), так что шаг к узлу начинается с первого же
+    // кадра, а камера доворачивается параллельно — ходьба её не ждёт.
+    const int phase = inReach ? 3 : 2;
     g_farmPhase = phase;
+
+    // Сел ли прицел: тап посреди свайпа прилетает туда, где камера была, —
+    // это и есть «не попал по крестику». По корпусу допуск свободный (узел
+    // огромный), по крестику — жёсткий. С запертым magic-шаблоном камере
+    // следить за крестом не нужно: удар всё равно уходит в шаблон узла.
+    const bool aimSettled = magicLocked || (atSpot
+        ? (fabsf(tgt.yaw) <= kSwingSpotYaw && fabsf(tgt.pitch) <= kSwingSpotPitch)
+        : (fabsf(tgt.yaw) <= kSwingBodyYaw));
 
     // ---- палец 1: камера ------------------------------------------------------
     {
@@ -606,10 +666,10 @@ static void UpdateFarmInner(float dt) {
         if (fabsf(magicPitch) > pitchDead) wantPitchPx = -magicPitch * fabsf(invGain);
 
         // Пропорциональный шаг: закрываем часть остатка ошибки (по крестику
-        // больше — там точность важнее скорости). Предел шага по крестику урезан
-        // с 0.075 до 0.030 высоты экрана: 81 px при измеренных 0.10 град/px это
-        // рывок на 8° за кадр — ровно то, что выглядит как дёрганье прицела, даже
-        // когда коэффициент верный.
+        // больше — там точность важнее скорости). Пределы шага крупнее прежних
+        // (0.045/0.090 высоты экрана): рывок через крестик раньше давало
+        // СЛОЖЕНИЕ шагов вслепую (9..11 подряд до ответа камеры), а такт с
+        // подтверждением шлёт ровно один шаг за ответ — сходимость монотонная.
         const bool fineStep = (phase == 3 && atSpot);
         const float maxStep = sh * (fineStep ? kStepSpotFrac : kStepWalkFrac);
         const float kAim = fineStep ? kAimStepSpot : kAimStepWalk;
@@ -623,8 +683,9 @@ static void UpdateFarmInner(float dt) {
             fmaxf(fabsf(wantYawPx), fabsf(wantPitchPx)) * kAim < kStepQuantumPx;
         const bool needTurn = !belowQuantum &&
                               (s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg));
-        // Ждём ли ещё ответа камеры на посланный шаг.
-        const bool awaitingCam = haveCam && !camMoved && s_lookWait < kLookWaitMax &&
+        // Ждём ли ещё ответа камеры на посланный шаг (настоящего ответа —
+        // см. camResponded, а не любого шевеления камеры).
+        const bool awaitingCam = haveCam && !camResponded && s_lookWait < kLookWaitMax &&
                                  (fabsf(s_gainPendDx) >= 1.f || fabsf(s_gainPendDy) >= 1.f);
         if (!needTurn) {
             if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
@@ -687,7 +748,6 @@ static void UpdateFarmInner(float dt) {
             : meleeTight + (liveReach ? 0.12f : (isTree ? 0.08f : 0.25f));
         bool wantWalk =
             (phase == 2 && tgt.walk_dist > kArriveWalk) ||
-            (phase == 1 && fabsf(tgt.walk_yaw) < kCreepYaw && tgt.walk_dist > kCreepDist) ||
             (phase == 3 && distNow > pressAt) ||
             // Нет луча игры — прицел мимо меша: поджимаем вплотную, там ствол
             // перекрывает уход декали вбок и луч появляется (97% на 0.5 м).
@@ -709,8 +769,8 @@ static void UpdateFarmInner(float dt) {
         }
 
         if (wantWalk) {
-            // Центр виртуального стика и толчок вперёд, чуть подруливающий к
-            // цели, чтобы мелкую ошибку угла не приходилось править камерой.
+            // Центр виртуального стика: направление на цель задаёт сам вектор
+            // стика (см. ниже), камера лишь доводит прицел до точки удара.
             const float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
             const float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
             const float r  = sh * 0.16f;
@@ -728,7 +788,7 @@ static void UpdateFarmInner(float dt) {
                 // вовсе — знак у почти нулевой ошибки меняется каждый кадр, и
                 // стик от этого хлопал влево-вправо.
                 float steerYaw = tgt.walk_yaw;
-                const float yawDead = (phase == 3) ? 3.f : ((tgt.walk_dist > 3.f) ? 10.f : 4.f);
+                const float yawDead = (phase == 3) ? 3.f : ((tgt.walk_dist > 3.f) ? 8.f : 3.f);
                 if (fabsf(steerYaw) < yawDead) steerYaw = 0.f;
                 if (phase == 3) {
                     // Финальный подвод: мягко вперёд, руль пропорционален ошибке
@@ -739,11 +799,18 @@ static void UpdateFarmInner(float dt) {
                     px = cx + r * 0.35f * s3;
                     py = cy - r * 0.75f;
                 } else {
-                    float steer = steerYaw / 70.f;
-                    if (steer >  0.6f) steer =  0.6f;
-                    if (steer < -0.6f) steer = -0.6f;
-                    px = cx + r * steer;
-                    py = cy - r * sqrtf(1.f - steer * steer);
+                    // Полный аналог, 360°: стик давит ПРЯМО в сторону точки
+                    // подхода относительно камеры — идём к цели с первого же
+                    // кадра, не стоя на месте, пока камера доворачивается.
+                    // Прежняя схема («вперёд + руль ±0.6», а при |yaw| > 72°
+                    // сперва доворот камеры) стоила секунды на каждый узел:
+                    // при цели сбоку/сзади бот топтался или уходил по дуге.
+                    // Магнитуда полная: край стика игра сама мапит в бег, а
+                    // камера тем временем сводит yaw к нулю, и направление
+                    // само становится «вперёд» (самый быстрый ход).
+                    const float a = steerYaw * 0.017453293f;
+                    px = cx + r * sinf(a);
+                    py = cy - r * cosf(a);
                 }
                 if (s_walkOffTime > 0.f) { px = cx; py = cy; }  // доезжаем к центру
             }
@@ -754,8 +821,9 @@ static void UpdateFarmInner(float dt) {
             } else {
                 // Гладим стик к нужному отклонению вместо телепорта: некоторые
                 // устройства/сборки принимают резкий скачок за боковой флик, и
-                // бота уносило с линии подхода.
-                const float k = 1.f - expf(-14.f * dt);   // ~90% пути за 0.16 с
+                // бота уносило с линии подхода. 26/с — 90% пути за ~90 мс:
+                // отклик почти мгновенный, рывка всё ещё нет.
+                const float k = 1.f - expf(-26.f * dt);
                 s_stickPx += (px - s_stickPx) * k;
                 s_stickPy += (py - s_stickPy) * k;
                 Touch_Down_N(0, s_stickPx, s_stickPy);
@@ -767,13 +835,17 @@ static void UpdateFarmInner(float dt) {
 
     // ---- перекрыт ли узел ------------------------------------------------------
     // Луч, которым игра сама проверяет удар (RaycastManager -> активности
-    // PlayerEventHandler -> GKo.RaycastHit), упёрся заметно ближе нашей точки
-    // прицела: между нами и крестиком камень, забор или склон. Удар в такую
-    // точку уходит в перекрытие, так что не машем — отходим тем же манёвром,
-    // что и при застревании, и только исчерпав попытки сдаём узел. Дебаунс
-    // обязателен: на неуспевшем сесть прицеле луч смотрит мимо узла и даёт
-    // короткое ложное «перекрыто».
-    if (phase == 3 && tgt.ray_blocked) {
+    // PlayerEventHandler -> GKo.RaycastHit), упёрся в ЧУЖУЮ геометрию:
+    // заметно ближе нашей точки прицела (ray_blocked — камень, забор, склон)
+    // или в посторонний объект на линии удара вовсе без учёта дистанции
+    // (ray_foreign — то самое «упёрся в постройку носом»). Удар в такую линию
+    // ломает чужое, так что не машем — отходим манёвром и, если не помогает,
+    // сдаём узел. Учитывается только при севшем прицеле: пока камера едет к
+    // узлу, луч цепляет случайные объекты и «перекрыто» выходит ложным. С
+    // запертым magic-шаблоном обход не нужен: удар перенаправляется в узел
+    // сквозь препятствие, и прерывать добычу было бы потерей времени.
+    if (phase == 3 && !magicLocked && aimSettled &&
+        (tgt.ray_blocked || tgt.ray_foreign)) {
         s_blockedTime += dt;
         if (s_blockedTime > kBlockedTime && s_evadeTime <= 0.f) {
             s_blockedTime = 0.f;
@@ -809,44 +881,78 @@ static void UpdateFarmInner(float dt) {
     // ---- палец 2: удары --------------------------------------------------------
     if (phase == 3) {
         s_mineTime += dt;
-        // Держим удар, пока прицел ещё едет на точку: тап посреди свайпа
-        // прилетает туда, где камера была, — это и есть «не попал по крестику».
-        // По корпусу допуск свободный (узел огромный), по крестику — жёсткий.
-        const bool aimSettled = magicLocked || (atSpot
-            ? (fabsf(tgt.yaw) <= kSwingSpotYaw && fabsf(tgt.pitch) <= kSwingSpotPitch)
-            : (fabsf(tgt.yaw) <= kSwingBodyYaw));
         // Ритм ударов — из самого орудия: FPMelee.m_TimeBetweenAttacks +
         // pauseAfterAttack (у каждого инструмента свои, сериализованы в
         // префабе). Тап раньше срока игра ставит в очередь, и он вылетает уже
         // в уведённую камеру, поэтому держимся чуть медленнее кулдауна;
-        // живого значения нет — остаёмся на подобранных миллисекундах.
+        // живого значения нет — остаёмся на безопасном такте (600 мс, см.
+        // kTapDownMs/kTapUpMs: очередь тапов бьёт по чужой геометрии).
         float tapDownMs = kTapDownMs, tapUpMs = kTapUpMs;
         if (tgt.attack_period > 0.05f && tgt.attack_period < 5.f) {
             const float periodMs = fminf(fmaxf(tgt.attack_period * 1020.f, 250.f), 2000.f);
             tapDownMs = fminf(fmaxf(periodMs * 0.10f, 40.f), 120.f);
             tapUpMs   = fmaxf(periodMs - tapDownMs, 60.f);
         }
-        // Перекрытый узел не бьём: ждём, пока манёвр выведет на линию удара.
-        // Так же держим тап, пока у игры вообще нет луча прицела: без данных
-        // GKo FPMelee.ZkX не может засчитать удар и играет один On_Woosh —
-        // ровно те «удары в воздух», которые видно со стороны. Ждём не вечно
-        // (kNoRaySwingAfter), а стик всё это время поджимает ближе к стволу.
-        const bool swingBlocked = !magicLocked &&
-            (!tgt.ray_self || tgt.ray_blocked ||
-             (noRay && s_noRayTime < kNoRaySwingAfter));
+        // Узел при смерти: новый замах не начинаем. Последний удар мог уже
+        // убить узел — его GameObject вот-вот освободится, и magic-шаблон
+        // начнёт указывать на чужую память (аллокатор отдаёт адреса тут же,
+        // вплоть до коллайдера постройки). Дебаунс остатка (kDepletedFrames)
+        // сменит цель сам; наша задача — не отправить замах в мёртвый адрес.
+        const bool nodeDying =
+            (tgt.node_health >= 0.f && tgt.node_health_max > 0.f &&
+             tgt.node_health <= 0.02f * tgt.node_health_max);
+        // Можно ли бить по лучу игры:
+        //   ray_self — можно: игра сама подтверждает, что линия удара стоит
+        //     в САМОМ узле (поддерево трансформов / коллайдер крестика);
+        //   ray_foreign (луч в посторонний объект) — нельзя НИКОГДА, на
+        //     какой бы дистанции он ни стоял: удар уйдёт в чужую геометрию.
+        //     Прежняя проверка смотрела только «чужое ближе точки прицела на
+        //     0.6 м» — упёршись в постройку носом, бот продолжал махать;
+        //   луча нет вовсе — после kNoRaySwingAfter разрешаем ОДИН пробный
+        //     замах (вдруг на этой сборке обёртка GKo не читается у нас, а у
+        //     игры она жива), и дальше только пока слепые замахи дают прогресс:
+        //     здоровье узла падает. Не падает — прекращаем: они уходят
+        //     неизвестно куда, в том числе в постройку.
+        const bool blindSwing =
+            noRay && atSpot && s_noRayTime >= kNoRaySwingAfter &&
+            (s_blindSwings == 0 ||
+             (tgt.node_health >= 0.f && tgt.node_health < s_blindHp - 0.01f));
+        const bool swingByRay = tgt.ray_self || blindSwing;
+        const bool swingBlocked = !magicLocked && (!swingByRay || tgt.ray_blocked);
         s_tapTimer -= (int)roundf(dt * 1000.f);
-        if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
-            s_tapTimer = 0;              // ждём камеру/обход, не теряя такт
+        if (s_tapTimer <= 0 && (!aimSettled || swingBlocked || nodeDying) && !s_tapDown) {
+            s_tapTimer = 0;              // ждём камеру/обход/узел, не теряя такт
         } else if (s_tapTimer <= 0) {
             if (!s_tapDown) {
                 // Кнопка огня: откалиброванная зона, иначе правая половина
                 // экрана подальше от камерного пальца.
                 const float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
                 const float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
-                if (magicLocked) esp_farm_magic_redirect(tgt, true);
-                Touch_Down_N(2, fx, fy);
-                s_tapDown = true;
-                s_tapTimer = (int)tapDownMs;
+                bool swingNow = true;
+                if (magicLocked) {
+                    // Шаблон обязан встать в память ДО тапа — и с проверкой:
+                    // не записался (сбой транспорта) — удар ушёл бы по
+                    // настоящему лучу игры, а при упоре это чужая постройка.
+                    // Разучиваем шаблон и пропускаем такт: следующий замах
+                    // только после переподтверждения луча по самому узлу.
+                    if (!esp_farm_magic_redirect(tgt, true)) {
+                        s_magicData = s_magicGo = s_magicCollider = 0;
+                        s_magicPrimary = s_magicFallback = 0;
+                        s_tapTimer = 150;
+                        swingNow = false;
+                    }
+                }
+                if (swingNow) {
+                    Touch_Down_N(2, fx, fy);
+                    s_tapDown = true;
+                    s_tapTimer = (int)tapDownMs;
+                    if (!tgt.ray_valid) {      // замах вслепую — под контроль
+                        s_blindHp = tgt.node_health;
+                        ++s_blindSwings;
+                    } else {
+                        s_blindSwings = 0;     // луч жив — слепой режим кончился
+                    }
+                }
             } else {
                 Touch_Up_N(2);
                 esp_farm_magic_redirect(FarmTarget{}, false);
@@ -858,10 +964,12 @@ static void UpdateFarmInner(float dt) {
         if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
         esp_farm_magic_redirect(FarmTarget{}, false);
         s_tapTimer = 0;
+        s_blindSwings = 0;    // фаза ушла — счётчик слепых замахов обнуляем
+        s_blindHp = -1.f;
     }
 
     // ---- watchdog'и ------------------------------------------------------------
-    if (phase == 1 || phase == 2) {
+    if (phase == 2) {
         s_mineTime = 0.f;
         // Нет продвижения к точке подхода — упёрлись в препятствие. Сначала
         // пробуем обойти (назад + вбок, чередуя стороны), и только когда

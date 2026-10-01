@@ -6,7 +6,7 @@ void UpdateFarm(float dt);
 
 
 extern bool g_farmActive;
-extern int  g_farmPhase;
+extern int  g_farmPhase;      // 0 простой, 2 подход, 3 удар
 extern int  g_farmNodes;      // сколько узлов нашёл последний скан реестра
 extern int  g_farmReason;     // причина простоя (см. esp_farm_debug)
 extern float g_farmTgtDist;   // дистанция до точки прицела, м

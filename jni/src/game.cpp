@@ -6640,11 +6640,71 @@ struct MagicHitPin {
 std::mutex g_magic_pin_mutex;
 MagicHitPin g_magic_pin;
 std::atomic<bool> g_magic_pin_active{false};
+// Последний цикл пина НЕ смог записаться в память игры (сбой транспорта).
+// Удар в таком окне уйдёт по настоящему лучу игры — при упоре в постройку
+// это чужая геометрия. Контроллер узнаёт через esp_farm_magic_healthy(),
+// поднимает палец удара и разучивает шаблон до переподтверждения лучом.
+std::atomic<bool> g_magic_pin_fail{false};
+// Отложенное восстановление данных игры: делает сам поток пина, чтобы путь
+// вызывающего потока (рендер-кадр) не платил usleep'ом за каждый тап.
+std::atomic<bool> g_magic_restore{false};
+MagicHitPin g_magic_restore_pin;
 std::once_flag g_magic_pin_once;
+
+// Одна попытка пина: пишет И обёртки, И сам GKo — игра может подменить
+// GuI<GKo>.Value свежим объектом после обновления своего луча, и записи
+// только старого GKo мало. Возвращает false, если хоть одна запись не
+// дошла: с этого момента удар пойдёт по настоящему лучу игры.
+bool magic_pin_apply(const MagicHitPin& pin) {
+    bool ok = true;
+    if (pin.primary)
+        ok = esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data)) && ok;
+    if (pin.fallback)
+        ok = esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data)) && ok;
+    ok = esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go)) && ok;
+    ok = esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
+                          &pin.point, sizeof(pin.point)) && ok;
+    ok = esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
+                          &pin.distance, sizeof(pin.distance)) && ok;
+    ok = esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
+                          &pin.collider, sizeof(pin.collider)) && ok;
+    return ok;
+}
+
+// Вернуть игре её собственные данные луча: обёртки — только пока в них ещё
+// наш указатель (иначе игра уже опубликовала свежие легитимные данные, и
+// трогать их нельзя), и только если «оригинал» вообще прочитался (запись
+// нуля в живую обёртку испортила бы игре прицел до следующего рейкаста).
+void magic_pin_restore(const MagicHitPin& pin) {
+    auto restore_wrapper = [&](uint64_t wrapper, uint64_t original) {
+        if (!wrapper || !original) return;
+        uint64_t current = 0;
+        if (esp_silent_read(wrapper + GUI_VALUE, &current, sizeof(current)) &&
+            memio::untag(current) == pin.data)
+            esp_silent_write(wrapper + GUI_VALUE, &original, sizeof(original));
+    };
+    restore_wrapper(pin.primary, pin.original_primary);
+    restore_wrapper(pin.fallback, pin.original_fallback);
+}
 
 void magic_pin_worker() {
     for (;;) {
         if (!g_magic_pin_active.load(std::memory_order_acquire)) {
+            // Восстановление выполняем сами — и захватываем работу под тем же
+            // мьютексом, которым публикуется новый пин: тогда поздний restore
+            // НЕ может отменить только что применённый новый пин (enable либо
+            // очистил флаг раньше нас, либо подождёт нас за мьютексом).
+            // Выполняется не раньше, чем через 1 мс после нашей последней
+            // записи — «доехавшая» итерация пина успевает завершиться.
+            {
+                std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
+                if (g_magic_restore.load(std::memory_order_acquire) &&
+                    !g_magic_pin_active.load(std::memory_order_acquire)) {
+                    MagicHitPin pin = g_magic_restore_pin;
+                    g_magic_restore.store(false, std::memory_order_release);
+                    if (pin.pid && esp_silent_target(pin.pid)) magic_pin_restore(pin);
+                }
+            }
             usleep(2000);
             continue;
         }
@@ -6657,18 +6717,18 @@ void magic_pin_worker() {
             g_magic_pin_active.store(false, std::memory_order_release);
             continue;
         }
-        // Pin both wrapper selection and the GKo payload. The game may replace
-        // GuI<GKo>.Value with a fresh object after updating its ray, so writing
-        // only the old GKo cannot redirect the attack that FPMelee actually reads.
-        if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
-        if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
-        esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
-                         &pin.point, sizeof(pin.point));
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
-                         &pin.distance, sizeof(pin.distance));
-        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
-                         &pin.collider, sizeof(pin.collider));
+        if (!magic_pin_apply(pin)) {
+            // Запись не дошла: пин мёртв, удар (если тап уже уходит) полетит
+            // по настоящему лучу игры. Ставим флаг для контроллера и возвращаем
+            // игре то, что успели записать частично — но только если новый пин
+            // не начал жизнь, пока мы разбирались с отказом.
+            g_magic_pin_active.store(false, std::memory_order_release);
+            g_magic_pin_fail.store(true, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
+            if (!g_magic_pin_active.load(std::memory_order_acquire))
+                magic_pin_restore(pin);
+            continue;
+        }
         usleep(1000);
     }
 }
@@ -6677,21 +6737,16 @@ void magic_pin_worker() {
 bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
     if (!enabled) {
         if (!g_magic_pin_active.exchange(false, std::memory_order_acq_rel)) return true;
-        // Let an iteration that already copied the payload finish before restore.
-        usleep(3000);
-        MagicHitPin old;
-        { std::lock_guard<std::mutex> lock(g_magic_pin_mutex); old = g_magic_pin; }
-        // Restore wrapper values only while they still contain our pointer;
-        // otherwise the game has already published newer legitimate data.
-        auto restore_wrapper = [&](uint64_t wrapper, uint64_t original) {
-            if (!wrapper) return;
-            uint64_t current = 0;
-            if (g_mem.read_quiet(wrapper + GUI_VALUE, &current, sizeof(current)) &&
-                memio::untag(current) == old.data)
-                g_mem.write(wrapper + GUI_VALUE, &original, sizeof(original));
-        };
-        restore_wrapper(old.primary, old.original_primary);
-        restore_wrapper(old.fallback, old.original_fallback);
+        // Восстановление данных игры делает поток пина: раньше здесь стоял
+        // usleep(3000) на пути рендер-потока — 3 мс простоя кадра на КАЖДОМ
+        // подъёме пальца удара (каждый тап!). Поток подхватит снапшот в
+        // течение ~2 мс, никакой гонки с его записями нет: активность уже
+        // снята, новую итерацию пина он не начнёт.
+        {
+            std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
+            g_magic_restore_pin = g_magic_pin;
+        }
+        g_magic_restore.store(true, std::memory_order_release);
         return true;
     }
     MagicHitPin pin;
@@ -6705,29 +6760,45 @@ bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
     pin.point = {target.aim_x, target.aim_y, target.aim_z};
     pin.distance = target.aim_3d;
     pin.pid = g_pid;
+    // Обёртки обязательны: без них пин не подменит выбор игры, и удар уйдёт
+    // по её настоящему лучу (при упоре в постройку — в чужую геометрию).
     if (!valid_obj(pin.data) || !valid_obj(pin.go) || !valid_obj(pin.collider) ||
+        (!pin.primary && !pin.fallback) ||
         !vec3_is_finite(pin.point) || !position_looks_like_world_space(pin.point)) return false;
     if (!std::isfinite(pin.distance) || pin.distance <= 0.f || pin.distance >= target.melee_reach)
         pin.distance = fmaxf(0.05F, target.melee_reach * 0.5F);
-    {
-        std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
-        g_magic_pin = pin;
-    }
+    // Публикация, применение и активация — под одним мьютексом с реставрацией
+    // работника: отложенный restore прошлого тапа либо уже выполнен (тогда
+    // наши записи лягут ПОСЛЕ него), либо будет отменён флагом здесь, либо
+    // подождёт нас за мьютексом. Поздний restore не может отменить новый пин.
+    // Отложенное восстановление от прошлого тапа больше не актуально: его
+    // «оригиналы» относятся к прежнему пину, а данные всё равно перезапишет
+    // новый пин (и поток продолжает переподтверждать его каждую 1 мс).
     std::call_once(g_magic_pin_once, [] {
         std::thread(magic_pin_worker).detach();
     });
-    g_magic_pin_active.store(true, std::memory_order_release);
-    // Do not wait for the worker's first cycle.
-    if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
-    if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
-    esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
-                     &pin.point, sizeof(pin.point));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
-                     &pin.distance, sizeof(pin.distance));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
-                     &pin.collider, sizeof(pin.collider));
+    {
+        std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
+        g_magic_restore.store(false, std::memory_order_release);
+        g_magic_pin = pin;
+        // Немедленная попытка пина — тап уходит сразу после нас, ждать первого
+        // цикла потока нельзя. Каждая запись проверяется: не записалось — тап
+        // обязан быть отменён контроллером (иначе удар пойдёт по настоящему
+        // лучу игры). Флаг ошибки отпускаем только после успешной записи.
+        if (!magic_pin_apply(pin)) {
+            g_magic_pin_active.store(false, std::memory_order_release);
+            g_magic_pin_fail.store(true, std::memory_order_release);
+            magic_pin_restore(pin);
+            return false;
+        }
+        g_magic_pin_active.store(true, std::memory_order_release);
+        g_magic_pin_fail.store(false, std::memory_order_release);
+    }
     return true;
+}
+
+bool esp_farm_magic_healthy() {
+    return !g_magic_pin_fail.load(std::memory_order_acquire);
 }
 
 float esp_camera_fov_deg() { return g_cam_fov_deg; }

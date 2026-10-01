@@ -639,11 +639,18 @@ static bool ray_hit_is_self_node(const MeleeReach& reach, const FarmEntity& node
     //    ставит крестик руды (OREHS_COLLIDER, lzR). Поле заполняется в gir, то
     //    есть уже ПОСЛЕ первого попадания (и живёт, пока жив крестик).
     if (reach.ray_collider && node.ext && node.ext_kind == FARM_EXT_ORE) {
-        const uint64_t col = rd_ptr(node.ext + OREHS_COLLIDER);
-        if (col && (col == reach.ray_collider ||
-                    managed_object_native(col) == managed_object_native(reach.ray_collider))) {
-            why = 1;
-            return true;
+        // Сравнивать коллайдер крестика можно, только пока крестик ЖИВ: после
+        // гашения поле может держать указатель на уничтоженный коллайдер, чей
+        // адрес аллокатор уже отдал постройке — сравнение дало бы ложное
+        // «попадание в свой узел» и удар по чужой стене.
+        const uint64_t marker = rd_ptr(node.ext + OREHS_MARKER);
+        if (valid_obj(marker)) {
+            const uint64_t col = rd_ptr(node.ext + OREHS_COLLIDER);
+            if (col && (col == reach.ray_collider ||
+                        managed_object_native(col) == managed_object_native(reach.ray_collider))) {
+                why = 1;
+                return true;
+            }
         }
     }
     if (!node.transform) return false;
@@ -791,6 +798,37 @@ bool esp_farm_get_target(FarmTarget& out) {
     g_farm_tool_need = 0;
     s_last_identity = best->identity;
     FarmEntity& node = const_cast<FarmEntity&>(*best);
+
+    // ---- Жив ли ещё выбранный узел --------------------------------------------
+    // Добытый узел игра уничтожает, а освободившуюся память аллокатор тут же
+    // отдаёт под новые объекты — вплоть до коллайдера и GameObject ПОСТРОЙКИ.
+    // Тогда проверки «луч упёрся в свой узел» (поддерево трансформов,
+    // GameObject узла, коллайдер крестика) получают ложное подтверждение по
+    // переиспользованным адресам, и бот со спокойной совестью бьёт по
+    // постройке, в которую упёрся. Класс компонента у живого MineableObject
+    // не меняется никогда: смена класса или невалидный объект = узел умер.
+    // С дебаунсом (единичный сбой чтения не выкидывает живой узел) и БЕЗ
+    // чёрного списка: ошиблись — следующий проход скана (2 с) вернёт узел.
+    {
+        static uint64_t s_alive_id = 0;
+        static int      s_alive_bad = 0;
+        if (best->identity != s_alive_id) { s_alive_id = best->identity; s_alive_bad = 0; }
+        bool alive = false;
+        if (valid_obj(node.component)) {
+            const uint64_t klass = rd_ptr(node.component);
+            alive = valid_obj(klass) && marker_class_of(klass) == MARKER_CLASS_MINEABLE;
+        }
+        if (alive) {
+            s_alive_bad = 0;
+        } else if (++s_alive_bad >= 10) {
+            for (auto it = g_farm_entities.begin(); it != g_farm_entities.end(); ++it) {
+                if (it->identity == best->identity) { g_farm_entities.erase(it); break; }
+            }
+            s_last_identity = 0;
+            g_farm_idle_reason = 7;   // узел умер: память уже чужая
+            return false;
+        }
+    }
 
     // ---- Крестик -------------------------------------------------------------
     Vec3 spot{};
@@ -1068,9 +1106,20 @@ bool esp_farm_get_target(FarmTarget& out) {
         // after the ordinary ray has been proven to belong to this exact node.
         if (!out.ray_self && reach.ray_hit_object)
             out.ray_self = ray_hit_is_self_node(reach, node, out.ray_self_why);
+        // Постороннее попадание: луч игры упёрся в объект, который не наш
+        // узел, — БЕЗ учёта дистанции. Именно это и есть «бот упёрся в
+        // постройку и начал её ломать»: раньше замах блокировался, только
+        // если чужой объект стоял ближе точки прицела на 0.6 м, а упёршись
+        // в стену носом (луч в стене на любой дистанции) бот продолжал
+        // махать. Теперь любая чужая геометрия на линии удара запрещает
+        // замах, а контроллер обходит её или сдаёт узел.
+        out.ray_foreign = reach.ray_valid && reach.ray_hit_object && !out.ray_self;
         // The controller may then reuse that validated hit template while the
-        // camera looks elsewhere.
-        if (out.ray_self && reach.ray_data && reach.ray_hit_go && reach.ray_collider) {
+        // camera looks elsewhere. Обёртки обязательны: без них пин не сможет
+        // подменить выбор игры (ray_data читается ИЗ обёртки, так что хотя бы
+        // одна обязана была быть валидной — требование дублируем явно).
+        if (out.ray_self && reach.ray_data && reach.ray_hit_go && reach.ray_collider &&
+            (reach.ray_primary_wrapper || reach.ray_fallback_wrapper)) {
             out.magic_ray_data = reach.ray_data;
             out.magic_hit_go = reach.ray_hit_go;
             out.magic_collider = reach.ray_collider;
