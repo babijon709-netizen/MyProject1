@@ -72,6 +72,8 @@ int   g_farmNodesWorld = 0;
 int   g_farmLearn = 0;
 int   g_farmHits = 0;
 int   g_farmSwings = 0;
+int   g_farmRayStage = 0;        // где обрывается цепочка рейкаста игры
+int   g_farmRayBest = 0;         // лучшая стадия за сессию
 int   g_farmPinHold = -1;        // % проверок, где наш рейкаст уцелел (-1 нет данных)
 
 namespace {
@@ -278,6 +280,8 @@ void UpdateFarm(float dt) {
     g_farmIndexed = info.indexed;
     g_farmNodesWorld = info.nodes_total;
     g_farmLearn = info.learn_state;
+    g_farmRayStage = info.ray_stage;
+    g_farmRayBest = info.ray_stage_best;
     {
         unsigned held = 0, lost = 0;
         esp_magic_hit_stats(held, lost);
@@ -406,7 +410,12 @@ void UpdateFarm(float dt) {
     // остальных случаях махать нечем: это и был тот самый «бот просто бьёт
     // туда, куда смотрит». Метки узлов при этом рисуются, состояние в меню
     // показывает, чего не хватает.
-    if (!tgt.have_template && info.learn_state != 2) {
+    // Когда игра вообще не публикует GKo (стадия ниже 4), подменять нечего и
+    // пин невозможен — но штатный удар в упор всё ещё работает. Поэтому у
+    // самой цели (до 3.5 м) бьём как обычный автофарм, а не стоим столбом.
+    const bool rayUsable = info.ray_stage >= 4;
+    const bool closeBlind = !rayUsable && tgt.dist <= 3.5f;
+    if (!tgt.have_template && info.learn_state != 2 && !closeBlind) {
         releaseTap();
         releasePin();
         g_farmPhase = 1;

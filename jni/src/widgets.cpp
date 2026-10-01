@@ -909,9 +909,18 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             if (g_farmTpActive) snprintf(v, 48, "%.1f %s", (double)g_farmTpReach, XS("м"));
             else                snprintf(v, 48, "%s", XS("выкл"));
 
-            v = add(XS("Луч игры"), g_farmLearn > 0);
-            snprintf(v, 48, "%s", g_farmLearn == 2 ? XS("на ресурсе")
-                                 : g_farmLearn == 1 ? XS("в стороне") : XS("нет"));
+            // Самая важная строка: вся подмена удара держится на рейкасте
+            // игры, и тут видно, на каком звене он обрывается.
+            static const char* const kRayStage[7] = {
+                XS("нет орудия"), XS("нет обработчика"), XS("нет полей"),
+                XS("игра не целится"), XS("без попадания"),
+                XS("не ресурс"), XS("на ресурсе"),
+            };
+            const int rs = (g_farmRayStage >= 0 && g_farmRayStage <= 6) ? g_farmRayStage : 0;
+            const int rb = (g_farmRayBest >= 0 && g_farmRayBest <= 6) ? g_farmRayBest : 0;
+            v = add(XS("Луч игры"), rs >= 4);
+            if (rb > rs) snprintf(v, 48, "%s (%s %d)", kRayStage[rs], XS("макс"), rb);
+            else         snprintf(v, 48, "%s", kRayStage[rs]);
 
             v = add(XS("Ударов"), g_farmHits > 0);
             snprintf(v, 48, "%d / %d", g_farmHits, g_farmSwings);

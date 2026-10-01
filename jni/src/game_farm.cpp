@@ -1171,9 +1171,11 @@ constexpr int    kFarmIndexPerTick = 2;     // узлов за кадр
 
 // Диагностика последнего кадра (для строки состояния в меню).
 int    g_farm_learn_state = 0;   // 0 луча нет, 1 луч есть, 2 луч опознан как узел
+int    g_farm_ray_best = 0;      // максимальная стадия луча за сессию
 }  // namespace
 
 void farm_templates_reset() {
+    g_farm_ray_best = 0;
     g_farm_templates.clear();
     g_farm_subtree_owner.clear();
     g_farm_indexed.clear();
@@ -1312,18 +1314,43 @@ int esp_farm_get_swarm(FarmSwarmNode* out, int max_nodes, float radius_m,
         int budget = kFarmIndexPerTick;
         static size_t cursor = 0;
         const size_t total = g_farm_entities.size();
+        if (cursor >= total) cursor = 0;
         for (size_t step = 0; step < total && budget > 0; ++step) {
-            FarmEntity& entity = g_farm_entities[(cursor + step) % total];
+            const size_t idx = (cursor + step) % total;
+            FarmEntity& entity = g_farm_entities[idx];
             if (!entity.pos_valid || !entity.transform) continue;
             if (g_farm_indexed.count(entity.identity)) continue;
             const float dx = entity.pos.x - g_frame_local_pos.x;
             const float dz = entity.pos.z - g_frame_local_pos.z;
             if (dx * dx + dz * dz > learn_radius * learn_radius) continue;
             farm_index_node(entity);
-            --budget;
-            cursor = (cursor + step + 1) % total;
+            if (--budget == 0) cursor = (idx + 1) % total;
         }
         if (have_reach) farm_learn_from_ray(reach);
+    }
+
+    // Где обрывается цепочка рейкаста. Вся подмена удара держится на ней, и
+    // если игра не публикует GKo, Silent Melee опереться не на что — это надо
+    // видеть в меню, а не гадать.
+    {
+        int stage = 0;
+        if (have_reach) {
+            stage = 1;
+            if (reach.event_handler) {
+                stage = 2;
+                if (reach.ray_primary_wrapper || reach.ray_fallback_wrapper) {
+                    stage = 3;
+                    if (reach.ray_valid && reach.ray_data) {
+                        stage = 4;
+                        if (reach.ray_hit_go && reach.ray_collider)
+                            stage = (g_farm_learn_state == 2) ? 6 : 5;
+                    }
+                }
+            }
+        }
+        info.ray_stage = stage;
+        if (stage > g_farm_ray_best) g_farm_ray_best = stage;
+        info.ray_stage_best = g_farm_ray_best;
     }
     info.indexed = (int)g_farm_indexed.size();
     info.learn_state = g_farm_learn_state;

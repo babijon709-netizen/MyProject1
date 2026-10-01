@@ -6600,6 +6600,7 @@ bool read_local_melee_reach(MeleeReach& out) {
     {
         const uint64_t handler = rd_ptr(weapon + FPOBJECT_EVENT_HANDLER);
         if (valid_obj(handler)) {
+            out.event_handler = handler;
             uint64_t data = 0;
             const uint64_t primary = rd_ptr(handler + GUM_RAYCAST_DATA);
             const uint64_t fallback = rd_ptr(handler + GUM_AIM_RAYCAST);
