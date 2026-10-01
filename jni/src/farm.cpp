@@ -17,22 +17,24 @@
 // у руды это трансформ живого маркера OreHitstreaks.MoW, у дерева — вектор
 // TreeHitstreaks.MTQ (серия засчитывается по дистанции от точки удара до
 // маркера/отрезка MTQ..MTu с радиусом 15 см). Попадание в крестик даёт
-// бонусный ресурс, поэтому точкой удара всегда выбирается именно он —
-// с какой бы стороны узла тот ни висел и куда бы ни смотрела камера:
-// замах перенаправляется пином Magic-Farm (точка/дистанция/коллайдер
-// пишутся в GKo самой игры перед тапом), и игровая проверка серии проходит
-// с нулевой ошибкой. Наведение камеры при этом всегда держит ЦЕНТР КОРПУСА
-// узла (стабильная точка): со стороны бот выглядит как обычный игрок,
-// который смотрит на ресурс и добывает его.
+// бонусный ресурс, поэтому бот добивается того, чтобы каждый удар
+// засчитывался в крестик, — но НЕ наведением, а ПИНОМ КРЕСТИКА: фоновый
+// поток каждые ~3 мс телепортирует крестик ровно в точку, куда падает
+// удар (живой луч прицела игры), и проверка серии проходит с нулевой
+// ошибкой — с какой бы стороны узла крестик ни висел и куда бы ни смотрела
+// камера. Подмены удара нет: игра бьёт своим лучом по своему узлу, мы
+// лишь держим крестик в точке падения. Камера при этом всегда держит
+// ЦЕНТР КОРПУСА узла (стабильная точка): со стороны бот выглядит как
+// обычный игрок, который смотрит на ресурс и добывает его.
 //
 // Крестик существует не всегда: игра создаёт его при первом же попадании по
 // узлу и гасит через 15 секунд простоя — цикл всегда один и тот же: удар по
 // корпусу -> появился X -> все следующие удары точно в X (пином).
 //
-// Удары по-прежнему отправляются штатным вводом и проходят игровые проверки
-// дистанции/кулдауна (дистанцию в GKo пишем честную, от глаза до крестика),
-// но game_viewmodel скрывает локальные позы инструмента на фазе MINE.
-// Сетевую механику попадания не подменяем.
+// Удары отправляются штатным вводом и проходят все игровые проверки
+// дистанции/кулдауна по настоящему лучу игры; game_viewmodel скрывает
+// локальные позы инструмента на фазе MINE. Сетевую механику попадания
+// не подменяем — двигается только маркер бонусной серии.
 //
 // Фазы кадра:
 //   WALK  — идём к точке подхода С ПЕРВОГО ЖЕ кадра: стик давит прямо в
@@ -42,11 +44,10 @@
 //   узел добыт / потерян / недостижим — берём следующий (чёрный список).
 //
 // Удар по посторонней геометрии (постройка!) запрещён на нескольких уровнях:
-// тап уходит только когда луч игры подтверждённо стоит в САМОМ узле (или
-// magic-шаблон записан в память с проверкой), ритм никогда не обгоняет
-// кулдаун орудия (очередь тапов игры выстреливает в уведённую камеру), а
-// мёртвый узел снимается с цели до того, как его адреса успеет занять чужой
-// объект (см. проверку живости в game_farm.cpp).
+// тап уходит только когда луч игры подтверждённо стоит в САМОМ узле, ритм
+// никогда не обгоняет кулдаун орудия (очередь тапов игры выстреливает в
+// уведённую камеру), а мёртвый узел снимается с цели до того, как его
+// адреса успеет занять чужой объект (см. проверку живости в game_farm.cpp).
 
 bool g_farmActive = false;   // статус для строки в окне автофарма
 int  g_farmPhase = 0;        // 0 простой, 2 подход, 3 удар (1 — поворот — больше не используется)
@@ -218,9 +219,11 @@ static void UpdateFarmInner(float dt) {
     static float s_gainS1 = 0.f, s_gainS2 = 0.f, s_gainS3 = 0.f; // образцы
     static int   s_gainN = 0;         // сколько образцов принято
     static unsigned long long s_nodeId = 0;
-    // Hit template learned once from an ordinary ray on this exact node.
-    static unsigned long long s_magicData = 0, s_magicGo = 0, s_magicCollider = 0;
-    static unsigned long long s_magicPrimary = 0, s_magicFallback = 0;
+    // Пин крестика (телепорт крестика в точку удара): включён / на каком
+    // узле / сколько ждать до переподключения после сбоя записи.
+    static bool  s_pinOn = false;
+    static unsigned long long s_pinNode = 0;
+    static float s_pinRetry = 0.f;
     static float s_settle = 0.f;      // пауза между целями (пальцы подняты)
     static float s_lostTime = 0.f;    // цель пропала: ждём, вдруг вернётся
     static float s_mineTime = 0.f;    // сколько бьём этот узел без прогресса
@@ -249,15 +252,15 @@ static void UpdateFarmInner(float dt) {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
         if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
         if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
-        esp_farm_magic_redirect(FarmTarget{}, false);
+        esp_farm_cross_pin(FarmTarget{}, false);
+        s_pinOn = false; s_pinNode = 0;
         s_haveLast = false;
         s_lookHold = 0;
     };
     auto resetNode = [&]() {
-        esp_farm_magic_redirect(FarmTarget{}, false);
+        esp_farm_cross_pin(FarmTarget{}, false);
+        s_pinOn = false; s_pinNode = 0;
         s_nodeId = 0;
-        s_magicData = s_magicGo = s_magicCollider = 0;
-        s_magicPrimary = s_magicFallback = 0;
         s_mineTime = 0.f; s_fracStart = -1.f; s_bestStreak = 0;
         s_healthStart = -1.f; s_blockedTime = 0.f; s_clearTime = 0.f;
         s_depletedFrames = 0;
@@ -434,44 +437,6 @@ static void UpdateFarmInner(float dt) {
         s_settle -= dt;
         releaseAll();
         return;
-    }
-
-    // Learn the node's actual GameObject/collider from one normal ray. Once
-    // learned, the camera no longer has to follow the hit-streak cross: every
-    // normal timed attack is redirected to this validated template.
-    if (tgt.id == s_nodeId && tgt.magic_ray_data && tgt.magic_hit_go && tgt.magic_collider) {
-        s_magicData = tgt.magic_ray_data;
-        s_magicGo = tgt.magic_hit_go;
-        s_magicCollider = tgt.magic_collider;
-        s_magicPrimary = tgt.magic_primary_wrapper;
-        s_magicFallback = tgt.magic_fallback_wrapper;
-    }
-    // Обёртки (GuI<GKo>) обязательны: без них пин не сможет подменить выбор
-    // игры, и удар уйдёт по её настоящему лучу — при упоре в постройку это
-    // чужая геометрия. Шаблон без обёрток не считается запертым вовсе.
-    // Жив ли пин: если последний цикл перенаправления не смог записаться в
-    // память (сбой транспорта), удар по настоящему лучу может уйти в постройку.
-    // Шаблон разучиваем, палец удара поднимаем немедленно — и только потом
-    // считаем magicLocked для этого кадра.
-    if (s_magicData && s_magicGo && s_magicCollider &&
-        (s_magicPrimary || s_magicFallback) && !esp_farm_magic_healthy()) {
-        s_magicData = s_magicGo = s_magicCollider = 0;
-        s_magicPrimary = s_magicFallback = 0;
-        if (s_tapDown) {
-            Touch_Up_N(2);
-            esp_farm_magic_redirect(FarmTarget{}, false);
-            s_tapDown = false;
-            s_tapTimer = 150;   // короткая пауза: ждём переподтверждения лучом
-        }
-    }
-    const bool magicLocked = s_magicData && s_magicGo && s_magicCollider &&
-                             (s_magicPrimary || s_magicFallback);
-    if (magicLocked) {
-        tgt.magic_ray_data = s_magicData;
-        tgt.magic_hit_go = s_magicGo;
-        tgt.magic_collider = s_magicCollider;
-        tgt.magic_primary_wrapper = s_magicPrimary;
-        tgt.magic_fallback_wrapper = s_magicFallback;
     }
 
     // Экранная метка ровно на той точке, по которой бот бьёт: зелёная — по
@@ -664,7 +629,38 @@ static void UpdateFarmInner(float dt) {
     // (шаблон ещё не выучен): тап тогда уходит по лучу игры, и камера должна
     // смотреть на узел. С запертым шаблоном камеру не ждём вовсе — удар
     // уходит в крестик независимо от того, куда смотрит бот.
-    const bool aimSettled = magicLocked || (fabsf(tgt.yaw) <= kSwingBodyYaw);
+    const bool aimSettled = (fabsf(tgt.yaw) <= kSwingBodyYaw);
+
+    // ---- пин крестика: клей крестика к точке удара ----------------------------
+    // Крестик телепортируется в точку, куда реально падает удар (живой луч
+    // прицела игры) — фоновым потоком в game.cpp. Серия засчитывается без
+    // какого-либо наведения на крестик, камера продолжает держать центр
+    // узла. Пин — не ворота для ударов: не включился — бьём как били (по
+    // лучу в узел), просто серия может не расти.
+    {
+        const bool wantPin = (phase == 3) && tgt.has_spot &&
+                             (tgt.cross_ext || tgt.cross_marker_transform);
+        const bool pinAlive = s_pinOn && esp_farm_cross_healthy();
+        if (s_pinOn && (!wantPin || !pinAlive || s_pinNode != tgt.id)) {
+            esp_farm_cross_pin(FarmTarget{}, false);
+            s_pinOn = false;
+            s_pinNode = 0;
+            if (wantPin && !pinAlive) s_pinRetry = 2.f;   // сбой записи — пауза
+        }
+        if (wantPin && !s_pinOn) {
+            if (s_pinRetry > 0.f) s_pinRetry -= dt;
+            else if (esp_farm_cross_pin(tgt, true)) { s_pinOn = true; s_pinNode = tgt.id; }
+            else s_pinRetry = 2.f;
+        } else if (wantPin && s_pinOn) {
+            // Живое обновление точки-запаса и пересозданных маркеров.
+            if (!esp_farm_cross_pin(tgt, true)) {
+                esp_farm_cross_pin(FarmTarget{}, false);
+                s_pinOn = false;
+                s_pinNode = 0;
+                s_pinRetry = 2.f;
+            }
+        }
+    }
 
     // ---- палец 1: камера ------------------------------------------------------
     {
@@ -847,10 +843,10 @@ static void UpdateFarmInner(float dt) {
     // (ray_foreign — то самое «упёрся в постройку носом»). Удар в такую линию
     // ломает чужое, так что не машем — отходим манёвром и, если не помогает,
     // сдаём узел. Учитывается только при севшем прицеле: пока камера едет к
-    // узлу, луч цепляет случайные объекты и «перекрыто» выходит ложным. С
-    // запертым magic-шаблоном обход не нужен: удар перенаправляется в узел
-    // сквозь препятствие, и прерывать добычу было бы потерей времени.
-    if (phase == 3 && !magicLocked && aimSettled &&
+    // узлу, луч цепляет случайные объекты и «перекрыто» выходит ложным.
+    // Пин крестика здесь не помогает: точка удара всё равно должна лежать
+    // в самом узле, так что ждём манёвра.
+    if (phase == 3 && aimSettled &&
         (tgt.ray_blocked || tgt.ray_foreign)) {
         s_blockedTime += dt;
         if (s_blockedTime > kBlockedTime && s_evadeTime <= 0.f) {
@@ -900,10 +896,11 @@ static void UpdateFarmInner(float dt) {
             tapUpMs   = fmaxf(periodMs - tapDownMs, 60.f);
         }
         // Узел при смерти: новый замах не начинаем. Последний удар мог уже
-        // убить узел — его GameObject вот-вот освободится, и magic-шаблон
-        // начнёт указывать на чужую память (аллокатор отдаёт адреса тут же,
-        // вплоть до коллайдера постройки). Дебаунс остатка (kDepletedFrames)
-        // сменит цель сам; наша задача — не отправить замах в мёртвый адрес.
+        // убить узел — его GameObject вот-вот освободится, и пин крестика
+        // (экстеншен/маркер) начнёт указывать на чужую память (аллокатор
+        // отдаёт адреса тут же, вплоть до объектов постройки). Дебаунс
+        // остатка (kDepletedFrames) сменит цель сам; наша задача — не
+        // отправить замах в мёртвый адрес.
         const bool nodeDying =
             (tgt.node_health >= 0.f && tgt.node_health_max > 0.f &&
              tgt.node_health <= 0.02f * tgt.node_health_max);
@@ -924,7 +921,7 @@ static void UpdateFarmInner(float dt) {
             (s_blindSwings == 0 ||
              (tgt.node_health >= 0.f && tgt.node_health < s_blindHp - 0.01f));
         const bool swingByRay = tgt.ray_self || blindSwing;
-        const bool swingBlocked = !magicLocked && (!swingByRay || tgt.ray_blocked);
+        const bool swingBlocked = !swingByRay || tgt.ray_blocked;
         s_tapTimer -= (int)roundf(dt * 1000.f);
         if (s_tapTimer <= 0 && (!aimSettled || swingBlocked || nodeDying) && !s_tapDown) {
             s_tapTimer = 0;              // ждём камеру/обход/узел, не теряя такт
@@ -934,41 +931,25 @@ static void UpdateFarmInner(float dt) {
                 // экрана подальше от камерного пальца.
                 const float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
                 const float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
-                bool swingNow = true;
-                if (magicLocked) {
-                    // Шаблон обязан встать в память ДО тапа — и с проверкой:
-                    // не записался (сбой транспорта) — удар ушёл бы по
-                    // настоящему лучу игры, а при упоре это чужая постройка.
-                    // Разучиваем шаблон и пропускаем такт: следующий замах
-                    // только после переподтверждения луча по самому узлу.
-                    if (!esp_farm_magic_redirect(tgt, true)) {
-                        s_magicData = s_magicGo = s_magicCollider = 0;
-                        s_magicPrimary = s_magicFallback = 0;
-                        s_tapTimer = 150;
-                        swingNow = false;
-                    }
-                }
-                if (swingNow) {
-                    Touch_Down_N(2, fx, fy);
-                    s_tapDown = true;
-                    s_tapTimer = (int)tapDownMs;
-                    if (!tgt.ray_valid) {      // замах вслепую — под контроль
-                        s_blindHp = tgt.node_health;
-                        ++s_blindSwings;
-                    } else {
-                        s_blindSwings = 0;     // луч жив — слепой режим кончился
-                    }
+                Touch_Down_N(2, fx, fy);
+                s_tapDown = true;
+                s_tapTimer = (int)tapDownMs;
+                if (!tgt.ray_valid) {      // замах вслепую — под контроль
+                    s_blindHp = tgt.node_health;
+                    ++s_blindSwings;
+                } else {
+                    s_blindSwings = 0;     // луч жив — слепой режим кончился
                 }
             } else {
                 Touch_Up_N(2);
-                esp_farm_magic_redirect(FarmTarget{}, false);
                 s_tapDown = false;
                 s_tapTimer = (int)tapUpMs;
             }
         }
     } else {
         if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
-        esp_farm_magic_redirect(FarmTarget{}, false);
+        // Пин крестика выключает блок управления пином выше (wantPin требует
+        // фазу 3): из MINE вышли — клей больше не нужен, до следующего входа.
         s_tapTimer = 0;
         s_blindSwings = 0;    // фаза ушла — счётчик слепых замахов обнуляем
         s_blindHp = -1.f;

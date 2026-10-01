@@ -838,12 +838,11 @@ bool esp_farm_get_target(FarmTarget& out) {
     farm_resolve_extension(node);
     has_spot = farm_read_spot(node, spot, spot_source, streak, spot_life);
 
-    // С какой стороны узла X. Для УДАРА это больше не важно: замах
-    // перенаправляется пином Magic-Farm прямо в крестик (см.
-    // esp_farm_magic_redirect — точка попадания пишется в GKo самой игры), и
-    // серия засчитывается по дистанции от точки удара до маркера/отрезка —
-    // камере смотреть на X не нужно. Сторона нужна только ТОЧКЕ ПОДХОДА:
-    // к обратному кресту не идём сквозь ствол/камень, встаём с нашей стороны.
+    // С какой стороны узла X. Для УДАРА это не важно: пин крестика (см.
+    // esp_farm_cross_pin) телепортирует крестик в точку падения удара, и
+    // серия засчитывается по нулевой дистанции — камере смотреть на X не
+    // нужно. Сторона нужна только ТОЧКЕ ПОДХОДА: к обратному кресту не идём
+    // сквозь ствол/камень, встаём с нашей стороны.
     bool spot_front = true;
     if (has_spot) {
         const float px = g_frame_local_pos.x - best->pos.x;
@@ -859,6 +858,30 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     // Точка удара — крестик всегда, когда он есть, независимо от стороны.
     const bool at_spot = has_spot;
+
+    // ---- Указатели для пина крестика ------------------------------------------
+    // Пин клеит крестик к точке удара (см. esp_farm_cross_pin): дереву пишем
+    // сегмент MTQ/MTu в экстеншене (локальные координаты узла — потому нужен
+    // трансформ узла) и двигаем декаль-визуал; руде — мировую позицию живого
+    // маркера (именно её читает проверка серии OreHitstreaks.os()).
+    out.cross_ext = valid_obj(node.ext) ? node.ext : 0;
+    out.cross_node_transform = node.transform;
+    if (node.ext_kind == FARM_EXT_ORE && valid_obj(node.ext)) {
+        const uint64_t marker = rd_ptr(node.ext + OREHS_MARKER);
+        if (valid_obj(marker)) {
+            const uint64_t t = native_component_transform(managed_object_native(marker));
+            if (t) out.cross_marker_transform = t;
+        }
+    } else if (node.ext_kind == FARM_EXT_TREE && valid_obj(node.ext)) {
+        const uint64_t marker = rd_ptr(node.ext + TREEHS_MARKER);
+        if (valid_obj(marker)) {
+            const uint64_t mark = rd_ptr(marker + HITMARK_MARK);
+            if (valid_obj(mark)) {
+                const uint64_t t = managed_object_native(mark);   // mark — сам Transform
+                if (t) out.cross_mark_transform = t;
+            }
+        }
+    }
 
     // ---- Точка крестика: поставить на кору, а не на декаль и не внутрь ствола --
     // Декаль X висит СНАРУЖИ коры (сдвиг по нормали против z-файта), поэтому
@@ -1126,18 +1149,11 @@ bool esp_farm_get_target(FarmTarget& out) {
         // махать. Теперь любая чужая геометрия на линии удара запрещает
         // замах, а контроллер обходит её или сдаёт узел.
         out.ray_foreign = reach.ray_valid && reach.ray_hit_object && !out.ray_self;
-        // The controller may then reuse that validated hit template while the
-        // camera looks elsewhere. Обёртки обязательны: без них пин не сможет
-        // подменить выбор игры (ray_data читается ИЗ обёртки, так что хотя бы
-        // одна обязана была быть валидной — требование дублируем явно).
-        if (out.ray_self && reach.ray_data && reach.ray_hit_go && reach.ray_collider &&
-            (reach.ray_primary_wrapper || reach.ray_fallback_wrapper)) {
-            out.magic_ray_data = reach.ray_data;
-            out.magic_hit_go = reach.ray_hit_go;
-            out.magic_collider = reach.ray_collider;
-            out.magic_primary_wrapper = reach.ray_primary_wrapper;
-            out.magic_fallback_wrapper = reach.ray_fallback_wrapper;
-        }
+        // Обёртки GuI<GKo> — живой луч прицела игры: пин крестика читает из
+        // них точку, куда реально падает удар (GKo.RaycastHit.m_Point), и
+        // клеит к ней крестик. Это чтение, не запись: удар идёт штатно.
+        out.ray_wrapper_primary = reach.ray_primary_wrapper;
+        out.ray_wrapper_fallback = reach.ray_fallback_wrapper;
         out.ray_point_valid = reach.ray_point_valid;
         if (reach.ray_point_valid) {
             out.ray_px = reach.ray_point.x; out.ray_py = reach.ray_point.y;

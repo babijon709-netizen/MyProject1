@@ -6628,177 +6628,429 @@ bool read_local_melee_reach(MeleeReach& out) {
     return true;
 }
 
+// ==== Пин крестика: клей крестика к точке удара ==============================
+//
+// Прежний «Magic-Farm» пытался перенаправить САМ удар — подменял точку
+// попадания в GKo (RaycastData) перед тапом. На живой сборке игра успевает
+// пересчитать свой луч в момент замаха, и удар всё равно проходил туда, куда
+// смотрела камера, — по корпусу узла, мимо крестика. Поэтому логика
+// развёрнута: не удар тащим к крестику, а КРЕСТИК К ТОЧКЕ УДАРА.
+//
+// Проверка серии у самой игры меряет дистанцию от точки попадания до
+// крестика:
+//   руда   — OreHitstreaks.os() читает мировую позицию transform'а живого
+//            маркера (MoW);
+//   дерево — дистанцию до отрезка MTQ..MTu (TREEHS_SPOT_A/B) радиусом 0.15 м
+//            в локальных координатах узла.
+// Оба места доступны на запись:
+//   руда   — трансляция маркера в кеше иерархии трансформов Unity: позиция
+//            геттера Transform.position собирается из тех же массивов, из
+//            которых читаем мы (read_transform_hierarchy_arrays);
+//   дерево — MTQ/MTu это обычные managed-поля экстеншена: пишем точку,
+//            переведённую из мировой в локальную узла через его TRS
+//            (собираем TRS из той же иерархии). Декаль-визуал дерева
+//            двигаем тем же способом, что и маркер руды, — чтобы X на
+//            экране стоял ровно там, куда падают удары.
+//
+// Пин живёт в фоновом потоке (по образцу сайлент-аима: только
+// esp_silent_read/esp_silent_write, привязка проверяется каждый цикл),
+// раз в ~3 мс перечитывает живой луч прицела игры (GKo из обёрток GuI) и
+// клеит крестик ровно в точку попадания. Камера при этом всегда держит
+// центр узла: серия растёт без какого-либо наведения на крестик.
 namespace {
-struct MagicHitPin {
-    uint64_t data = 0, go = 0, collider = 0;
-    uint64_t primary = 0, fallback = 0;
-    uint64_t original_primary = 0, original_fallback = 0;
-    Vec3 point{};
-    float distance = 0.f;
-    int pid = 0;
+
+struct CrossPinTRS {
+    Vec3 t{};
+    Vec4 q{0.0F, 0.0F, 0.0F, 1.0F};
+    Vec3 s{1.0F, 1.0F, 1.0F};
 };
-std::mutex g_magic_pin_mutex;
-MagicHitPin g_magic_pin;
-std::atomic<bool> g_magic_pin_active{false};
-// Последний цикл пина НЕ смог записаться в память игры (сбой транспорта).
-// Удар в таком окне уйдёт по настоящему лучу игры — при упоре в постройку
-// это чужая геометрия. Контроллер узнаёт через esp_farm_magic_healthy(),
-// поднимает палец удара и разучивает шаблон до переподтверждения лучом.
-std::atomic<bool> g_magic_pin_fail{false};
-// Отложенное восстановление данных игры: делает сам поток пина, чтобы путь
-// вызывающего потока (рендер-кадр) не платил usleep'ом за каждый тап.
-std::atomic<bool> g_magic_restore{false};
-MagicHitPin g_magic_restore_pin;
-std::once_flag g_magic_pin_once;
 
-// Одна попытка пина: пишет И обёртки, И сам GKo — игра может подменить
-// GuI<GKo>.Value свежим объектом после обновления своего луча, и записи
-// только старого GKo мало. Возвращает false, если хоть одна запись не
-// дошла: с этого момента удар пойдёт по настоящему лучу игры.
-bool magic_pin_apply(const MagicHitPin& pin) {
-    bool ok = true;
-    if (pin.primary)
-        ok = esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data)) && ok;
-    if (pin.fallback)
-        ok = esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data)) && ok;
-    ok = esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go)) && ok;
-    ok = esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
-                          &pin.point, sizeof(pin.point)) && ok;
-    ok = esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
-                          &pin.distance, sizeof(pin.distance)) && ok;
-    ok = esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
-                          &pin.collider, sizeof(pin.collider)) && ok;
-    return ok;
+// world = parent (∘) child — композиция одного уровня иерархии.
+static void cross_trs_compose(const CrossPinTRS& parent, const CrossPinTRS& child, CrossPinTRS& out) {
+    const Vec3 scaled = { child.t.x * parent.s.x, child.t.y * parent.s.y, child.t.z * parent.s.z };
+    const Vec3 rotated = rotate_vector(parent.q, scaled);
+    CrossPinTRS result;
+    result.t = { parent.t.x + rotated.x, parent.t.y + rotated.y, parent.t.z + rotated.z };
+    result.q = multiply_quaternion(parent.q, child.q);
+    result.s = { parent.s.x * child.s.x, parent.s.y * child.s.y, parent.s.z * child.s.z };
+    out = result;
 }
 
-// Вернуть игре её собственные данные луча: обёртки — только пока в них ещё
-// наш указатель (иначе игра уже опубликовала свежие легитимные данные, и
-// трогать их нельзя), и только если «оригинал» вообще прочитался (запись
-// нуля в живую обёртку испортила бы игре прицел до следующего рейкаста).
-void magic_pin_restore(const MagicHitPin& pin) {
-    auto restore_wrapper = [&](uint64_t wrapper, uint64_t original) {
-        if (!wrapper || !original) return;
-        uint64_t current = 0;
-        if (esp_silent_read(wrapper + GUI_VALUE, &current, sizeof(current)) &&
-            memio::untag(current) == pin.data)
-            esp_silent_write(wrapper + GUI_VALUE, &original, sizeof(original));
-    };
-    restore_wrapper(pin.primary, pin.original_primary);
-    restore_wrapper(pin.fallback, pin.original_fallback);
+// Мир -> локаль для TRS. Кватернионы иерархии единичные: обратный =
+// сопряжённый. Масштаб делим покомпонентно (как и композиция выше).
+static bool cross_trs_world_to_local(const CrossPinTRS& world, const Vec3& p, Vec3& out) {
+    if (fabsf(world.s.x) < 1e-4F || fabsf(world.s.y) < 1e-4F || fabsf(world.s.z) < 1e-4F) return false;
+    const Vec3 d = { p.x - world.t.x, p.y - world.t.y, p.z - world.t.z };
+    const Vec3 unscaled = { d.x / world.s.x, d.y / world.s.y, d.z / world.s.z };
+    const Vec4 inv = { -world.q.x, -world.q.y, -world.q.z, world.q.w };
+    const Vec3 local = rotate_vector(inv, unscaled);
+    if (!vec3_is_finite(local)) return false;
+    out = local;
+    return true;
 }
 
-void magic_pin_worker() {
-    for (;;) {
-        if (!g_magic_pin_active.load(std::memory_order_acquire)) {
-            // Восстановление выполняем сами — и захватываем работу под тем же
-            // мьютексом, которым публикуется новый пин: тогда поздний restore
-            // НЕ может отменить только что применённый новый пин (enable либо
-            // очистил флаг раньше нас, либо подождёт нас за мьютексом).
-            // Выполняется не раньше, чем через 1 мс после нашей последней
-            // записи — «доехавшая» итерация пина успевает завершиться.
-            {
-                std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
-                if (g_magic_restore.load(std::memory_order_acquire) &&
-                    !g_magic_pin_active.load(std::memory_order_acquire)) {
-                    MagicHitPin pin = g_magic_restore_pin;
-                    g_magic_restore.store(false, std::memory_order_release);
-                    if (pin.pid && esp_silent_target(pin.pid)) magic_pin_restore(pin);
+struct CrossPinHierarchy {
+    uint64_t matrices = 0, indices = 0;
+    int32_t index = -1;
+};
+
+// Найти массивы иерархии и индекс трансформа. Те же пробы, что у
+// read_transform_hierarchy_position: выученная раскладка, потом +0x38/+0x40
+// и +0x18/+0x20 с разыменованием кандидатов. Для записи кандидат обязан
+// ещё и компоноваться в осмысленную мировую позицию.
+static bool cross_pin_resolve_arrays(uint64_t native_transform, CrossPinHierarchy& out) {
+    if (!native_transform) return false;
+    if (g_transform_hierarchy_layout_valid) {
+        const uint64_t data = rd_ptr(native_transform + g_transform_hierarchy_layout.data_offset);
+        const int32_t index = rd<int32_t>(native_transform + g_transform_hierarchy_layout.index_offset);
+        if (data && index >= 0 && index <= 100000) {
+            uint64_t matrices = rd_ptr(data + g_transform_hierarchy_layout.matrices_offset);
+            uint64_t indices = rd_ptr(data + g_transform_hierarchy_layout.indices_offset);
+            if (g_transform_hierarchy_layout.matrices_indirect) matrices = rd_ptr(matrices);
+            if (g_transform_hierarchy_layout.indices_indirect) indices = rd_ptr(indices);
+            if (matrices && indices) {
+                Matrix34 probe{};
+                if (rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), probe) &&
+                    matrix34_is_valid(probe)) {
+                    out.matrices = matrices; out.indices = indices; out.index = index;
+                    return true;
                 }
             }
-            usleep(2000);
-            continue;
         }
-        MagicHitPin pin;
-        {
-            std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
-            pin = g_magic_pin;
-        }
-        if (!pin.pid || !esp_silent_target(pin.pid)) {
-            g_magic_pin_active.store(false, std::memory_order_release);
-            continue;
-        }
-        if (!magic_pin_apply(pin)) {
-            // Запись не дошла: пин мёртв, удар (если тап уже уходит) полетит
-            // по настоящему лучу игры. Ставим флаг для контроллера и возвращаем
-            // игре то, что успели записать частично — но только если новый пин
-            // не начал жизнь, пока мы разбирались с отказом.
-            g_magic_pin_active.store(false, std::memory_order_release);
-            g_magic_pin_fail.store(true, std::memory_order_release);
-            std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
-            if (!g_magic_pin_active.load(std::memory_order_acquire))
-                magic_pin_restore(pin);
-            continue;
-        }
-        usleep(1000);
     }
+    uint64_t transform_data = rd_ptr(native_transform + 0x38);
+    int32_t transform_index = rd<int32_t>(native_transform + 0x40);
+    if (!transform_data || transform_index < 0 || transform_index > 100000) {
+        transform_data = rd_ptr(native_transform + 0x18);
+        transform_index = rd<int32_t>(native_transform + 0x20);
+    }
+    if (!transform_data || transform_index < 0 || transform_index > 100000) return false;
+    const uint64_t pairs[2][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (int pi = 0; pi < 2; ++pi) {
+        const uint64_t matrix_pointer = rd_ptr(transform_data + pairs[pi][0]);
+        const uint64_t index_pointer = rd_ptr(transform_data + pairs[pi][1]);
+        if (!matrix_pointer || !index_pointer) continue;
+        const uint64_t matrix_candidates[2] = {matrix_pointer, rd_ptr(matrix_pointer)};
+        const uint64_t index_candidates[2] = {index_pointer, rd_ptr(index_pointer)};
+        for (uint64_t matrices : matrix_candidates) {
+            if (!matrices) continue;
+            for (uint64_t indices : index_candidates) {
+                if (!indices) continue;
+                Matrix34 probe{};
+                if (!rd_exact(matrices + (uint64_t)transform_index * sizeof(Matrix34), probe) ||
+                    !matrix34_is_valid(probe))
+                    continue;
+                Vec3 composed{};
+                if (read_transform_hierarchy_arrays(matrices, indices, transform_index, composed)) {
+                    out.matrices = matrices; out.indices = indices; out.index = transform_index;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
-} // namespace
 
-bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
-    if (!enabled) {
-        if (!g_magic_pin_active.exchange(false, std::memory_order_acq_rel)) return true;
-        // Восстановление данных игры делает поток пина: раньше здесь стоял
-        // usleep(3000) на пути рендер-потока — 3 мс простоя кадра на КАЖДОМ
-        // подъёме пальца удара (каждый тап!). Поток подхватит снапшот в
-        // течение ~2 мс, никакой гонки с его записями нет: активность уже
-        // снята, новую итерацию пина он не начнёт.
-        {
-            std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
-            g_magic_restore_pin = g_magic_pin;
-        }
-        g_magic_restore.store(true, std::memory_order_release);
-        return true;
-    }
-    MagicHitPin pin;
-    pin.data = memio::untag((uint64_t)target.magic_ray_data);
-    pin.go = memio::untag((uint64_t)target.magic_hit_go);
-    pin.collider = memio::untag((uint64_t)target.magic_collider);
-    pin.primary = memio::untag((uint64_t)target.magic_primary_wrapper);
-    pin.fallback = memio::untag((uint64_t)target.magic_fallback_wrapper);
-    if (pin.primary) pin.original_primary = rd_ptr(pin.primary + GUI_VALUE);
-    if (pin.fallback) pin.original_fallback = rd_ptr(pin.fallback + GUI_VALUE);
-    pin.point = {target.aim_x, target.aim_y, target.aim_z};
-    pin.distance = target.aim_3d;
-    pin.pid = g_pid;
-    // Обёртки обязательны: без них пин не подменит выбор игры, и удар уйдёт
-    // по её настоящему лучу (при упоре в постройку — в чужую геометрию).
-    if (!valid_obj(pin.data) || !valid_obj(pin.go) || !valid_obj(pin.collider) ||
-        (!pin.primary && !pin.fallback) ||
-        !vec3_is_finite(pin.point) || !position_looks_like_world_space(pin.point)) return false;
-    if (!std::isfinite(pin.distance) || pin.distance <= 0.f || pin.distance >= target.melee_reach)
-        pin.distance = fmaxf(0.05F, target.melee_reach * 0.5F);
-    // Публикация, применение и активация — под одним мьютексом с реставрацией
-    // работника: отложенный restore прошлого тапа либо уже выполнен (тогда
-    // наши записи лягут ПОСЛЕ него), либо будет отменён флагом здесь, либо
-    // подождёт нас за мьютексом. Поздний restore не может отменить новый пин.
-    // Отложенное восстановление от прошлого тапа больше не актуально: его
-    // «оригиналы» относятся к прежнему пину, а данные всё равно перезапишет
-    // новый пин (и поток продолжает переподтверждать его каждую 1 мс).
-    std::call_once(g_magic_pin_once, [] {
-        std::thread(magic_pin_worker).detach();
-    });
-    {
-        std::lock_guard<std::mutex> lock(g_magic_pin_mutex);
-        g_magic_restore.store(false, std::memory_order_release);
-        g_magic_pin = pin;
-        // Немедленная попытка пина — тап уходит сразу после нас, ждать первого
-        // цикла потока нельзя. Каждая запись проверяется: не записалось — тап
-        // обязан быть отменён контроллером (иначе удар пойдёт по настоящему
-        // лучу игры). Флаг ошибки отпускаем только после успешной записи.
-        if (!magic_pin_apply(pin)) {
-            g_magic_pin_active.store(false, std::memory_order_release);
-            g_magic_pin_fail.store(true, std::memory_order_release);
-            magic_pin_restore(pin);
+// Мировая TRS трансформа (include_self=false — только предки: нужна для
+// перевода world->local самого трансформа). Цепочка обязана дойти до корня,
+// каждая запись — валидная Matrix34.
+static bool cross_pin_read_trs(const CrossPinHierarchy& h, bool include_self, CrossPinTRS& out) {
+    if (!h.matrices || !h.indices || h.index < 0) return false;
+    Matrix34 chain[64];
+    int count = 0;
+    if (include_self) {
+        if (!rd_exact(h.matrices + (uint64_t)h.index * sizeof(Matrix34), chain[0]) ||
+            !matrix34_is_valid(chain[0]))
             return false;
-        }
-        g_magic_pin_active.store(true, std::memory_order_release);
-        g_magic_pin_fail.store(false, std::memory_order_release);
+        count = 1;
+    }
+    int32_t parent = -2;
+    if (!rd_exact(h.indices + (uint64_t)h.index * sizeof(int32_t), parent)) return false;
+    int depth = 0;
+    int32_t previous = h.index;
+    while (parent >= 0 && depth++ < 64) {
+        if (parent > 100000 || parent == previous || count >= 64) return false;
+        if (!rd_exact(h.matrices + (uint64_t)parent * sizeof(Matrix34), chain[count]) ||
+            !matrix34_is_valid(chain[count]))
+            return false;
+        ++count;
+        previous = parent;
+        if (!rd_exact(h.indices + (uint64_t)parent * sizeof(int32_t), parent)) return false;
+    }
+    if (parent != -1) return false;
+    CrossPinTRS acc;
+    for (int i = count - 1; i >= 0; --i) {
+        CrossPinTRS link;
+        link.t = { chain[i].translation.x, chain[i].translation.y, chain[i].translation.z };
+        link.q = chain[i].rotation;
+        link.s = { chain[i].scale.x, chain[i].scale.y, chain[i].scale.z };
+        cross_trs_compose(acc, link, acc);
+    }
+    out = acc;
+    return true;
+}
+
+// Записываемый трансформ: адрес его ЛОКАЛЬНОЙ трансляции в массиве иерархии
+// (translation — первое поле Matrix34), снапшот для отката и мировая TRS
+// предков. Адрес валидируется дважды: композицией из найденных массивов и
+// независимым чтением мировой позиции (marker_world_position идёт другими
+// путями — скелетная раскладка и собственные пробы). Совпадение двух путей
+// = мы нашли те же данные, из которых позицию читает сама игра.
+struct CrossPinEntry {
+    uint64_t native_transform = 0;
+    uint64_t local_addr = 0;      // адрес translation (пишем 12 байт: x,y,z)
+    Vec3 snapshot{};              // исходная трансляция — откат при несходимости
+    Vec4 self_r{};                // собственные rotation/scale (для контроля)
+    Vec3 self_s{};
+    CrossPinTRS parent{};         // мировая TRS предков
+    bool valid = false;
+};
+
+static bool cross_pin_prepare_entry(uint64_t native_transform, CrossPinEntry& entry) {
+    entry.valid = false;
+    CrossPinHierarchy h;
+    if (!cross_pin_resolve_arrays(native_transform, h)) return false;
+    Vec3 independent{};
+    if (!marker_world_position(native_transform, independent)) return false;
+    Vec3 composed{};
+    if (!read_transform_hierarchy_arrays(h.matrices, h.indices, h.index, composed)) return false;
+    const float dx = composed.x - independent.x, dy = composed.y - independent.y,
+                dz = composed.z - independent.z;
+    if (dx * dx + dy * dy + dz * dz > 0.05F * 0.05F) return false;
+    Matrix34 local{};
+    if (!rd_exact(h.matrices + (uint64_t)h.index * sizeof(Matrix34), local) ||
+        !matrix34_is_valid(local))
+        return false;
+    CrossPinTRS parent;
+    if (!cross_pin_read_trs(h, false, parent)) return false;
+    entry.native_transform = native_transform;
+    entry.local_addr = h.matrices + (uint64_t)h.index * sizeof(Matrix34);  // translation в начале
+    entry.snapshot = { local.translation.x, local.translation.y, local.translation.z };
+    entry.self_r = local.rotation;
+    entry.self_s = { local.scale.x, local.scale.y, local.scale.z };
+    entry.parent = parent;
+    entry.valid = true;
+    return true;
+}
+
+// Записать мировую позицию трансформа. Вызывается из фонового потока:
+// только esp_silent_*. Контроль — перечитать трансляцию, скомпоновать мир и
+// сравнить с желаемым; не сошлось (родители сдвинулись/адрес чужой) — откат
+// снапшота и false.
+static bool cross_pin_write_world_pos(const CrossPinEntry& entry, const Vec3& world) {
+    if (!entry.valid || !entry.local_addr) return false;
+    Vec3 local{};
+    if (!cross_trs_world_to_local(entry.parent, world, local)) return false;
+    if (!esp_silent_write(entry.local_addr, &local, sizeof(local))) return false;
+    Vec3 back{};
+    if (!esp_silent_read(entry.local_addr, &back, sizeof(back))) return false;
+    CrossPinTRS self;
+    self.t = back;
+    self.q = entry.self_r;
+    self.s = entry.self_s;
+    CrossPinTRS composed;
+    cross_trs_compose(entry.parent, self, composed);
+    const float dx = composed.t.x - world.x, dy = composed.t.y - world.y,
+                dz = composed.t.z - world.z;
+    if (dx * dx + dy * dy + dz * dz > 0.06F * 0.06F) {
+        esp_silent_write(entry.local_addr, &entry.snapshot, sizeof(entry.snapshot));
+        return false;
     }
     return true;
 }
 
-bool esp_farm_magic_healthy() {
-    return !g_magic_pin_fail.load(std::memory_order_acquire);
+struct CrossPin {
+    bool tree = false;
+    uint64_t ext = 0;                 // MineableObjectExtension (дерево: MTQ/MTu)
+    bool node_trs_valid = false;      // мировая TRS узла (дерево: world->local)
+    CrossPinTRS node_trs{};
+    CrossPinEntry marker;             // руда: маркер — его позицию читает os()
+    CrossPinEntry mark;               // дерево: декаль-визуал X
+    uint64_t primary = 0, fallback_wrapper = 0;   // GuI<GKo> — живой луч игры
+    Vec3 pivot{};                     // пивот узла (санити точки луча)
+    Vec3 fallback{};                  // куда смотрит камера (клей без луча)
+    unsigned long long node_id = 0;
+    int pid = 0;
+};
+std::mutex g_cross_pin_mutex;
+CrossPin g_cross_pin;
+std::atomic<bool> g_cross_pin_active{false};
+// Последний цикл пина не смог записаться (сбой транспорта/раскладки).
+// esp_farm_cross_healthy() отдаёт это контроллеру — тот переподключит пин
+// через пару секунд. Удары пин не блокирует: не включился — бьём как били.
+std::atomic<bool> g_cross_pin_fail{false};
+std::once_flag g_cross_pin_once;
+
+// Точка луча обязана лежать на узле: иначе это чужая геометрия или мусор
+// чтения, и клеить крестик туда нельзя.
+static bool cross_pin_point_on_node(const Vec3& p, const Vec3& pivot, bool tree) {
+    const float dx = p.x - pivot.x, dz = p.z - pivot.z;
+    const float dy = p.y - pivot.y;
+    if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz)) return false;
+    const float horiz = sqrtf(dx * dx + dz * dz);
+    return horiz <= 2.5F && dy >= -2.5F && dy <= (tree ? 26.0F : 6.0F);
+}
+
+void cross_pin_worker() {
+    // Луч гаснет на кадр-другой (рескан, сбой чтения) — помним последнюю
+    // валидную точку на этом узле и держим клей на ней. Декаль, которую не
+    // удалось записать, больше не трогаем до смены узла (косметика).
+    static unsigned long long s_ray_node = 0;
+    static Vec3 s_ray_last{};
+    static bool s_ray_valid = false;
+    static unsigned long long s_mark_skip = 0;
+    for (;;) {
+        if (!g_cross_pin_active.load(std::memory_order_acquire)) {
+            usleep(2000);
+            continue;
+        }
+        CrossPin pin;
+        {
+            std::lock_guard<std::mutex> lock(g_cross_pin_mutex);
+            pin = g_cross_pin;
+        }
+        if (!pin.pid || !esp_silent_target(pin.pid)) {
+            g_cross_pin_active.store(false, std::memory_order_release);
+            continue;
+        }
+        if (pin.node_id != s_ray_node) {
+            s_ray_node = pin.node_id;
+            s_ray_valid = false;
+            s_mark_skip = 0;
+        }
+
+        // Точка, куда реально падает удар: живой луч прицела игры из обёрток
+        // GuI<GKo> (тот же GKo, из которого FPMelee берёт дистанцию удара).
+        Vec3 point = pin.fallback;
+        {
+            uint64_t data = 0;
+            if (pin.primary) {
+                uint64_t value = 0;
+                if (esp_silent_read(pin.primary + GUI_VALUE, &value, sizeof(value)))
+                    data = memio::untag(value);
+            }
+            if (!valid_obj(data) && pin.fallback_wrapper) {
+                uint64_t value = 0;
+                if (esp_silent_read(pin.fallback_wrapper + GUI_VALUE, &value, sizeof(value)))
+                    data = memio::untag(value);
+            }
+            if (valid_obj(data)) {
+                Vec3 ray{};
+                if (esp_silent_read(data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT, &ray, sizeof(ray)) &&
+                    vec3_is_finite(ray) && position_looks_like_world_space(ray) &&
+                    cross_pin_point_on_node(ray, pin.pivot, pin.tree)) {
+                    point = ray;
+                    s_ray_last = ray;
+                    s_ray_valid = true;
+                } else if (s_ray_valid) {
+                    point = s_ray_last;
+                }
+            } else if (s_ray_valid) {
+                point = s_ray_last;
+            }
+        }
+
+        // Клей крестика. Для дерева сегмент MTQ/MTu — критично (это проверка
+        // серии); декаль — косметика, её неудача пин не роняет. Для руды
+        // маркер и есть проверка — его неудача роняет пин.
+        bool critical_ok = true;
+        if (pin.tree) {
+            if (pin.node_trs_valid && pin.ext) {
+                Vec3 local{};
+                if (cross_trs_world_to_local(pin.node_trs, point, local)) {
+                    critical_ok = esp_silent_write(pin.ext + TREEHS_SPOT_A, &local, sizeof(local));
+                    critical_ok = esp_silent_write(pin.ext + TREEHS_SPOT_B, &local, sizeof(local)) && critical_ok;
+                } else {
+                    critical_ok = false;
+                }
+            }
+            if (pin.mark.valid && s_mark_skip != pin.node_id &&
+                !cross_pin_write_world_pos(pin.mark, point))
+                s_mark_skip = pin.node_id;   // до смены узла декаль не трогаем
+        } else if (pin.marker.valid) {
+            critical_ok = cross_pin_write_world_pos(pin.marker, point);
+        }
+        if (!critical_ok) {
+            g_cross_pin_active.store(false, std::memory_order_release);
+            g_cross_pin_fail.store(true, std::memory_order_release);
+            continue;
+        }
+        usleep(3000);   // ~330 Гц: проверка серии читает поля в момент удара
+    }
+}
+} // namespace
+
+bool esp_farm_cross_pin(const FarmTarget& target, bool enabled) {
+    if (!enabled) {
+        g_cross_pin_active.store(false, std::memory_order_release);
+        return true;
+    }
+    if (g_pid <= 0 || !target.id || !target.valid) return false;
+    if (g_cross_pin_active.load(std::memory_order_acquire) &&
+        !g_cross_pin_fail.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(g_cross_pin_mutex);
+        if (g_cross_pin.node_id == target.id) {
+            // Живое обновление: точка-запас, обёртки луча и пересозданные
+            // маркеры (крестик гаснет по таймеру и появляется новым объектом).
+            g_cross_pin.fallback = {target.aim_x, target.aim_y, target.aim_z};
+            g_cross_pin.primary = memio::untag((uint64_t)target.ray_wrapper_primary);
+            g_cross_pin.fallback_wrapper = memio::untag((uint64_t)target.ray_wrapper_fallback);
+            if (g_cross_pin.tree) {
+                if (target.cross_mark_transform &&
+                    target.cross_mark_transform != g_cross_pin.mark.native_transform) {
+                    CrossPinEntry entry;
+                    if (cross_pin_prepare_entry(target.cross_mark_transform, entry))
+                        g_cross_pin.mark = entry;
+                    else
+                        g_cross_pin.mark.valid = false;
+                }
+            } else if (target.cross_marker_transform &&
+                       target.cross_marker_transform != g_cross_pin.marker.native_transform) {
+                CrossPinEntry entry;
+                if (cross_pin_prepare_entry(target.cross_marker_transform, entry))
+                    g_cross_pin.marker = entry;
+                else
+                    g_cross_pin.marker.valid = false;
+            }
+            return g_cross_pin.tree ? (g_cross_pin.node_trs_valid || g_cross_pin.mark.valid)
+                                    : g_cross_pin.marker.valid;
+        }
+    }
+    CrossPin pin;
+    pin.pid = g_pid;
+    pin.node_id = target.id;
+    pin.tree = (target.kind == 0);
+    pin.ext = memio::untag((uint64_t)target.cross_ext);
+    pin.primary = memio::untag((uint64_t)target.ray_wrapper_primary);
+    pin.fallback_wrapper = memio::untag((uint64_t)target.ray_wrapper_fallback);
+    pin.pivot = {target.node_x, target.node_y, target.node_z};
+    pin.fallback = {target.aim_x, target.aim_y, target.aim_z};
+    if (pin.tree) {
+        if (!valid_obj(pin.ext) || !target.cross_node_transform) return false;
+        CrossPinHierarchy h;
+        if (!cross_pin_resolve_arrays(target.cross_node_transform, h)) return false;
+        if (!cross_pin_read_trs(h, true, pin.node_trs)) return false;
+        pin.node_trs_valid = true;
+        if (target.cross_mark_transform)
+            cross_pin_prepare_entry(target.cross_mark_transform, pin.mark);   // косметика
+    } else {
+        if (!target.cross_marker_transform) return false;
+        if (!cross_pin_prepare_entry(target.cross_marker_transform, pin.marker)) return false;
+    }
+    std::call_once(g_cross_pin_once, [] {
+        std::thread(cross_pin_worker).detach();
+    });
+    {
+        std::lock_guard<std::mutex> lock(g_cross_pin_mutex);
+        g_cross_pin = pin;
+    }
+    g_cross_pin_fail.store(false, std::memory_order_release);
+    g_cross_pin_active.store(true, std::memory_order_release);
+    return true;
+}
+
+bool esp_farm_cross_healthy() {
+    return !g_cross_pin_fail.load(std::memory_order_acquire);
 }
 
 float esp_camera_fov_deg() { return g_cam_fov_deg; }

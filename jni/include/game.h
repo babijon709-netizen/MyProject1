@@ -280,9 +280,16 @@ struct FarmTarget {
     bool  ray_point_valid = false;
     float ray_px = 0.f, ray_py = 0.f, ray_pz = 0.f;
     float ray_nx = 0.f, ray_ny = 0.f, ray_nz = 0.f;
-    // Validated live hit record and target handles for Magic-Farm redirect.
-    unsigned long long magic_ray_data = 0, magic_hit_go = 0, magic_collider = 0;
-    unsigned long long magic_primary_wrapper = 0, magic_fallback_wrapper = 0;
+    // Указатели для пина крестика (телепорт крестика в точку удара — см.
+    // esp_farm_cross_pin в game.cpp: серия засчитывается без наведения
+    // камеры на крестик, камера всегда держит центр узла).
+    unsigned long long cross_ext = 0;              // MineableObjectExtension дерева (сегмент MTQ/MTu — проверка серии)
+    unsigned long long cross_node_transform = 0;   // нативный трансформ узла (дерево: world->local)
+    unsigned long long cross_marker_transform = 0; // нативный трансформ живого маркера руды (его позицию читает os())
+    unsigned long long cross_mark_transform = 0;   // нативный трансформ декали дерева (визуал X)
+    // Обёртки GuI<GKo> — живой луч прицела игры: пин читает из него точку,
+    // куда реально падает удар (GKo.RaycastHit.m_Point).
+    unsigned long long ray_wrapper_primary = 0, ray_wrapper_fallback = 0;
 
     // Сколько секунд осталось жить крестику (руда — из 15, дерево — из своего
     // lifetime). -1 = неизвестно; 0 = вот-вот потухнет.
@@ -313,13 +320,16 @@ void        esp_farm_set_range(float meters);
 // Ближайший подходящий узел по состоянию последнего esp_get_boxes() (нужна
 // его камера).
 bool        esp_farm_get_target(FarmTarget& out);
-// Redirect the next normal melee hit to a previously validated point on the current node.
-bool        esp_farm_magic_redirect(const FarmTarget& target, bool enabled);
-// Здоров ли пин Magic-Farm: false — последний цикл перенаправления не смог
-// записаться в память игры (сбой транспорта). Удар в таком окне уйдёт по
-// настоящему лучу игры — при упоре в постройку это чужая геометрия, поэтому
-// контроллер обязан поднять палец удара и разучить шаблон.
-bool        esp_farm_magic_healthy();
+// Пин крестика: телепортировать крестик текущего узла в точку, куда реально
+// падает удар (живой луч прицела игры). Дерево — переписывается сегмент
+// MTQ/MTu (проверка серии), руда — мировая позиция маркера (os()). Работает
+// из фонового потока, пока включён; включать каждый кадр (обновляет точку и
+// пересозданные маркеры), выключать при смене узла/паузе.
+bool        esp_farm_cross_pin(const FarmTarget& target, bool enabled);
+// false — последний цикл пина не смог записаться в память игры (сбой
+// транспорта/раскладки). Удары это не блокирует: контроллер переподключает
+// пин через пару секунд.
+bool        esp_farm_cross_healthy();
 // Сдаться на узле (недостижим / застряли) на `seconds`.
 void        esp_farm_blacklist(unsigned long long id, float seconds);
 // Почему последний esp_farm_get_target() ничего не вернул + сколько узлов
