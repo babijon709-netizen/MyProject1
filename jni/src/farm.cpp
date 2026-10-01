@@ -824,8 +824,12 @@ static void UpdateFarmInner(float dt) {
         // GKo FPMelee.ZkX не может засчитать удар и играет один On_Woosh —
         // ровно те «удары в воздух», которые видно со стороны. Ждём не вечно
         // (kNoRaySwingAfter), а стик всё это время поджимает ближе к стволу.
+        // Before a Magic template exists, attack only when the live ray was
+        // proven to hit this exact resource. A wall/foundation in front can no
+        // longer receive endless attacks while the navigation is stuck.
         const bool swingBlocked = !magicLocked &&
-            (tgt.ray_blocked || (noRay && s_noRayTime < kNoRaySwingAfter));
+            (!tgt.ray_self || tgt.ray_blocked ||
+             (noRay && s_noRayTime < kNoRaySwingAfter));
         if (magicLocked) esp_farm_magic_redirect(tgt, true);
         s_tapTimer -= (int)roundf(dt * 1000.f);
         if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
