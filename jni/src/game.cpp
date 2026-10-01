@@ -6591,11 +6591,12 @@ bool read_local_melee_reach(MeleeReach& out) {
         if (valid_obj(handler)) {
             uint64_t data = 0;
             const uint64_t primary = rd_ptr(handler + GUM_RAYCAST_DATA);
+            const uint64_t fallback = rd_ptr(handler + GUM_AIM_RAYCAST);
+            out.ray_primary_wrapper = valid_obj(primary) ? primary : 0;
+            out.ray_fallback_wrapper = valid_obj(fallback) ? fallback : 0;
             if (valid_obj(primary)) data = rd_ptr(primary + GUI_VALUE);
-            if (!valid_obj(data)) {
-                const uint64_t fallback = rd_ptr(handler + GUM_AIM_RAYCAST);
-                if (valid_obj(fallback)) data = rd_ptr(fallback + GUI_VALUE);
-            }
+            if (!valid_obj(data) && valid_obj(fallback))
+                data = rd_ptr(fallback + GUI_VALUE);
             if (valid_obj(data)) {
                 out.ray_valid = true;
                 out.ray_data = data;
@@ -6630,6 +6631,8 @@ bool read_local_melee_reach(MeleeReach& out) {
 namespace {
 struct MagicHitPin {
     uint64_t data = 0, go = 0, collider = 0;
+    uint64_t primary = 0, fallback = 0;
+    uint64_t original_primary = 0, original_fallback = 0;
     Vec3 point{};
     float distance = 0.f;
     int pid = 0;
@@ -6654,9 +6657,11 @@ void magic_pin_worker() {
             g_magic_pin_active.store(false, std::memory_order_release);
             continue;
         }
-        // RaycastManager refreshes GKo between the overlay tick and attack
-        // handling. Keep the validated record pinned only during the short
-        // synthetic fire press, using the selected memory transport.
+        // Pin both wrapper selection and the GKo payload. The game may replace
+        // GuI<GKo>.Value with a fresh object after updating its ray, so writing
+        // only the old GKo cannot redirect the attack that FPMelee actually reads.
+        if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
+        if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
         esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
         esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
                          &pin.point, sizeof(pin.point));
@@ -6671,13 +6676,32 @@ void magic_pin_worker() {
 
 bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
     if (!enabled) {
-        g_magic_pin_active.store(false, std::memory_order_release);
+        if (!g_magic_pin_active.exchange(false, std::memory_order_acq_rel)) return true;
+        // Let an iteration that already copied the payload finish before restore.
+        usleep(3000);
+        MagicHitPin old;
+        { std::lock_guard<std::mutex> lock(g_magic_pin_mutex); old = g_magic_pin; }
+        // Restore wrapper values only while they still contain our pointer;
+        // otherwise the game has already published newer legitimate data.
+        auto restore_wrapper = [&](uint64_t wrapper, uint64_t original) {
+            if (!wrapper) return;
+            uint64_t current = 0;
+            if (g_mem.read_quiet(wrapper + GUI_VALUE, &current, sizeof(current)) &&
+                memio::untag(current) == old.data)
+                g_mem.write(wrapper + GUI_VALUE, &original, sizeof(original));
+        };
+        restore_wrapper(old.primary, old.original_primary);
+        restore_wrapper(old.fallback, old.original_fallback);
         return true;
     }
     MagicHitPin pin;
     pin.data = memio::untag((uint64_t)target.magic_ray_data);
     pin.go = memio::untag((uint64_t)target.magic_hit_go);
     pin.collider = memio::untag((uint64_t)target.magic_collider);
+    pin.primary = memio::untag((uint64_t)target.magic_primary_wrapper);
+    pin.fallback = memio::untag((uint64_t)target.magic_fallback_wrapper);
+    if (pin.primary) pin.original_primary = rd_ptr(pin.primary + GUI_VALUE);
+    if (pin.fallback) pin.original_fallback = rd_ptr(pin.fallback + GUI_VALUE);
     pin.point = {target.aim_x, target.aim_y, target.aim_z};
     pin.distance = target.aim_3d;
     pin.pid = g_pid;
@@ -6694,6 +6718,8 @@ bool esp_farm_magic_redirect(const FarmTarget& target, bool enabled) {
     });
     g_magic_pin_active.store(true, std::memory_order_release);
     // Do not wait for the worker's first cycle.
+    if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
+    if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
     esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
     esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
                      &pin.point, sizeof(pin.point));

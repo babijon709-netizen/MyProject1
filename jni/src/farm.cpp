@@ -202,6 +202,7 @@ static void UpdateFarmInner(float dt) {
     static unsigned long long s_nodeId = 0;
     // Hit template learned once from an ordinary ray on this exact node.
     static unsigned long long s_magicData = 0, s_magicGo = 0, s_magicCollider = 0;
+    static unsigned long long s_magicPrimary = 0, s_magicFallback = 0;
     static float s_settle = 0.f;      // пауза между целями (пальцы подняты)
     static float s_lostTime = 0.f;    // цель пропала: ждём, вдруг вернётся
     static float s_mineTime = 0.f;    // сколько бьём этот узел без прогресса
@@ -236,6 +237,7 @@ static void UpdateFarmInner(float dt) {
         esp_farm_magic_redirect(FarmTarget{}, false);
         s_nodeId = 0;
         s_magicData = s_magicGo = s_magicCollider = 0;
+        s_magicPrimary = s_magicFallback = 0;
         s_mineTime = 0.f; s_fracStart = -1.f; s_bestStreak = 0;
         s_healthStart = -1.f; s_blockedTime = 0.f; s_clearTime = 0.f;
         s_depletedFrames = 0;
@@ -419,12 +421,16 @@ static void UpdateFarmInner(float dt) {
         s_magicData = tgt.magic_ray_data;
         s_magicGo = tgt.magic_hit_go;
         s_magicCollider = tgt.magic_collider;
+        s_magicPrimary = tgt.magic_primary_wrapper;
+        s_magicFallback = tgt.magic_fallback_wrapper;
     }
     const bool magicLocked = s_magicData && s_magicGo && s_magicCollider;
     if (magicLocked) {
         tgt.magic_ray_data = s_magicData;
         tgt.magic_hit_go = s_magicGo;
         tgt.magic_collider = s_magicCollider;
+        tgt.magic_primary_wrapper = s_magicPrimary;
+        tgt.magic_fallback_wrapper = s_magicFallback;
     }
 
     // Экранная метка ровно на той точке, по которой бот бьёт: зелёная — по

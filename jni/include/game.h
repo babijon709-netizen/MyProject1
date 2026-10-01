@@ -270,6 +270,7 @@ struct FarmTarget {
     float ray_nx = 0.f, ray_ny = 0.f, ray_nz = 0.f;
     // Validated live hit record and target handles for Magic-Farm redirect.
     unsigned long long magic_ray_data = 0, magic_hit_go = 0, magic_collider = 0;
+    unsigned long long magic_primary_wrapper = 0, magic_fallback_wrapper = 0;
 
     // Сколько секунд осталось жить крестику (руда — из 15, дерево — из своего
     // lifetime). -1 = неизвестно; 0 = вот-вот потухнет.

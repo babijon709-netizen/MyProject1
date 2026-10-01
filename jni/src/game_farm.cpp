@@ -1074,6 +1074,8 @@ bool esp_farm_get_target(FarmTarget& out) {
             out.magic_ray_data = reach.ray_data;
             out.magic_hit_go = reach.ray_hit_go;
             out.magic_collider = reach.ray_collider;
+            out.magic_primary_wrapper = reach.ray_primary_wrapper;
+            out.magic_fallback_wrapper = reach.ray_fallback_wrapper;
         }
         out.ray_point_valid = reach.ray_point_valid;
         if (reach.ray_point_valid) {
