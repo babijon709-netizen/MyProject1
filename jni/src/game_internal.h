@@ -172,7 +172,6 @@ struct MeleeReach {
     // перекрыт чужой геометрией» — см. ray_hit_is_self_node.
     uint64_t ray_collider = 0;
     uint64_t ray_hit_go = 0;
-    uint64_t ray_data = 0; // live GKo used by FPMelee for the next hit
 };
 
 // Состояние ядра, общее со сканами (определено в game.cpp).

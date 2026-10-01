@@ -1089,18 +1089,6 @@ bool esp_farm_get_target(FarmTarget& out) {
                 }
             }
         }
-        // A direct ray can already hit this node without being classified as
-        // "blocked", so validate it explicitly as well. Export handles only
-        // after the ordinary ray has been proven to belong to this exact node.
-        if (!out.ray_self && reach.ray_hit_object)
-            out.ray_self = ray_hit_is_self_node(reach, node, out.ray_self_why);
-        // The controller may then reuse that validated hit template while the
-        // camera looks elsewhere.
-        if (out.ray_self && reach.ray_data && reach.ray_hit_go && reach.ray_collider) {
-            out.magic_ray_data = reach.ray_data;
-            out.magic_hit_go = reach.ray_hit_go;
-            out.magic_collider = reach.ray_collider;
-        }
         out.ray_point_valid = reach.ray_point_valid;
         if (reach.ray_point_valid) {
             out.ray_px = reach.ray_point.x; out.ray_py = reach.ray_point.y;

@@ -268,8 +268,6 @@ struct FarmTarget {
     bool  ray_point_valid = false;
     float ray_px = 0.f, ray_py = 0.f, ray_pz = 0.f;
     float ray_nx = 0.f, ray_ny = 0.f, ray_nz = 0.f;
-    // Validated live hit record and target handles for Magic-Farm redirect.
-    unsigned long long magic_ray_data = 0, magic_hit_go = 0, magic_collider = 0;
 
     // Сколько секунд осталось жить крестику (руда — из 15, дерево — из своего
     // lifetime). -1 = неизвестно; 0 = вот-вот потухнет.
@@ -300,8 +298,6 @@ void        esp_farm_set_range(float meters);
 // Ближайший подходящий узел по состоянию последнего esp_get_boxes() (нужна
 // его камера).
 bool        esp_farm_get_target(FarmTarget& out);
-// Redirect the next normal melee hit to a previously validated point on the current node.
-bool        esp_farm_magic_redirect(const FarmTarget& target, bool enabled);
 // Сдаться на узле (недостижим / застряли) на `seconds`.
 void        esp_farm_blacklist(unsigned long long id, float seconds);
 // Почему последний esp_farm_get_target() ничего не вернул + сколько узлов
