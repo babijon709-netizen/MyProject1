@@ -334,10 +334,6 @@ inline constexpr std::uint64_t RAYCASTHIT_COLLIDER           = 0x28;  // UnityEn
 //   Ragdoll.BodyPart.transform (0x10)
 inline constexpr std::uint64_t PLAYER_KCC_REFERENCE        = 0xB0;
 inline constexpr std::uint64_t KCC_PLAYER_BACKREF          = 0x78;
-inline constexpr std::uint64_t KCC_SPEED_CONFIG            = 0x80;
-inline constexpr std::uint64_t SPEEDCFG_JUMP_ENDURANCE_COST = 0x94;
-inline constexpr std::uint64_t SPEEDCFG_JUMP_REGEN_PAUSE    = 0x9C;
-inline constexpr std::uint64_t SPEEDCFG_JUMP_REGEN_IDLE_PAUSE = 0xA0;
 inline constexpr std::uint64_t KCC_HEAD_TRANSFORM          = 0x88; // KCC.head (managed UnityEngine.Transform)
 inline constexpr std::uint64_t KCC_NORMAL_HEIGHT          = 0xA0; // float, capsule height standing
 inline constexpr std::uint64_t KCC_CROUCH_HEIGHT          = 0xA4; // float, capsule height crouched

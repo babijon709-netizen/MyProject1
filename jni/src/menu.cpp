@@ -946,11 +946,10 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
 
         SHdr(XS("Подбор"));
-        CardBg(Layout::RowH * 2.f);
-        const bool oldLoot = vm.fast_loot, oldBhop = vm.bhop;
-        ToggleRow("##instantloot", XS("Быстрый подбор"), &vm.fast_loot, g_state.a_fast_loot, false, true);
-        ToggleRow("##bhop", "B-Hop (test)", &vm.bhop, g_state.a_bhop, true, false);
-        if (oldLoot != vm.fast_loot || oldBhop != vm.bhop) esp_viewmodel_tick(vm);
+        CardBg(Layout::RowH);
+        const bool oldLoot = vm.fast_loot;
+        ToggleRow("##instantloot", XS("Быстрый подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
+        if (oldLoot != vm.fast_loot) esp_viewmodel_tick(vm);
 
         SHdr(XS("Лимит FPS"));
         {
@@ -1771,7 +1770,6 @@ void RenderMenu() {
     Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
-    Tick(g_state.a_bhop, g_state.viewmodel.bhop, dt);
     Tick(g_state.a_fast_fire, g_state.fast_fire, dt);
     Tick(g_state.a_fast_reload, g_state.fast_reload, dt);
     Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);

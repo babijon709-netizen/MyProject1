@@ -72,6 +72,12 @@ static uint64_t g_network_identity_class = 0;
 // его на середине, следующий кадр начал бы с того же узла и его уже собранные
 // компоненты попали бы в список второй раз.
 constexpr double kMarkerScanBudgetSec = 0.006;   // 6 мс на порцию при бюджете кадра 16.7 мс
+// A busy server can have well over 512 relevant components. Stopping at 512
+// made the visible subset depend on Dictionary iteration order: after a resize
+// existing markers could disappear and only return in a later pass. Keep a
+// generous bounded cache and always finish walking the registry.
+constexpr size_t kMarkerEntityLimit = 2048;
+constexpr int32_t kMarkerRegistryLimit = 8192;
 static int32_t g_marker_scan_cursor = -1;    // -1: цикл не начат
 static int32_t g_marker_scan_total  = 0;
 static uint64_t g_marker_scan_identity_class = 0;
@@ -1001,7 +1007,7 @@ static bool rebuild_marker_entities() {
         uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
         int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
         if (!valid_obj(entries) || count <= 0) { marker_scan_abort(); return true; }
-        if (count > 4096) count = 4096;
+        if (count > kMarkerRegistryLimit) count = kMarkerRegistryLimit;
 
         // One bulk read for the whole entry array instead of one read per entry.
         // Буфер живёт до конца цикла: порции разбирают уже прочитанное.
@@ -1159,18 +1165,18 @@ static bool rebuild_marker_entities() {
                 entity.transform = native_component_transform(managed_object_native(identity));
             entity.position_valid = marker_world_position(entity.transform, entity.position);
             if (entity.transform) g_marker_scan_pending.push_back(entity);
-            if (g_marker_scan_pending.size() >= 512) break;
+            if (g_marker_scan_pending.size() >= kMarkerEntityLimit) break;
         }
-        if (g_marker_scan_pending.size() >= 512) break;
+        if (g_marker_scan_pending.size() >= kMarkerEntityLimit) break;
     }
 
-    if (i < count && g_marker_scan_pending.size() < 512) {
+    if (i < count && g_marker_scan_pending.size() < kMarkerEntityLimit) {
         // Порция израсходована (вышло время), цикл не закончен — продолжим на
         // следующем кадре с этого же узла.
         g_marker_scan_cursor = i;
         return false;
     }
-    // Конец цикла: словарь пройден либо уперлись в лимит списка (512).
+    // Конец цикла: словарь пройден либо уперлись в защитный лимит списка.
     // Порядок — по стабильному ключу, а не по порядку реестра: словарь игры
     // при ресайзе тасует узлы, и без этого прореживание пилюль после каждого
     // рескана перевыбирало бы победителя (метка прыгала бы между соседями).
@@ -1247,14 +1253,14 @@ std::vector<EspMarker> esp_get_markers() {
         const double now = mono_seconds();
         if (now >= g_marker_next_scan) {
             const bool scan_done = rebuild_marker_entities();
-            // ~3 s between scans: entities spawn and despawn slowly. An empty
+            // ~1 s between scans so newly spawned entities appear promptly. An empty
             // result means the registry was not readable (world still loading in
-            // after a respawn), so retry in half a second instead. Интервал в
+            // after a respawn), so retry in a quarter second instead. Интервал в
             // секундах: при счёте в кадрах на 118 fps скан выходил вдвое чаще.
             // Незавершённую порцию продолжаем на следующем кадре (scan_done ==
             // false), иначе список собирался бы по кусочку раз в 3 секунды.
             g_marker_next_scan = scan_done
-                ? now + (g_marker_entities.empty() ? 0.5 : 3.0)
+                ? now + (g_marker_entities.empty() ? 0.25 : 1.0)
                 : now;
         }
     }
@@ -1401,7 +1407,7 @@ void esp_bot_aim_maintain() {
     if (now >= g_marker_next_scan) {
         const bool scan_done = rebuild_marker_entities();
         g_marker_next_scan = scan_done
-            ? now + (g_marker_entities.empty() ? 0.5 : 3.0)
+            ? now + (g_marker_entities.empty() ? 0.25 : 1.0)
             : now;
     }
     for (MarkerEntity& entity : g_marker_entities) {
