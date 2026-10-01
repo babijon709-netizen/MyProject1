@@ -4,6 +4,7 @@
 #include "loot_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
+#include "farm.h"
 #include "maps_lookup.h"
 #include <chrono>
 #include <cerrno>
@@ -318,7 +319,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || want_no_spread || weapons.has_state() ||
-        g_state.fast_fire || g_state.fast_reload || weapon_speeds.has_state()) {
+        g_state.fast_fire || g_state.fast_reload || weapon_speeds.has_state() ||
+        g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
             return candidate>=0x10000 && memory.is(candidate,"PlayerManager") &&
@@ -393,7 +395,20 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
                 LogLine("оружие: цепочка отдачи/разброса разрешилась полностью");
         }
     }
-    controller.tick(epoch, player, settings);
+    // Magic-Farm keeps the verified normal hit path (and therefore server-side
+    // harvesting/cooldowns), but hides every non-ADS first-person tool pose
+    // while mining. To the player only the crosshair and hit-streak marker are
+    // visible; there is no local swing animation. Walking and aiming remain the
+    // existing touch controller, and the user's own hands setting is restored
+    // immediately outside the mining phase.
+    ViewmodelSettings visible_settings = settings;
+    if (g_farmActive && !g_farmPaused && g_farmPhase == 3) {
+        visible_settings.hands_enabled = true;
+        visible_settings.x = 0.f;
+        visible_settings.y = -50.f;
+        visible_settings.z = 0.f;
+    }
+    controller.tick(epoch, player, visible_settings);
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
         st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
