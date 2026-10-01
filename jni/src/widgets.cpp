@@ -885,10 +885,10 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgSHdr(XS("Состояние"));
         {
             struct InfoRow { const char* lbl; char val[48]; bool ok; };
-            InfoRow irows[8];
+            InfoRow irows[9];
             int n = 0;
             auto add = [&](const char* lbl, bool ok) -> char* {
-                if (n >= 8) { static char sink[48]; return sink; }
+                if (n >= 9) { static char sink[48]; return sink; }
                 InfoRow& r = irows[n++];
                 r.lbl = lbl; r.ok = ok; r.val[0] = 0;
                 return r.val;
@@ -915,6 +915,13 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
 
             v = add(XS("Ударов"), g_farmHits > 0);
             snprintf(v, 48, "%d / %d", g_farmHits, g_farmSwings);
+
+            // Держится ли подмена рейкаста. Низкий процент = игра успевает
+            // вернуть свой луч между нашей записью и ударом, и бить будет
+            // туда, куда смотрит камера.
+            v = add(XS("Пин"), g_farmPinHold >= 50);
+            if (g_farmPinHold < 0) snprintf(v, 48, "%s", XS("нет"));
+            else                   snprintf(v, 48, "%d%%", g_farmPinHold);
 
             // Причина простоя — ровно та, по которой чит сейчас молчит.
             if (g_farmNodes == 0) {

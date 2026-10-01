@@ -6679,6 +6679,14 @@ struct MagicHitPin {
     Vec3 point{};
     float distance = 0.f;
     int pid = 0;
+    bool hot = false;              // идёт удар: писать максимально часто
+    // Готовый образ UnityEngine.RaycastHit (0x30): точка, нормаль, faceID,
+    // дистанция, uv и коллайдер одним куском. Снимается один раз при взводе
+    // пина, чтобы в горячем цикле не делать четыре отдельных записи: чем
+    // меньше вызовов, тем короче окно, в котором игра успевает вернуть свой
+    // рейкаст между нашей записью и чтением в FPMelee.
+    unsigned char blob[0x30]{};
+    bool blob_valid = false;
 };
 std::mutex g_magic_pin_mutex;
 MagicHitPin g_magic_pin;
@@ -6690,19 +6698,32 @@ std::atomic<bool> g_magic_pin_restore{false};
 std::atomic<unsigned long long> g_magic_pin_writes{0};
 std::once_flag g_magic_pin_once;
 
+std::atomic<unsigned> g_magic_pin_held{0};   // проверок, где наш рейкаст уцелел
+std::atomic<unsigned> g_magic_pin_lost{0};   // проверок, где игра вернула свой
+
 void magic_write_pin(const MagicHitPin& pin) {
     // Pin both wrapper selection and the GKo payload. The game may replace
     // GuI<GKo>.Value with a fresh object after updating its ray, so writing
     // only the old GKo cannot redirect the attack that FPMelee actually reads.
+    //
+    // Порядок важен. Сначала полезная нагрузка, потом обёртки: если игра
+    // прочитает GKo ровно между нашими записями, лучше пусть это будет наш
+    // объект с нашей точкой, чем наш указатель с чужой точкой.
+    if (pin.blob_valid) {
+        // Одна запись на весь RaycastHit вместо трёх: точка, дистанция и
+        // коллайдер меняются вместе и атомарно с точки зрения игры.
+        esp_silent_write(pin.data + GKO_RAYCAST_HIT, pin.blob, sizeof(pin.blob));
+    } else {
+        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
+                         &pin.point, sizeof(pin.point));
+        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
+                         &pin.distance, sizeof(pin.distance));
+        esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
+                         &pin.collider, sizeof(pin.collider));
+    }
+    esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
     if (pin.primary) esp_silent_write(pin.primary + GUI_VALUE, &pin.data, sizeof(pin.data));
     if (pin.fallback) esp_silent_write(pin.fallback + GUI_VALUE, &pin.data, sizeof(pin.data));
-    esp_silent_write(pin.data + GKO_HIT_OBJECT, &pin.go, sizeof(pin.go));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_POINT,
-                     &pin.point, sizeof(pin.point));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_DISTANCE,
-                     &pin.distance, sizeof(pin.distance));
-    esp_silent_write(pin.data + GKO_RAYCAST_HIT + RAYCASTHIT_COLLIDER,
-                     &pin.collider, sizeof(pin.collider));
     g_magic_pin_writes.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -6725,6 +6746,7 @@ void magic_restore_wrappers(const MagicHitPin& pin) {
 }
 
 void magic_pin_worker() {
+    int cycle = 0;
     for (;;) {
         if (!g_magic_pin_active.load(std::memory_order_acquire)) {
             if (g_magic_pin_restore.exchange(false, std::memory_order_acq_rel)) {
@@ -6745,7 +6767,32 @@ void magic_pin_worker() {
             continue;
         }
         magic_write_pin(pin);
-        usleep(1000);
+
+        // Раз в несколько проходов сверяемся: лежит ли в GKo всё ещё наш
+        // объект попадания. Игра переписывает рейкаст каждым своим кадром, и
+        // по этому счётчику видно, успеваем мы или нет (строка «Пин» в меню).
+        if (++cycle >= 8) {
+            cycle = 0;
+            uint64_t live_go = 0;
+            if (esp_silent_read(pin.data + GKO_HIT_OBJECT, &live_go, sizeof(live_go))) {
+                if (memio::untag(live_go) == pin.go)
+                    g_magic_pin_held.fetch_add(1, std::memory_order_relaxed);
+                else
+                    g_magic_pin_lost.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        // Темп. Холодный пин (цель выбрана, удара прямо сейчас нет) держится
+        // раз в 2 мс — этого хватает, чтобы наш GKo был «последним словом» в
+        // большинстве кадров, и почти ничего не стоит.
+        //
+        // Горячий (палец на кнопке атаки или удар вот-вот) — максимально
+        // плотно. Иначе ловить нечего: игра пишет свой рейкаст в начале кадра,
+        // FPMelee читает его в этом же кадре, и всё окно между ними — доли
+        // миллисекунды. Пин раз в миллисекунду в это окно почти не попадал, и
+        // удар уходил туда, куда смотрит камера, — ровно то, что было видно
+        // в игре.
+        usleep(pin.hot ? 120 : 2000);
     }
 }
 
@@ -6816,9 +6863,19 @@ bool esp_magic_hit_pin(const MagicHit& hit) {
     pin.point = {hit.x, hit.y, hit.z};
     pin.distance = hit.distance;
     pin.pid = g_pid;
+    pin.hot = hit.hot;
     if (!valid_obj(pin.data) || !valid_obj(pin.go) || !valid_obj(pin.collider) ||
         !vec3_is_finite(pin.point) || !position_looks_like_world_space(pin.point)) return false;
     if (!std::isfinite(pin.distance) || pin.distance <= 0.f) pin.distance = 0.25f;
+
+    // Снимок RaycastHit целиком: нормаль, faceID и uv остаются родные (их
+    // читают эффекты удара), подменяются только точка, дистанция и коллайдер.
+    if (rd_buf(pin.data + GKO_RAYCAST_HIT, pin.blob, sizeof(pin.blob))) {
+        memcpy(pin.blob + RAYCASTHIT_POINT, &pin.point, sizeof(pin.point));
+        memcpy(pin.blob + RAYCASTHIT_DISTANCE, &pin.distance, sizeof(pin.distance));
+        memcpy(pin.blob + RAYCASTHIT_COLLIDER, &pin.collider, sizeof(pin.collider));
+        pin.blob_valid = true;
+    }
     // Исходные значения обёрток запоминаем ОДИН раз на серию: повторный
     // esp_magic_hit_pin на следующем кадре уже видел бы там наш собственный
     // GKo, и восстанавливать стало бы нечего.
@@ -6855,6 +6912,11 @@ void esp_magic_hit_release() {
 
 unsigned long long esp_magic_hit_writes() {
     return g_magic_pin_writes.load(std::memory_order_relaxed);
+}
+
+void esp_magic_hit_stats(unsigned& held, unsigned& lost) {
+    held = g_magic_pin_held.load(std::memory_order_relaxed);
+    lost = g_magic_pin_lost.load(std::memory_order_relaxed);
 }
 
 bool esp_melee_tp_update(bool enabled, float reach_m, float sphere_m) {

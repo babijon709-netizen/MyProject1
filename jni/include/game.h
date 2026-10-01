@@ -362,10 +362,14 @@ struct MagicHit {
     unsigned long long collider = 0;    // его коллайдер
     float x = 0.f, y = 0.f, z = 0.f;    // точка удара (крестик)
     float distance = 0.f;               // м; должна быть меньше дальности удара
+    bool  hot = false;                  // удар идёт прямо сейчас: держать плотно
 };
 bool               esp_magic_hit_pin(const MagicHit& hit);
 void               esp_magic_hit_release();
 unsigned long long esp_magic_hit_writes();
+// Сколько раз сверка нашла в GKo наш объект попадания (held) и сколько раз
+// игра успела вернуть свой (lost). По этой паре видно, выигрываем ли мы гонку.
+void               esp_magic_hit_stats(unsigned& held, unsigned& lost);
 
 // Melee-TP: пишет дальность удара орудия (FPMelee.m_MaxReach + hitRadius) и
 // геометрию луча взаимодействия (RaycastManager). reach_m — суммарная
