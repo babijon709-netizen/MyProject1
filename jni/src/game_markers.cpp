@@ -399,6 +399,36 @@ static bool backpack_look_from_object_name(const char* raw, MarkerLook& look) {
     });
 }
 
+// Спящие (отключившиеся игроки): класс компонента вращается обфускатором
+// (последнее читаемое имя — DisconnectedSleeper), поэтому опознаём и по
+// имени префаба/панели. Слова — только целые «sleeper»/«sleepers»:
+// «sleeping» это спальник, спящим он не бывает.
+static bool sleeper_look_from_object_name(const char* raw, MarkerLook& look) {
+    return for_each_name_token(raw, [&](const char* word) {
+        if (strcmp(word, "sleeper") == 0 || strcmp(word, "sleepers") == 0) {
+            look = special_look(ESP_MARKER_SLEEPER, "Спящий");
+            return true;
+        }
+        return false;
+    });
+}
+
+// Контейнер трупа игрока (LootObject): то, что остаётся после смерти, — по сути
+// тот же рюкзак. Слова «corpse/player...» проверяются ТОЛЬКО у лут-компонентов:
+// у Mineable «corpse» — это туша животного, она рюкзаком не становится.
+static bool corpse_container_look_from_object_name(const char* raw, MarkerLook& look) {
+    return for_each_name_token(raw, [&](const char* word) {
+        if (strcmp(word, "corpse") == 0 || strcmp(word, "corpses") == 0 ||
+            strcmp(word, "playercorpse") == 0 || strcmp(word, "playerloot") == 0 ||
+            strcmp(word, "deathloot") == 0 || strcmp(word, "death") == 0 ||
+            strcmp(word, "died") == 0) {
+            look = special_look(ESP_MARKER_BACKPACK, "Рюкзак");
+            return true;
+        }
+        return false;
+    });
+}
+
 static bool is_vehicle_word(const char* word) {
     return strcmp(word, "car") == 0 || strcmp(word, "cars") == 0 ||
            strcmp(word, "vehicle") == 0 || strcmp(word, "vehicles") == 0;
@@ -460,6 +490,15 @@ struct LootNameInfo {
     int  rank = 0;
     bool rainbow = false;
     bool player_box = false;
+    // Бочка: слово «barrel» в любом имени побеждает любые «loot/crate» — раньше
+    // ранги сравнивались поровну (оба 2), и «loot» из «LootBarrel» забирал
+    // бочку в секцию «Ящик». Теперь бочка всегда живёт в секции «Скрап».
+    bool scrap = false;
+    // Какое слово сказало «это контейнер игрока» и был ли это ящик: по этому
+    // ящики в домах показываются («Большой/Обычный ящик»), а печки, кровати,
+    // шкафы и спальники по-прежнему скрыты.
+    const char* deploy_word = nullptr;
+    bool saw_box = false, saw_size = false, saw_big = false;
 };
 
 static void scan_loot_name(const char* raw, LootNameInfo& info) {
@@ -519,7 +558,6 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
         {"cash",       "Касса",              3, false},
         {"register",   "Касса",              3, false},
         {"vending",    "Автомат",            3, false},
-        {"barrel",     "Скрап",              2, false}, // barrels are the scrap source
         {"crate",      "Ящик",               2, false},
         {"lootbox",    "Ящик",               2, false},
         {"loot",       "Ящик",               2, false},
@@ -530,13 +568,25 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
         {"trash",      "Мусорка",            2, false},
         {"garbage",    "Мусорка",            2, false},
     };
-    bool saw_box = false, saw_size = false;
     for_each_name_token(raw, [&](const char* word) {
+        // Слово-исключение больше не останавливает разбор: после него имя может
+        // ещё сказать «box»/«large» (например «storage box»), а ящик в доме мы
+        // теперь показываем.
         for (const char* bad : kDeployed)
-            if (strcmp(word, bad) == 0) { info.player_box = true; return true; }
-        if (strcmp(word, "box") == 0) saw_box = true;
+            if (strcmp(word, bad) == 0) {
+                info.player_box = true;
+                info.deploy_word = bad;
+                break;
+            }
+        if (strcmp(word, "box") == 0) info.saw_box = true;
         for (const char* size : kSizeWords)
-            if (strcmp(word, size) == 0) { saw_size = true; break; }
+            if (strcmp(word, size) == 0) { info.saw_size = true; break; }
+        if (strcmp(word, "large") == 0 || strcmp(word, "big") == 0) info.saw_big = true;
+        // Бочка — те же слова, что в barrel_look_from_object_name.
+        if (strncmp(word, "barrel", 6) == 0 || strncmp(word, "barel", 5) == 0 ||
+            strcmp(word, "bochka") == 0 || strcmp(word, "keg") == 0 ||
+            strcmp(word, "drum") == 0)
+            info.scrap = true;
         for (const auto& entry : kLabels) {
             if (strcmp(word, entry.word) == 0 && entry.rank > info.rank) {
                 info.rank = entry.rank;
@@ -546,33 +596,57 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
         }
         return false;
     });
-    if (saw_box && saw_size) info.player_box = true;
+    if (info.saw_box && info.saw_size) info.player_box = true;
+    // Бочка перебивает «loot/crate/lootbox» (ранг 2), но не военные/элитные
+    // ящики (ранг 4) — таких бочек в игре нет, но порядок честный.
+    if (info.scrap) {
+        info.rank = 3;
+        info.label = "Бочка";
+        info.rainbow = false;
+    }
 }
 
 static bool loot_marker(uint64_t component, const char* object_name, const char* root_name,
-                        MarkerLook& look) {
-    // A container that is part of a building is player-placed by definition.
-    if (valid_obj(rd_ptr(component + LOOTOBJECT_BUILDING_PIECE))) return false;
+                        const char* panel, MarkerLook& look) {
+    // Контейнер, встроенный в постройку, — поставлен игроком. Раньше такие
+    // скрывались целиком; теперь ЯЩИКИ в домах показываются («Большой
+    // ящик»/«Обычный ящик», секция «Ящики»), а прочая мебель (печки, кровати,
+    // шкафы, спальники) и безымянные постройчные контейнеры — по-прежнему нет.
+    const bool building_piece = valid_obj(rd_ptr(component + LOOTOBJECT_BUILDING_PIECE));
 
     // Three name sources: the component's GameObject, the network object's
     // root GameObject, and the loot panel id the UI opens with. The panel is
     // often the only one that says "militarycrate" out loud.
-    char panel[32] = {};
-    read_managed_string(rd_ptr(component + LOOTOBJECT_PANEL_NAME), panel, sizeof(panel));
-
     LootNameInfo info;
     scan_loot_name(object_name, info);
     if (!info.player_box) scan_loot_name(root_name, info);
     if (!info.player_box) scan_loot_name(panel, info);
-    if (info.player_box) return false;
+
+    if (info.player_box || building_piece) {
+        // Ящик ли это: исключительное слово с «box» (woodbox, storagebox,
+        // largewoodbox...) либо имя, где «box» стоит вместе с размером/на
+        // постройке («WoodenBox», «Small Box»).
+        const bool says_box =
+            (info.deploy_word && strstr(info.deploy_word, "box") != nullptr) ||
+            (info.saw_box && (info.saw_size || building_piece));
+        if (!says_box) return false;
+        const bool big = info.saw_big ||
+                         (info.deploy_word &&
+                          (strstr(info.deploy_word, "large") != nullptr ||
+                           strstr(info.deploy_word, "big") != nullptr));
+        look.kind = ESP_MARKER_LOOT;
+        look.label = big ? "Большой ящик" : "Обычный ящик";
+        look.rainbow = false;
+        look.has_color = false;
+        return true;
+    }
     // No name we recognise -> not drawn. Everything anonymous down here is
-    // something a player owns (a box in a house, a sleeping player, the bag a
-    // corpse leaves), and labelling all of it "Ящик" is exactly the noise the
-    // loot ESP must not produce. World containers always name themselves.
+    // something a player owns (a sleeping player, the bag a corpse leaves),
+    // and labelling all of it "Ящик" is exactly the noise the loot ESP must
+    // not produce. World containers always name themselves.
     if (info.rank <= 0 || !info.label) return false;
 
-    look.kind = (info.label && strcmp(info.label, "Скрап") == 0)
-                ? ESP_MARKER_SCRAP : ESP_MARKER_LOOT;
+    look.kind = info.scrap ? ESP_MARKER_SCRAP : ESP_MARKER_LOOT;
     look.label = info.label;
     look.rainbow = info.rainbow;
     look.has_color = false;
@@ -1049,7 +1123,24 @@ static bool rebuild_marker_entities() {
             uint64_t component = behaviours[b];
             if (!valid_obj(component)) continue;
             const uint8_t component_class = marker_class_of(rd_ptr(component));
-            if (component_class == MARKER_CLASS_NONE) continue;
+            // Класс читаем, но семья не опознана: почти всегда это сервисный
+            // компонент (аниматоры, менеджеры игрока), который маркером не
+            // становится. Но после переименования классов обфускатором сюда
+            // же попадают рюкзаки и спящие — поэтому ДО отбраковки проверяем
+            // имя самого компонента (одно чтение): рюкзак/спящий опознаются
+            // по префабу и без имени класса.
+            MarkerLook look;
+            char pickup_text[40] = {};
+            char object_name[48] = {}, root_name[48] = {};
+            bool known = false;
+            if (component_class == MARKER_CLASS_NONE) {
+                char none_name[48] = {};
+                if (!managed_component_gameobject_name(component, none_name, sizeof(none_name)) ||
+                    !(sleeper_look_from_object_name(none_name, look) ||
+                      backpack_look_from_object_name(none_name, look)))
+                    continue;
+                known = true;   // рюкзак/спящий с переименованным классом
+            }
             // Имя класса компонента может быть недоступно (см. marker_class_of):
             // тогда семейство неизвестно, и объект опознаётся по имени GameObject —
             // оно лежит в куче игры и читается всегда. Пробуем семейства по порядку.
@@ -1057,13 +1148,8 @@ static bool rebuild_marker_entities() {
             // «Дорогой» компонент: имя GameObject, трансформ и позиция — это
             // десятки обращений к памяти игры, поэтому время порции проверяется
             // снаружи, между узлами.
-
-            MarkerLook look;
-            char pickup_text[40] = {};
-            char object_name[48] = {}, root_name[48] = {};
             managed_component_gameobject_name(component, object_name, sizeof(object_name));
             managed_component_gameobject_name(identity, root_name, sizeof(root_name));
-            bool known = false;
             if (component_class == MARKER_CLASS_TURRET) {
                 look = special_look(ESP_MARKER_TURRET, "Турель");
                 known = true;
@@ -1071,13 +1157,34 @@ static bool rebuild_marker_entities() {
                 look = special_look(ESP_MARKER_SLEEPER, "Спящий");
                 known = true;
             }
-            // DroppedBackpackContainer itself is a MonoBehaviour and is not in
-            // Mirror's behaviour array; its LootObject is. Distinguish it by
-            // the component/root GameObject name before generic loot filtering.
-            if (!known && (component_class == MARKER_CLASS_LOOT || family_unknown) &&
-                (backpack_look_from_object_name(object_name, look) ||
-                 backpack_look_from_object_name(root_name, look)))
-                known = true;
+            // Рюкзаки и спящие: их классы вращаются обфускатором, а списки
+            // исключения (skip_object_name в ветке Mineable и kDeployed в
+            // разборе имён лута) выкидывают их раньше всех прочих проверок —
+            // поэтому опознаём по именам ДО этих списков. Панель лута часто
+            // единственное место, где сказано «backpack»/«sleeper», поэтому
+            // читаем её здесь же и дальше отдаём в loot_marker без перечитывания.
+            char loot_panel[32] = {};
+            if (component_class == MARKER_CLASS_LOOT || family_unknown)
+                read_managed_string(rd_ptr(component + LOOTOBJECT_PANEL_NAME),
+                                    loot_panel, sizeof(loot_panel));
+            if (!known && (family_unknown || component_class == MARKER_CLASS_LOOT ||
+                           component_class == MARKER_CLASS_MINEABLE ||
+                           component_class == MARKER_CLASS_BARREL)) {
+                if (sleeper_look_from_object_name(object_name, look) ||
+                    sleeper_look_from_object_name(root_name, look) ||
+                    backpack_look_from_object_name(object_name, look) ||
+                    backpack_look_from_object_name(root_name, look) ||
+                    sleeper_look_from_object_name(loot_panel, look) ||
+                    backpack_look_from_object_name(loot_panel, look))
+                    known = true;
+                // Контейнер трупа — только у лут-компонентов: у Mineable «corpse»
+                // это туша животного (её выкидывает skip_object_name ниже).
+                if (!known && (component_class == MARKER_CLASS_LOOT || family_unknown) &&
+                    (corpse_container_look_from_object_name(object_name, look) ||
+                     corpse_container_look_from_object_name(root_name, look) ||
+                     corpse_container_look_from_object_name(loot_panel, look)))
+                    known = true;
+            }
             if (!known && (component_class == MARKER_CLASS_PICKUP || family_unknown) &&
                 g_markers_pickup_enabled) {
                 known = pickup_marker(component, pickup_text, sizeof(pickup_text));
@@ -1095,13 +1202,16 @@ static bool rebuild_marker_entities() {
                 if (!known && g_markers_scrap_enabled)
                     known = roadsign_look_from_object_name(object_name, look) ||
                             roadsign_look_from_object_name(root_name, look);
-                if (!known && component_class == MARKER_CLASS_BARREL && g_markers_loot_enabled) {
-                    look = kSmashBox; known = true;
+                if (!known && component_class == MARKER_CLASS_BARREL && g_markers_scrap_enabled) {
+                    // Безымянный LootDestroyable — всё равно семья бочек/знаков:
+                    // бочки живут только в секции «Скрап», «Ящиком» они не
+                    // становятся ни при каких тумблерах.
+                    look = kBarrel; known = true;
                 }
             }
             if (!known && (component_class == MARKER_CLASS_LOOT || family_unknown) &&
                 (g_markers_loot_enabled || g_markers_scrap_enabled)) {
-                known = loot_marker(component, object_name, root_name, look);
+                known = loot_marker(component, object_name, root_name, loot_panel, look);
                 if (known && look.kind == ESP_MARKER_SCRAP && !g_markers_scrap_enabled) known = false;
                 if (known && look.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) known = false;
             }
