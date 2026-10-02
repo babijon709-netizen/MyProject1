@@ -849,20 +849,32 @@ int main(int argc, char** argv) {
         if (take < 0x48) return;
         uint64_t holes = 0;
         read_holes(mfound, hdr, take, &holes);
-        uint32_t ver = 0;
+        uint32_t w0 = 0, ver = 0;
+        memcpy(&w0, hdr, 4);
         memcpy(&ver, hdr + 4, 4);
-        if (ver >= kV38MinVer && ver <= kV38MaxVer) {
+        // Магия НАСТОЯЩАЯ (мы здесь именно по магии) — пробуем мозаику
+        // троек ВСЕГДА, независимо от вида версии: протектор может
+        // оставить магию чистой, а версию и смещения таблиц XOR-нуть
+        // одним ключом (сборка из реального девайса: магия на месте,
+        // parse_blob падает на «версия/смещения»). v38_try такой ключ
+        // выводит из слота версии (w1 ^ v для v=38..110) — чистой версии
+        // для этого не нужно. Старая v16..v37 шапка тройной мозаике не
+        // сойдётся (пары 8-байтовые, тройки 12-байтовые) и честно
+        // уйдёт в очередь parse_blob ниже.
+        if (w0 == kRvmMagic) {
             V38Match m;
-            if (v38_try(hdr, rem, ~0ull, &m))
+            if (v38_try(hdr, rem, ~0ull, &m)) {
                 add_cand(mfound, m.size, (int)m.version, true, m.key,
                          m.sorted[6], m.sorted[7], m.sorted, "magic");
-            else if (s_v38_rej < 30) {
-                ++s_v38_rej;
-                say("   ?? магия @0x%llx: v%u — мозаика троек не сходится%s",
-                    (unsigned long long)mfound, (unsigned)ver,
-                    s_v38_rej == 30 ? " (дальше отвергнутые не пишу)" : "");
+                return;
             }
-            return;
+            if (ver >= kV38MinVer && ver <= kV38MaxVer && s_v38_rej < 30) {
+                ++s_v38_rej;
+                say("   ?? магия @0x%llx: v%u — мозаика троек не сходится "
+                    "(ключи из версии перебраны)%s", (unsigned long long)mfound,
+                    (unsigned)ver,
+                    s_v38_rej == 30 ? " (дальше не пишу)" : "");
+            }
         }
         if (magic_count < 8 && !magic_dup(magic_hits, magic_count, mfound)) {
             magic_hits[magic_count] = mfound;
