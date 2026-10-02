@@ -84,6 +84,46 @@ static const ImVec4 kAccentCols[] = {
 static constexpr int kAccentCustom = 8;
 static constexpr int kAccentCount = 9;   // 8 пресетов + свой
 
+// Вкладка «Расширенные» открывается компактным disclosure-рядом. Редкие
+// параметры не занимают экран по умолчанию, но остаются доступны одним тапом.
+static bool g_advancedExpanded = false;
+
+static bool AdvancedDisclosure(const char* id, const char* label) {
+    auto* dl = ImGui::GetWindowDrawList();
+    auto* fn = ImGui::GetFont();
+    const float avW = ImGui::GetContentRegionAvail().x;
+    const float rowH = Layout::RowH;
+    const float inset = Layout::Inset, padX = Layout::PadX;
+    const auto pos = ImGui::GetCursorScreenPos();
+
+    CardBg(rowH);
+    ImGui::InvisibleButton(id, {avW, rowH});
+    const bool blocked = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+    if (WasTappedHere() && !blocked && !IsScrollDragging() && !g_input.touchConsumed) {
+        g_advancedExpanded = !g_advancedExpanded;
+        g_input.touchConsumed = true;
+        PlaySound(SND_CLICK);
+    }
+
+    const float fs = ImGui::GetFontSize() * 1.15f;
+    const float cy = pos.y + rowH * 0.5f;
+    dl->AddText(fn, fs, {pos.x + inset + padX, cy - fs * 0.5f},
+                C::U(g_advancedExpanded ? C::Acc() : C::Txt()), label);
+
+    const float cx = pos.x + avW - inset - padX - 8.f;
+    const float s = 7.f;
+    const ImU32 arrow = C::U(g_advancedExpanded ? C::Acc() : C::Dim());
+    if (g_advancedExpanded) {
+        dl->AddLine({cx - s, cy - s * 0.35f}, {cx, cy + s * 0.35f}, arrow, 2.5f);
+        dl->AddLine({cx, cy + s * 0.35f}, {cx + s, cy - s * 0.35f}, arrow, 2.5f);
+    } else {
+        dl->AddLine({cx - s, cy + s * 0.35f}, {cx, cy - s * 0.35f}, arrow, 2.5f);
+        dl->AddLine({cx, cy - s * 0.35f}, {cx + s, cy + s * 0.35f}, arrow, 2.5f);
+    }
+    if (g_advancedExpanded)
+        DrawSelectionBadge(dl, {pos.x + avW - inset - 34.f, pos.y + 14.f}, 7.f);
+    return g_advancedExpanded;
+}
 
 
 float TabContent(int tab, float dt, float cW) {
@@ -883,8 +923,10 @@ float TabContent(int tab, float dt, float cW) {
             dl->AddText(ImGui::GetFont(), exitFS, {tx, ty}, C::U(C::Red()), exitTxt);
         }
     } else if (tab == 3) {
-        // Разное: каждая крупная функция — своя карточка-«вкладка»,
-        // открывающая отдельное окно (как «Ещё настройки» в ESP).
+        // Редкие и потенциально длинные параметры спрятаны за одним
+        // disclosure-рядом: основной навигатор остаётся коротким.
+        SHdr(XS("Расширенные"));
+        if (AdvancedDisclosure("##advanced_all", XS("Ещё настройки"))) {
         SHdr(XS("Функции"));
         CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
         CardBg(Layout::RowH * 2);
@@ -1099,6 +1141,7 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##wd0", XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true, true);
 
         ImGui::Dummy({1.f, Layout::SectionGap});
+        }
     }
 
     ImGui::Dummy({1.f, Layout::SectionGap});
