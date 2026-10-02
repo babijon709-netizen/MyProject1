@@ -238,9 +238,24 @@ static void parse_regions(const std::string& text, std::vector<Region>* out) {
 // режет отображение на куски, и тело блоба может лежать в мелкой
 // области <1 МБ. Поэтому фильтра по имени/размеру больше нет — только
 // «читаемая» и «не меньше страницы»; приоритет задаёт region_score.
-static bool region_candidate(const Region& r) {
-    if (r.perms[0] != 'r') return false;
+//
+// include_closed (режим драйвера ft/qx/rt): протектор этой игры держит
+// метадату в ЗАКРЫТЫХ страницах (---p): в карте читаемая заглушка-
+// страница, за ней ~51 МБ ---p, потом читаемый хвост — а в APK вместо
+// метадаты 4-КБ заглушка. Драйвер ядра читает ---p, поэтому в kernel-
+// режимах такие области тоже сканируем. Но не тащим гигантские резервы
+// (cfi shadow 2 ГБ, webview 1 ГБ, scudo по ~250 МБ — суммарно гигабайты
+// пустоты): метадата — десятки МБ, режем всё >64 МБ и по именам резервов.
+static bool region_candidate(const Region& r, bool include_closed = false) {
     if (r.end - r.start < kPage) return false;
+    if (r.perms[0] == 'r') return true;
+    if (!include_closed) return false;
+    if (r.end - r.start > (64ull << 20)) return false;
+    static const char* const kReserveJunk[] = {
+        "scudo", "libwebview", "cfi shadow",
+    };
+    for (const char* j : kReserveJunk)
+        if (r.name.find(j) != std::string::npos) return false;
     return true;
 }
 
@@ -250,6 +265,7 @@ static bool region_candidate(const Region& r) {
 // скана — при долгом полном проходе можно прерваться, дождавшись нужной
 // находки.
 static int region_score(const Region& r) {
+    if (r.perms[0] != 'r') return -1;   // закрытые (драйвер) — первыми
     const bool writable = r.perms[1] == 'w';
     static const char kDeleted[] = " (deleted)";
     const size_t dlen = sizeof(kDeleted) - 1;
@@ -1187,13 +1203,39 @@ static int Run(int argc, char* argv[]) {
 
     // ---- скан --------------------------------------------------------------
     if (regions.empty()) parse_regions(maps_text, &regions);
+    const bool kernel_backend =
+        backend == ESP_MEM_FT || backend == ESP_MEM_QX || backend == ESP_MEM_RT;
     std::vector<Region> cand;
     std::uint64_t cand_bytes = 0;
+    int closed_cnt = 0;
     for (const Region& r : regions)
-        if (region_candidate(r)) {
+        if (region_candidate(r, kernel_backend)) {
             cand.push_back(r);
             cand_bytes += r.end - r.start;
+            if (r.perms[0] != 'r') ++closed_cnt;
         }
+    // Слияние смежных кусков (kernel): протектор режет блоб на «читаемая
+    // страница-заглушка + закрытое тело + читаемый хвост» — три области
+    // карты. По отдельности валидатор не видит целого (заголовок в одном
+    // куске, тело в другом); слитые — видят, а якорный прогон берёт блоб
+    // с настоящего начала.
+    if (kernel_backend && cand.size() > 1) {
+        std::sort(cand.begin(), cand.end(),
+                  [](const Region& a, const Region& b) {
+                      return a.start < b.start;
+                  });
+        std::vector<Region> merged;
+        merged.push_back(cand[0]);
+        for (size_t i = 1; i < cand.size(); ++i) {
+            Region& last = merged.back();
+            if (cand[i].start == last.end) {
+                if (cand[i].end > last.end) last.end = cand[i].end;
+            } else {
+                merged.push_back(cand[i]);
+            }
+        }
+        cand.swap(merged);
+    }
     std::stable_sort(cand.begin(), cand.end(),
                      [](const Region& a, const Region& b) {
                          return region_score(a) < region_score(b);
@@ -1202,8 +1244,14 @@ static int Run(int argc, char* argv[]) {
         log.say("!! в карте нет читаемых областей — игра ещё грузится?");
         return 2;
     }
-    log.say("к скану   : %d областей, %.0f МБ (все читаемые области карты)",
-            (int)cand.size(), (double)cand_bytes / (1024.0 * 1024.0));
+    if (closed_cnt)
+        log.say("к скану   : %d областей, %.0f МБ (читаемые + %d закрытых "
+                "---p: режим драйвера читает их)",
+                (int)cand.size(), (double)cand_bytes / (1024.0 * 1024.0),
+                closed_cnt);
+    else
+        log.say("к скану   : %d областей, %.0f МБ (все читаемые области карты)",
+                (int)cand.size(), (double)cand_bytes / (1024.0 * 1024.0));
 
     std::vector<Blob> blobs;
     std::vector<MarkerHit> markers;
