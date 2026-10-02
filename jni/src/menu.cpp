@@ -881,10 +881,9 @@ float TabContent(int tab, float dt, float cW) {
         // Разное: каждая крупная функция — своя карточка-«вкладка»,
         // открывающая отдельное окно (как «Ещё настройки» в ESP).
         SHdr(XS("Функции"));
+        // Вход в окно управления ботом (секция 5). Выбор цветов метки/тела
+        // ноды убран по просьбе пользователя — рисуются фирменными цветами.
         CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
-        CardBg(Layout::RowH * 2);
-        ColorRow("##fsp", XS("Метка фарма"), &cfg::esp::farm_spot_col, false);
-        ColorRow("##fbd", XS("Тело ноды"),   &cfg::esp::farm_body_col, true);
 
         auto& vm = g_state.viewmodel;
         SHdr(XS("Кастомный FOV"));
@@ -894,26 +893,46 @@ float TabContent(int tab, float dt, float cW) {
                   50.f, 120.f, XS("%.0f°"), true, false, g_state.sl_custom_fov, dt);
 
         SHdr(XS("Расположение рук"));
-        CardBg(Layout::RowH + Layout::SliderH * 3.f);
-        ToggleRow("##vmhands", XS("Кастомные руки"), &vm.hands_enabled, g_state.a_custom_hands, false, true);
-        SliderRow("##vmx", XS("X: влево / вправо"), &vm.x,
-                  -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_x, dt);
-        SliderRow("##vmy", XS("Y: вниз / вверх"), &vm.y,
-                  -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_y, dt);
-        SliderRow("##vmz", XS("Z: ближе / дальше"), &vm.z,
-                  -50.f, 50.f, XS("%.0f см"), true, false, g_state.sl_hands_z, dt);
-        ImGui::PushID("viewmodel_reset");
-        if (ImGui::Button(XS("Сброс"))) {
-            // This button resets only FOV/hands, not the other misc features.
-            const int fps = vm.fps_limit;
-            const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
-            vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;
-            g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
-            g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
-            esp_viewmodel_tick(vm);
+        // «Сброс» — строкой ВНУТРИ карточки: раньше кнопка висела под
+        // карточкой (сломанный отступ), и голый ImGui::Button в этом меню
+        // терял тапы (см. комментарий у чипов FPS ниже). Полная ширина,
+        // тач-паттерн InvisibleButton + WasTappedHere, как у чипов.
+        {
+            const float resetH = Layout::RowH * 0.9f;
+            CardBg(Layout::RowH + Layout::SliderH * 3.f + resetH);
+            ToggleRow("##vmhands", XS("Кастомные руки"), &vm.hands_enabled, g_state.a_custom_hands, false, true);
+            SliderRow("##vmx", XS("X: влево / вправо"), &vm.x,
+                      -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_x, dt);
+            SliderRow("##vmy", XS("Y: вниз / вверх"), &vm.y,
+                      -50.f, 50.f, XS("%.0f см"), false, false, g_state.sl_hands_y, dt);
+            SliderRow("##vmz", XS("Z: ближе / дальше"), &vm.z,
+                      -50.f, 50.f, XS("%.0f см"), true, false, g_state.sl_hands_z, dt);
+            auto* dl = ImGui::GetWindowDrawList();
+            auto* fn = ImGui::GetFont();
+            const float inset = Layout::Inset;
+            const float w = ImGui::GetContentRegionAvail().x;
+            const ImVec2 rp = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##vmreset", {w, resetH});
+            const bool popBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                // This button resets only FOV/hands, not the other misc features.
+                const int fps = vm.fps_limit;
+                const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
+                vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns; vm.fast_loot = fl;
+                g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
+                g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
+                esp_viewmodel_tick(vm);
+                PlaySound(SND_CLICK);
+                g_input.touchConsumed = true;
+            }
+            dl->AddRectFilled({rp.x + inset, rp.y}, {rp.x + w - inset, rp.y + resetH},
+                              C::U(C::TrkOff()), 6.f);
+            const float tfs = ImGui::GetFontSize() * 1.05f;
+            const auto tsz = fn->CalcTextSizeA(tfs, FLT_MAX, 0, XS("Сброс"));
+            dl->AddText(fn, tfs,
+                        {rp.x + (w - tsz.x) * 0.5f, rp.y + (resetH - tsz.y) * 0.5f},
+                        C::U(C::Dim()), XS("Сброс"));
         }
-        ImGui::PopID();
-        ImGui::Dummy({1.f, 12.f});
 
         SHdr(XS("Оружие"));
         CardBg(Layout::RowH * 2.f);
@@ -986,39 +1005,11 @@ float TabContent(int tab, float dt, float cW) {
             fpsChip("##fps144", "144 FPS", 144, 2, false, g_state.a_fps_144);
             fpsChip("##fpsrst", XS("Сброс"), 0,  0, true,  g_state.a_fps_rst);
             // Лямбды чипов двигают курсор в абсолютные координаты — вернуть
-            // под две строки, иначе строка статуса ляжет поверх «Сброса».
+            // под две строки карточки, иначе следующая секция наложится.
             ImGui::SetCursorScreenPos({rowPos.x, rowPos.y + rowH * 2.f});
-            // Какой режим выбран и что реально стоит в памяти игры: раньше видна
-            // была только подсветка кнопки, из-за чего состояние читалось плохо.
-            const auto fpsUi = esp_viewmodel_fps_ui();
-            const char* mode;
-            {
-                char modeBuf[24];
-                if (vm.fps_limit) { snprintf(modeBuf, sizeof(modeBuf), "%d FPS", vm.fps_limit); mode = modeBuf; }
-                else mode = XS("обычный");
-                // Статус: Active означает, что и поле лимита, и type pacing уже
-                // стоят так, как выбрано; Waiting — игра ещё не на связи.
-                const char* st = fpsUi.status == viewmodel::Status::Active ? XS("применено") :
-                                 fpsUi.status == viewmodel::Status::Waiting ? XS("ожидание") :
-                                 fpsUi.status == viewmodel::Status::Failed  ? XS("ошибка") :
-                                                                              XS("выкл");
-                if (vm.fps_limit) {
-                    ImGui::Text("%s: %s · %s (%s: %d)", XS("Режим"), mode, st,
-                                XS("поле игры"), fpsUi.field_value);
-                } else {
-                    ImGui::Text("%s: %s", XS("Режим"), mode);
-                }
-                // Неопознанная версия libunity: игра обновилась и её сборки
-                // нет в таблице. Build ID печатаем прямо здесь — по нему
-                // лейаут добавляется в fps_memory.h удалённо.
-                if (fpsUi.build_id) {
-                    char idBuf[96];
-                    snprintf(idBuf, sizeof(idBuf), "%s Unity %016llx",
-                             XS("Неопознанная версия игры:"),
-                             (unsigned long long)fpsUi.build_id);
-                    ImGui::TextDisabled("%s", idBuf);
-                }
-            }
+            // Статус-строки («Режим: … применено», «Неопознанная версия игры»)
+            // убраны по просьбе пользователя: состояние видно по подсветке
+            // чипа, неопознанный build id пишется в журнал (game_viewmodel).
         }
 
         // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
