@@ -841,7 +841,16 @@ int main(int argc, char** argv) {
     // с запасом, чтобы читательские регионы (0..3) прошли целиком, а скрытые
     // (4) и «(deleted)» (5) получили остаток. Дамп — разовая операция,
     // 15-30 секунд скана допустимы.
-    const uint64_t kScanCap = 16ull << 30;
+    // Раньше фиксированные 16 ГБ: протектор аллоцирует собственные 16-МБ
+    // регионы (объектные кучи, декой-заливки), и суммарная память
+    // перестала в потолок помещаться — часть регионов (и, возможно,
+    // настоящий строковый пул метаданных) оставалась НЕ ПРОСКАНИРОВАННОЙ:
+    // раны давали «кандидатов 0», а имена из 43 находились в логах.
+    // Теперь потолок = min(сумма всех регионов, 64 ГБ): читается всё.
+    uint64_t total_reg = 0;
+    for (int i = 0; i < g_reg_count; ++i)
+        total_reg += g_regs[i].end - g_regs[i].start;
+    const uint64_t kScanCap = (total_reg > (64ull << 30)) ? (64ull << 30) : total_reg;
     uint64_t scanned = 0;
     uint64_t hits[16];
     int hit_count = 0;
@@ -877,6 +886,14 @@ int main(int argc, char** argv) {
         // сойдётся (пары 8-байтовые, тройки 12-байтовые) и честно
         // уйдёт в очередь parse_blob ниже.
         if (w0 == kRvmMagic) {
+            // В очередь — ВСЕ чистые магии (даже те, что v38_try уже принял):
+            // очередь нужна и для оффлайн-дампа файловой маппинга
+            // (benzhack_filemapN.bin), и для DIAG-формуляра. Повторный
+            // parse_blob в 5b по принятой v38-шапке честно провалится
+            // (парный порядок смещений по тройкам не сходится) — дублей
+            // кандидатов не будет.
+            if (magic_count < 8 && !magic_dup(magic_hits, magic_count, mfound))
+                magic_hits[magic_count++] = mfound;
             V38Match m;
             if (v38_try(hdr, rem, ~0ull, &m)) {
                 add_cand(mfound, m.size, (int)m.version, true, m.key,
@@ -1300,10 +1317,12 @@ int main(int argc, char** argv) {
                 return;
             }
             for (uint64_t off = 0; off < sizeof(hb); off += 16) {
+                size_t len = sizeof(hb) - off;
+                if (len > 16) len = 16;
                 char line[140];
                 int n = snprintf(line, sizeof(line), "DIAG %s @0x%llx+0x%03x: ",
                                  tag, (unsigned long long)addr, (unsigned)off);
-                for (size_t b = 0; b < 16; ++b)
+                for (size_t b = 0; b < len; ++b)
                     n += snprintf(line + n, sizeof(line) - (size_t)n, "%02x ",
                                   hb[off + b]);
                 say("%s", line);
@@ -1371,6 +1390,23 @@ int main(int argc, char** argv) {
     }
     if (hit_count) {
         dump_range(out_dir, "benzhack_meta.bin", win_lo, win_hi - win_lo, 16ull << 20);
+    }
+    // Файловая маппинг (global-metadata.dat): файл для оффлайн-анализа.
+    // Здесь шапка с чистой магией, но версия/смещения закрыты (все
+    // single-key ключи перебраны) и строк там нет — схема защиты файла
+    // определяется по этим байтам (и по самому файлу из приложения).
+    for (int m = 0; m < magic_count; ++m) {
+        for (int i = 0; i < g_reg_count; ++i)
+            if (magic_hits[m] >= g_regs[i].start && magic_hits[m] < g_regs[i].end) {
+                char name[64];
+                snprintf(name, sizeof(name), "benzhack_filemap%d.bin", m + 1);
+                const uint64_t fsz = g_regs[i].end - magic_hits[m];
+                dump_range(out_dir, name, magic_hits[m],
+                           (fsz > (16ull << 20)) ? (16ull << 20) : fsz, 16ull << 20);
+                break;
+            }
+    }
+    if (hit_count) {
         // Три самых густых по указателям региона. Если метадата найдена —
         // снимаем весь размах между первым и последним указателем (это и есть
         // пул классов целиком, не 256 КБ вокруг первого, как раньше).
