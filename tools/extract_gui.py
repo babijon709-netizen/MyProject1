@@ -18,6 +18,9 @@ from pathlib import Path
 # Paths are relative to jni/. Keep this list explicit: a whitelist makes it much
 # harder for a future gameplay/driver file to leak into the GUI deliverable.
 FILES = [
+    # Build files for the standalone GUI-only Android target.
+    "Android.mk",
+    "Application.mk",
     # Public UI contracts and state.
     "include/Android_draw/draw.h",
     "include/Android_touch/TouchHelperA.h",
@@ -54,6 +57,8 @@ FILES = [
     "include/viewmodel.h",
     "include/widgets.h",
     # GUI implementation and rendering support.
+    "src/gui_only_main.cpp",
+    "src/gui_only_stubs.cpp",
     "src/Android_draw/draw.cpp",
     "src/Blur/Blur.cpp",
     "src/Blur/Blur.h",
@@ -129,11 +134,11 @@ def build_archive(repo: Path, output: Path) -> None:
         "files": [],
         "excluded": EXCLUDED,
         "note": (
-            "The archive is a whitelist extraction of the GUI layer. "
-            "Gameplay, memory, kernel/driver, reverse-engineering, and touch "
-            "injection implementations are not included. The UI source keeps "
-            "its original host-service declarations so it can be integrated "
-            "with an application host."
+            "The archive is a whitelist extraction of the GUI layer and its "
+            "standalone GUI-only Android target. Gameplay, memory, kernel/driver, "
+            "reverse-engineering, and touch injection implementations are not "
+            "included. gui_only_stubs.cpp makes the host services inert for the "
+            "GUI binary."
         ),
     }
 
@@ -157,15 +162,15 @@ def build_archive(repo: Path, output: Path) -> None:
             })
         zf.writestr(
             "gui-source/README.md",
-            "# GUI source extraction\n\n"
-            "This archive contains only the GUI layer selected from the project: "
-            "the menu, widgets, HUD, theme, configuration/language UI support, "
-            "ImGui Android/OpenGL backends, and embedded GUI assets.\n\n"
-            "It intentionally does not contain the project entry point, gameplay "
-            "implementations, process/memory access, kernel/driver transport, "
-            "reverse-engineering material, or synthetic touch injection. The "
-            "remaining public declarations are host-service interfaces referenced "
-            "by the original UI files; they are included as headers only.\n",
+            "# GUI-only source extraction\n\n"
+            "This archive contains the GUI layer selected from the project: the "
+            "menu, widgets, HUD, theme, configuration/language UI support, ImGui "
+            "Android/OpenGL backends, embedded GUI assets, and the standalone "
+            "GUI-only Android entry point.\n\n"
+            "It intentionally does not contain gameplay implementations, process "
+            "or memory access, kernel/driver transport, reverse-engineering "
+            "material, or synthetic touch injection. gui_only_stubs.cpp keeps all "
+            "non-GUI host services inert so the binary renders the interface only.\n",
         )
         zf.writestr(
             "gui-source/MANIFEST.json",
