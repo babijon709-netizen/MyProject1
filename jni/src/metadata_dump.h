@@ -247,6 +247,12 @@ struct Blob {
     std::uint64_t addr = 0;
     std::uint64_t size = 0;
     std::uint32_t version = 0;
+    // Заголовок блоба был зашифрован протектором и найден расшифровкой:
+    // каждый u32 XOR-ится key, первые три u32 (sanity, version, first_off)
+    // переставлены схемой perm (0 = без перестановки). Выгрузка пишет файл
+    // УЖЕ расшифрованным — Il2CppDumper берёт его как есть.
+    std::uint32_t descramble_key = 0;
+    int          descramble_perm = 0;
 };
 
 // Проверка заголовка по месту найденной магии. Структурная, без таблицы
@@ -295,6 +301,7 @@ static bool validate_blob_header(const unsigned char* hdr, size_t hdr_len,
             (size_t)first_off + 8 <= hdr_len) {
             std::uint32_t prev = first_off;
             structural = true;
+            bool covered = false;   // маркер лежит внутри одной из таблиц
             for (int k = 0; k < pairs; ++k) {
                 std::uint32_t off = 0, sz = 0;
                 memcpy(&off, hdr + 8 + 8 * k, 4);
@@ -314,15 +321,20 @@ static bool validate_blob_header(const unsigned char* hdr, size_t hdr_len,
                 // Маркер обязан лежать внутри какой-то таблицы блоба.
                 if (must_cover_rel != ~0ull &&
                     must_cover_rel >= off && must_cover_rel < end)
-                    must_cover_rel = ~0ull;                  // накрыта
+                    covered = true;
             }
-            if (must_cover_rel != ~0ull) structural = false; // строка вне таблиц
+            // Строку не накрыла ни одна таблица — заголовок не её.
+            if (structural && must_cover_rel != ~0ull && !covered)
+                structural = false;
         }
     }
     if (!structural) {
         if (must_cover_rel != ~0ull) {
-            // Маркерный путь без сошедшейся структуры не принимаем: без
-            // таблиц накрытие строки не проверить.
+            // Маркерный путь без СОШЕДШЕЙСЯ структуры не принимаем. Раньше
+            // здесь была дыра: «накрыть» маркер успевала первая попавшаяся
+            // мусорная пара, и валидатор скатывался в эвристику размера —
+            // так в дамп от 14.10 попали три области по 243/190/16 МБ
+            // (dalvik-куча и структуры протектора), ни одна не метадата.
             if (reason_out) *reason_out = "структура заголовка не сошлась";
             return false;
         }
@@ -403,6 +415,36 @@ static void find_markers(const unsigned char* buf, size_t len, std::uint64_t add
     }
 }
 
+// Протектор может шифровать заголовок: каждый u32 XOR-ится ключом, а первые
+// три u32 (sanity, version, first_off) — вдобавок переставлены. Ключ не
+// перебираем: он выводится из самой магии, key = raw[sanity_slot] ^ 0xFAB11BAF.
+// kTriplePerms[p][j] — из какого raw-слота пришёл j-й расшифрованный u32.
+static const int kTriplePerms[6][3] = {
+    {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0},
+};
+
+// Расшифровка буфера: u32 XOR ключом (хвост <4 байт — побайтно младшими
+// байтами ключа); perm применяется один раз к первым 12 байтам файла.
+static void descramble_buf(unsigned char* buf, size_t len, std::uint32_t key,
+                           int perm, bool apply_perm) {
+    if (!key) return;
+    const size_t n = len / 4;
+    for (size_t k = 0; k < n; ++k) {
+        std::uint32_t v;
+        memcpy(&v, buf + 4 * k, 4);
+        v ^= key;
+        memcpy(buf + 4 * k, &v, 4);
+    }
+    for (size_t k = n * 4; k < len; ++k)
+        buf[k] ^= (unsigned char)(key >> (8 * (k & 3)));
+    if (apply_perm && perm > 0) {
+        std::uint32_t t[3];
+        for (int j = 0; j < 3; ++j)
+            memcpy(&t[j], buf + 4 * kTriplePerms[perm][j], 4);
+        memcpy(buf, t, 12);
+    }
+}
+
 // Сканирование одного прочитанного блока: магию ищем на КАЖДОМ байте —
 // malloc/mmap дают выравнивание, но протектор может положить блоб со
 // смещением специально, и шаг в 4 байта его пропускал. Отвергнутый
@@ -460,6 +502,73 @@ static void scan_block(const unsigned char* buf, size_t len, std::uint64_t addr,
         log->say("  ++ global-metadata v%u: адрес 0x%llx, %.1f МБ",
                  (unsigned)version, (unsigned long long)at,
                  (double)size / (1024.0 * 1024.0));
+    }
+
+    // Второй проход — зашифрованные заголовки. Строки метадаты в памяти
+    // лежат открытым текстом (иначе маркеры бы не находились), значит тело
+    // блоба не шифровано и трогать его нельзя — расшифровке подлежит только
+    // заголовок 0x210. Отсев дешёвый: версия после XOR должна сойтись,
+    // первая пара — попасть в правдоподобный диапазон.
+    static int s_descr_rejected = 0;
+    for (size_t i = 0; i + 0x48 <= len; i += 4) {
+        std::uint32_t t[3];
+        memcpy(t, buf + i, 12);
+        for (int perm = 0; perm < 6; ++perm) {
+            const std::uint32_t key = t[kTriplePerms[perm][0]] ^ kMetaMagic;
+            if (key == 0) continue;
+            const std::uint32_t ver = t[kTriplePerms[perm][1]] ^ key;
+            if (!version_ok(ver)) continue;
+            const std::uint32_t fo = t[kTriplePerms[perm][2]] ^ key;
+            if (fo < 0x48 || fo > 0x400 || (fo % 8) != 0) continue;
+
+            const std::uint64_t at = addr + i;
+            bool dup = false;
+            for (const Blob& b : *blobs)
+                if (at >= b.addr && at < b.addr + b.size) {
+                    dup = true;
+                    break;
+                }
+            if (dup) continue;
+
+            std::uint64_t want = 0x210;
+            if (want > region_end - at) want = region_end - at;
+            if (want < 0x48) continue;
+            unsigned char raw[0x210], dec[0x210];
+            if (!g_mem.read_quiet(at, raw, (size_t)want)) continue;
+            memcpy(dec, raw, (size_t)want);
+            descramble_buf(dec, (size_t)want, key, perm, /*apply_perm=*/true);
+
+            std::uint32_t version = 0;
+            std::uint64_t size = 0;
+            const char* reason = nullptr;
+            if (!validate_blob_header(dec, (size_t)want, at, region_end,
+                                      &version, &size, &reason,
+                                      /*must_cover_rel=*/~0ull,
+                                      /*require_magic=*/true)) {
+                if (s_descr_rejected < 10) {
+                    ++s_descr_rejected;
+                    log->say("   ?? зашифрованный кандидат 0x%llx "
+                             "(ключ 0x%08x): %s",
+                             (unsigned long long)at, (unsigned)key,
+                             reason ? reason : "?");
+                }
+                continue;
+            }
+            Blob b;
+            b.addr = at;
+            b.size = size;
+            b.version = version;
+            b.descramble_key = key;
+            b.descramble_perm = perm;
+            blobs->push_back(b);
+            log->say("  ++ global-metadata v%u, заголовок зашифрован "
+                     "(XOR 0x%08x%s): адрес 0x%llx, %.1f МБ — файл запишу "
+                     "с расшифрованным заголовком",
+                     (unsigned)version, (unsigned)key,
+                     perm ? ", перестановка троек" : "",
+                     (unsigned long long)at,
+                     (double)size / (1024.0 * 1024.0));
+        }
     }
 }
 
@@ -550,7 +659,11 @@ static bool blob_from_marker(const MarkerHit& hit, const Region& region,
     for (const Blob& b : *blobs)
         if (hit.addr >= b.addr && hit.addr < b.addr + b.size)
             return false;                       // метка внутри найденного блоба
-    static unsigned char win[1u << 20];
+    // Окно с запасом 0x210: кандидаты у верхней границы окна читают заголовок,
+    // выходящий ЗА окно (win_hi..win_hi+0x210). Без запаса чтение писало мимо
+    // буфера (переполнение 0x210 байт) и портило соседние статики — валидатор
+    // принимал «заголовки» из повреждённых байт.
+    static unsigned char win[(1u << 20) + 0x210];
     const std::uint64_t kWin = 1u << 20;
     const std::uint64_t room = hit.addr - region.start;
     const std::uint64_t max_back = room > (160ull << 20) ? (160ull << 20) : room;
@@ -612,6 +725,10 @@ static bool dump_blob(const Blob& b, const char* path, Log* log) {
         return false;
     }
     static unsigned char buf[kChunk];
+    if (b.descramble_key)
+        log->say("   заголовок блоба был зашифрован (XOR 0x%08x) — первые "
+                 "0x210 байт файла записываю расшифрованными",
+                 (unsigned)b.descramble_key);
     std::uint64_t done = 0, failed = 0;
     while (done < b.size) {
         const std::uint64_t left = b.size - done;
@@ -619,6 +736,14 @@ static bool dump_blob(const Blob& b, const char* path, Log* log) {
         // Дыры (закрытые страницы) — нулями, чтобы файл не съезжал; счётчик
         // потерь скажет, сколько вылетело. Весь блоб в дырах — файл не пишем.
         read_span_holes(b.addr + done, buf, want, &failed);
+        // Зашифрован только заголовок (таблицы в памяти открыты — иначе
+        // строковые маркеры не находились бы), тело пишем как есть.
+        if (b.descramble_key && done < 0x210) {
+            const size_t head =
+                (size_t)((0x210 - done) < want ? (0x210 - done) : want);
+            descramble_buf(buf, head, b.descramble_key, b.descramble_perm,
+                           /*apply_perm=*/done == 0);
+        }
         fwrite(buf, 1, want, f);
         done += want;
         if ((done / (8u << 20)) != ((done - want) / (8u << 20)))

@@ -276,6 +276,7 @@ void glStencilFunc(GLenum, GLint, GLuint);
 void glStencilMask(GLuint);
 void glStencilOp(GLenum, GLenum, GLenum);
 void glTexImage2D(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+void glTexSubImage2D(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*);
 void glTexParameteri(GLenum, GLenum, GLint);
 void glUniform1i(GLint, GLint);
 void glUniformMatrix4fv(GLint, GLsizei, GLboolean, const GLfloat*);
