@@ -111,7 +111,8 @@ void RestoreAccent() {
 // не в момент сохранения конфига. Поэтому каждая запись/сброс тут же вызывает
 // RememberLayout(), а старт — RestoreLayout(). Первые 12 чисел сохраняют
 // прежний формат (шесть пар позиций); следом добавлены центр круглой зоны
-// обзора фрикама и её радиус. Старые .layout читаются без миграции.
+// обзора фрикама с её радиусом и размер джойстика фрикама (в процентах).
+// Старые .layout читаются без миграции: недостающие числа — дефолты.
 // -1 = позиция не задана. Точка аима заодно дублируется
 // в блобе (слоты aim_touch_x/y): при загрузке конфиг побеждает и переписывает
 // этот файл — как язык.
@@ -124,7 +125,7 @@ void RememberLayout() {
     std::ofstream f(CfgLayoutPath(), std::ios::trunc);
     if (!f) return;
     char b[320];
-    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
+    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
              g_state.farm_joy_x, g_state.farm_joy_y,
              g_state.farm_fire_x, g_state.farm_fire_y,
              g_state.freecam_joy_x, g_state.freecam_joy_y,
@@ -132,7 +133,8 @@ void RememberLayout() {
              g_state.freecam_btn_x, g_state.freecam_btn_y,
              g_state.aim_tx, g_state.aim_ty,
              g_state.freecam_look_x, g_state.freecam_look_y,
-             g_state.freecam_look_radius);
+             g_state.freecam_look_radius,
+             g_state.freecam_joy_size);
     f << b;
 }
 
@@ -156,6 +158,12 @@ void RestoreLayout() {
         g_state.freecam_look_radius = (look_radius >= 0.10f && look_radius <= 0.48f)
             ? look_radius : 0.28f;
     }
+    // Размер джойстика фрикама — последнее число; в старых .layout его нет,
+    // тогда остаётся дефолт (100%).
+    float joy_size = 100.f;
+    if (f >> joy_size)
+        g_state.freecam_joy_size = (joy_size >= 60.f && joy_size <= 200.f)
+            ? joy_size : 100.f;
 }
 
 static void XorBuf(uint8_t* buf, size_t sz) {

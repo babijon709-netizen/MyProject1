@@ -144,6 +144,7 @@ static const LangPair kUiEn[] = {
     {"Прошлый запуск: %s", "Last launch: %s"},
     {"Радиус", "Radius"},
     {"Радиус зоны обзора", "Look zone radius"},
+    {"Размер джойстика", "Joystick size"},
     {"Разное", "Misc"},
     {"Расположение рук", "Hand position"},
     {"Режим", "Mode"},

@@ -1024,7 +1024,7 @@ float TabContent(int tab, float dt, float cW) {
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
         // считается от глаза персонажа, а камера улетела от него.
         SHdr(XS("Фрикам"));
-        CardBg(Layout::RowH * 5.f + Layout::SliderH * 2.f);
+        CardBg(Layout::RowH * 5.f + Layout::SliderH * 3.f);
         ToggleRow("##fc0", XS("Фрикам"), &g_state.freecam_on, g_state.a_freecam_on, false, true);
         ToggleRow("##fc2", XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
@@ -1033,6 +1033,12 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##fclr", XS("Радиус зоны обзора"), &g_state.freecam_look_radius,
                   0.10f, 0.48f, XS("%.2f"), false, false, g_state.sl_freecam_look_radius, dt);
         if (oldLookRadius != g_state.freecam_look_radius) RememberLayout();
+        // Размер джойстика фрикама: 100% = прежние 130 px. Тянутся и основание,
+        // и ручка, и мёртвая зона (долей радиуса) — меняется только масштаб.
+        const float oldJoySize = g_state.freecam_joy_size;
+        SliderRow("##fcjs", XS("Размер джойстика"), &g_state.freecam_joy_size,
+                  60.f, 200.f, XS("%.0f%%"), false, false, g_state.sl_freecam_joy_size, dt);
+        if (oldJoySize != g_state.freecam_joy_size) RememberLayout();
         {
             // Кнопка настройки положения джойстика фрикама
             const float rowH = Layout::RowH, inset = Layout::Inset;
@@ -1284,6 +1290,16 @@ static float s_fc_look_x = 0.f, s_fc_look_y = 0.f;
 static int   s_fc_up_id = -1, s_fc_down_id = -1;
 static int   s_fc_prev_ids[12];
 static int   s_fc_prev_n = 0;
+// Радиус стика фрикама: база 130 px на короткой стороне 1080, дальше —
+// пропорциональный масштаб под экран (S) и пользовательский размер из
+// «Разное → Фрикам» (60..200%, 100 = прежние 130 px). Одно место для
+// полёта и для превью в калибровке — круг не разъедется с хит-тестами.
+static float FreecamJoyRadius(float vw, float vh) {
+    const float S = ImClamp(ImMin(vw, vh) / 1080.f, 0.6f, 2.5f);
+    const float scale = ImClamp(g_state.freecam_joy_size, 60.f, 200.f) / 100.f;
+    return 130.f * S * scale;
+}
+
 // Грейс сорванного пальца: снимок Touch_GetActive иногда не видит удерживаемый
 // палец один-два кадра (тач-поток пишет состояние без лока — см. TypeA), и без
 // грейса захват на этих кадрах отпускался и тут же подхватывался заново: рывки
@@ -1367,7 +1383,7 @@ void UpdateFreecam(float dt) {
     // размеры как были), на остальных экранах — пропорционально. Иначе на
     // планшете стик с кнопками крошечные, а на маленьком экране — полдисплея.
     const float S = ImClamp(ImMin(vw, vh) / 1080.f, 0.6f, 2.5f);
-    const float R = 130.f * S;             // ход стика (= радиус круглого основания)
+    const float R = FreecamJoyRadius(vw, vh);   // ход стика (= радиус круглого основания)
     float cx, cy;                          // центр джойстика
     if (g_state.freecam_joy_x >= 0.f && g_state.freecam_joy_y >= 0.f) {
         cx = g_state.freecam_joy_x * vw;
@@ -1436,7 +1452,7 @@ void UpdateFreecam(float dt) {
     auto stickVec = [&](float px, float py) {
         const float dx = px - cx, dy = py - cy;
         const float len = sqrtf(dx * dx + dy * dy);
-        const float dead = 12.f * S;        // мёртвая зона у центра
+        const float dead = R * (12.f / 130.f);  // мёртвая зона — та же доля стика, что и раньше
         if (len > dead) {
             float mag = (len - dead) / (R - dead);
             if (mag > 1.f) mag = 1.f;
@@ -1841,6 +1857,13 @@ void RenderMenu() {
                     const float rr = ImClamp(g_state.freecam_look_radius, 0.10f, 0.48f) * ImMin(dw, dh);
                     fg->AddCircleFilled({zx, zy}, rr, C::UA(C::Acc(), 0.10f), 72);
                     fg->AddCircle({zx, zy}, rr, C::UA(C::Acc(), 0.75f), 72, 3.f);
+                }
+                // Джойстик фрикама: круг ровно того размера, каким он будет
+                // в полёте (слайдер «Размер джойстика» учитывается).
+                if (g_calibMode == 4) {
+                    const float jr = FreecamJoyRadius(dw, dh);
+                    fg->AddCircleFilled({zx, zy}, jr, C::UA(C::Acc(), 0.10f), 64);
+                    fg->AddCircle({zx, zy}, jr, C::UA(C::Acc(), 0.75f), 64, 3.f);
                 }
                 float pr = 34.f + 6.f * sinf((float)ImGui::GetTime() * 4.f);
                 fg->AddCircle({zx, zy}, pr, C::UA(C::Acc(), 0.85f), 40, 3.f);

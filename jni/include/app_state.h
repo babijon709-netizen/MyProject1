@@ -61,6 +61,10 @@ struct AppState {
     bool  freecam_on = false;
     float freecam_speed = 12.f;
     float freecam_joy_x = -1.f, freecam_joy_y = -1.f;
+    // Размер джойстика фрикама: процент от базовых 130 px (база — короткая
+    // сторона 1080), 60..200, 100 = прежний размер. Как и позиции органов
+    // управления, живёт в .layout — привязан к устройству, а не к профилю.
+    float freecam_joy_size = 100.f;
     // Круглая зона управления обзором: центр в долях экрана, радиус — доля
     // короткой стороны. -1 у центра = дефолт справа по центру.
     float freecam_look_x = -1.f, freecam_look_y = -1.f;
@@ -106,7 +110,7 @@ struct AppState {
     float a_freecam_btn_show = 0;
     float a_fps_90 = 0, a_fps_120 = 0, a_fps_144 = 0, a_fps_rst = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()
