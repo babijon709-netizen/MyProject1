@@ -220,24 +220,29 @@ template<class IO> class Controller {
     }
 
     bool apply_fire(float multiplier) {
+        // Конфиг — источник истины, без него не работаем. А вот живые кэши
+        // (период выстрела у ещё не стрелявшего ствола, burst-ожидание)
+        // бывают нулевые/не инициализированные до первого выстрела или
+        // доставании: раньше любой такой кэш ронял ВЕСЬ apply, и оружие
+        // «не настраивалось», хотя конфиг был в порядке. Теперь нечитанный
+        // кэш просто не трогаем — игру он догонит от ускоренного конфига
+        // (lMf/sPo копирует конфиг в живые поля при создании/доставании).
         if (!config_fire_.sample(io_,context_.config.object+go_active::HITSCANCONFIG_FIRE_RATE,
-                                0.0001f,10000.f) ||
-            !shot_period_.sample(io_,context_.weapon.object+go_active::FPWEAPON_SHOT_PERIOD,
-                                 0.000001f,120.f)) return false;
-        if (context_.burst_wait.object &&
-            !burst_seconds_.sample(io_,context_.burst_wait.object+go_active::WAITFORSECONDS_SECONDS,
-                                   0.000001f,120.f)) return false;
+                                0.0001f,10000.f)) return false;
+        const bool have_shot=shot_period_.sample(io_,context_.weapon.object+go_active::FPWEAPON_SHOT_PERIOD,
+                                 0.000001f,120.f);
+        const bool have_burst=!context_.burst_wait.object ||
+            burst_seconds_.sample(io_,context_.burst_wait.object+go_active::WAITFORSECONDS_SECONDS,
+                                   0.000001f,120.f);
 
         float wanted=config_fire_.original>=1.f
             ? config_fire_.original*multiplier : config_fire_.original/multiplier;
         if (wanted<0.01f) wanted=0.01f;
         if (wanted>5000.f) wanted=5000.f;
-        const float shot=shot_period_.original/multiplier;
-        const float burst=burst_seconds_.original/multiplier;
 
         const bool a=config_fire_.put(io_,wanted);
-        const bool b=shot_period_.put(io_,shot);
-        const bool c=!context_.burst_wait.object || burst_seconds_.put(io_,burst);
+        const bool b=!have_shot || shot_period_.put(io_,shot_period_.original/multiplier);
+        const bool c=!have_burst || burst_seconds_.put(io_,burst_seconds_.original/multiplier);
         return a && b && c;
     }
 
@@ -249,12 +254,15 @@ template<class IO> class Controller {
         // Do not take a transient zero as the "original" of a cache whose
         // config mode is enabled; sPo may initialize it later from our already
         // accelerated config, which would otherwise be accelerated a 2nd time.
+        // Живые кэши перезарядки могут быть ещё не инициализированы (ствол не
+        // перезаряжали) — как и в apply_fire, отсутствие кэша не роняет весь
+        // apply: ускоренный конфиг игра скопирует в кэш первой же перезарядкой.
         const float full_min=config_full_.original>0.f ? 0.000001f : 0.f;
         const float loop_min=config_loop_.original>0.f ? 0.000001f : 0.f;
-        if (!effective_full_.sample(io_,context_.weapon.object+go_active::FPWEAPON_EFFECTIVE_RELOAD_PERIOD,
-                                    full_min,120.f) ||
-            !effective_loop_.sample(io_,context_.weapon.object+go_active::FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD,
-                                    loop_min,120.f)) return false;
+        const bool have_eff_full=effective_full_.sample(io_,context_.weapon.object+go_active::FPWEAPON_EFFECTIVE_RELOAD_PERIOD,
+                                    full_min,120.f);
+        const bool have_eff_loop=effective_loop_.sample(io_,context_.weapon.object+go_active::FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD,
+                                    loop_min,120.f);
 
         float full=config_full_.original>0.f ? config_full_.original/multiplier : 0.f;
         float loop=config_loop_.original>0.f ? config_loop_.original/multiplier : 0.f;
@@ -276,8 +284,8 @@ template<class IO> class Controller {
 
         const bool a=config_full_.put(io_,full);
         const bool b=config_loop_.put(io_,loop);
-        const bool c=effective_full_.put(io_,effective_full);
-        const bool d=effective_loop_.put(io_,effective_loop);
+        const bool c=!have_eff_full || effective_full_.put(io_,effective_full);
+        const bool d=!have_eff_loop || effective_loop_.put(io_,effective_loop);
         return a && b && c && d;
     }
 

@@ -89,6 +89,11 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
    `esp_silent_target(pid)` (привязка жива и это тот pid) →
    `esp_silent_read/write` (game.h/game.cpp). Не открывать свои fd.
    Перед доступом всегда проверять `g_mem.bound()`.
+   Существующие писатели «вечного дня» и фрикама (game.cpp) идут через
+   `wr_buf` → `g_mem.write`: это ТОТ ЖЕ канал (один выбранный транспорт),
+   а ворота `open_/pid_` Reader::write проверяет внутри — отдельного fd и
+   обхода транспорта там нет. Новые потоки всё равно пишите через
+   `esp_silent_*`.
 3. **Новая цель/pid** — только через `esp_init()` (attach-поток, process.cpp).
    Никогда не открывать память процесса самостоятельно.
 4. **Не звать** `open("/proc/%d/mem")`, `pread/pwrite` по чужой памяти,

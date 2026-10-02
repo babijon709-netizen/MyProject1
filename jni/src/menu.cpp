@@ -921,13 +921,8 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##norecoil", XS("Без отдачи"), &vm.no_recoil, g_state.a_no_recoil, false, true);
         ToggleRow("##nospread", XS("Без разброса"), &vm.no_spread, g_state.a_no_spread, true, false);
         if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
-        const auto weaponStatus = esp_viewmodel_diagnostics();
-        if (weaponStatus.no_recoil == viewmodel::Status::Failed || weaponStatus.no_spread == viewmodel::Status::Failed)
-            ImGui::TextDisabled("%s", XS("Оружие: не применено, проверьте версию игры и журнал"));
-        else if ((vm.no_recoil && weaponStatus.no_recoil == viewmodel::Status::Waiting) ||
-                 (vm.no_spread && weaponStatus.no_spread == viewmodel::Status::Waiting))
-            ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
-
+        // Диагностические строки («не применено» / «ожидание») убраны по
+        // просьбе пользователя: применение видно в игре, подробности — в журнале.
         SHdr(XS("Темп оружия"));
         CardBg(Layout::RowH * 2.f);
         const bool oldFastFire = g_state.fast_fire, oldFastReload = g_state.fast_reload;
@@ -937,13 +932,6 @@ float TabContent(int tab, float dt, float cW) {
                   g_state.a_fast_reload, true, false);
         if (oldFastFire != g_state.fast_fire || oldFastReload != g_state.fast_reload)
             esp_viewmodel_tick(vm);
-        const auto speedStatus = esp_viewmodel_diagnostics();
-        if (speedStatus.fast_fire == viewmodel::Status::Failed ||
-            speedStatus.fast_reload == viewmodel::Status::Failed)
-            ImGui::TextDisabled("%s", XS("Темп оружия: не применён, проверьте журнал"));
-        else if ((g_state.fast_fire && speedStatus.fast_fire == viewmodel::Status::Waiting) ||
-                 (g_state.fast_reload && speedStatus.fast_reload == viewmodel::Status::Waiting))
-            ImGui::TextDisabled("%s", XS("Ожидание подходящего оружия"));
 
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);

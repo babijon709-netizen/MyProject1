@@ -103,27 +103,33 @@ template <class IO> class Controller {
     // Сравнение C-строки в памяти игры: имена классов il2cpp — const char*
     // в .rodata, читаем ровно len+1 байт посимвольно (длинный блок мог бы
     // выйти за границу отображения, а кэш 128-байтных блоков гасит цену).
-    bool text_is(std::uint64_t address, const char* text) {
+    // Возврат: 1 совпало, 0 читалось и чужое, -1 НЕ ЧИТАЛОСЬ (память
+    // метаданных закрыта для транспорта — EIO; на устройстве пользователя
+    // такие сбои идут пачками под нагрузкой, см. class_identity в game.cpp).
+    int text_state(std::uint64_t address, const char* text) {
         char buf[48];
         const std::size_t len = std::strlen(text);
-        if (len + 1 > sizeof(buf)) return false;
+        if (len + 1 > sizeof(buf)) return 0;
         for (std::size_t i = 0; i <= len; ++i) {
             char c = 0;
-            if (!io_.read(address + i, c)) return false;
-            if (c != text[i]) return false;   // включая завершающий '\0'
+            if (!io_.read(address + i, c)) return -1;
+            if (c != text[i]) return 0;   // включая завершающий '\0'
         }
-        return true;
+        return 1;
     }
     // Il2CppClass* по значению (в отличие от io.named, который ждёт объект):
     // имя и неймспейс лежат по указателям +0x10/+0x18 от самого класса.
-    bool class_is(std::uint64_t klass, const char* name, const char* ns) {
-        if (klass < 0x10000) return false;
+    // Возврат: 1 совпало, 0 читалось и чужое, -1 имена недоступны.
+    int class_state(std::uint64_t klass, const char* name, const char* ns) {
+        if (klass < 0x10000) return 0;
         std::uint64_t np = 0, sp = 0;
         if (!pointer(klass + go_active::IL2CPP_CLASS_NAME, np) || np < 0x10000)
-            return false;
+            return 0;
         if (!pointer(klass + go_active::IL2CPP_CLASS_NAMESPACE, sp) || sp < 0x10000)
-            return false;
-        return text_is(np, name) && text_is(sp, ns);
+            return 0;
+        const int a = text_state(np, name);
+        if (a <= 0) return a;
+        return text_state(sp, ns);
     }
     // Кэш вердиктов «этот класс — тот самый»: имена читаются один раз на класс.
     static constexpr std::size_t kMaxClassCache = 96;
@@ -150,8 +156,11 @@ template <class IO> class Controller {
         std::uint64_t klass = 0;
         if (!pointer(base + go_active::PLAYER_LOOP_HELPER_TYPEINFO_RVA, klass) || klass < 0x10000)
             return Anchor::NotYet;
-        if (!class_is(klass, "PlayerLoopHelper", "Cysharp.Threading.Tasks"))
-            return Anchor::Mismatch;
+        const int helper_name = class_state(klass, "PlayerLoopHelper", "Cysharp.Threading.Tasks");
+        if (helper_name == 0) return Anchor::Mismatch;
+        // helper_name < 0 (имена не читаются): доверяем RVA-якорю этого
+        // релиза — слот TypeInfo выведен по libil2cpp, как у всех *_TYPEINFO_RVA
+        // (прецедент структурного допуска — class_identity в game.cpp).
         if (!pointer(klass + go_active::IL2CPP_CLASS_STATIC_FIELDS_OFFSET, statics) || !statics)
             return Anchor::NotYet;
         helper_class_ = klass;
@@ -165,17 +174,36 @@ template <class IO> class Controller {
         if (!pointer(object, klass) || klass < 0x10000) return 0;
         if (klass == promise_class_) return 1;
         if (klass == scaled_class_) return 2;
-        bool verdict = false;
-        if (!cached(item_classes_, klass, verdict)) {
-            verdict = class_is(klass, "DelayIgnoreTimeScalePromise", "") ||
-                      class_is(klass, "DelayPromise", "");
-            remember(item_classes_, klass, verdict);
+        // Окончательный отказ («читалось и чужое») кэшируется: массив раннера
+        // полон не-обещаний, и без кэша имена перечитывались бы каждый тик.
+        bool known_not_promise = false;
+        if (cached(item_classes_, klass, known_not_promise) && known_not_promise)
+            return 0;
+        const int a = class_state(klass, "DelayIgnoreTimeScalePromise", "");
+        if (a > 0) { promise_class_ = klass; return 1; }
+        const int b = class_state(klass, "DelayPromise", "");
+        if (b > 0) { scaled_class_ = klass; return 2; }
+        if (a < 0 || b < 0) {
+            // Имена недоступны (EIO по метаданным). ГЛАВНЫЙ ФИКС: раньше
+            // нечитанное имя кэшировалось как «не обещание» НАВСЕГДА — один
+            // сбой чтения убивал быстрый подбор до перетыка тумблера. Теперь
+            // ничего не кэшируем и опознаём обещание ПО СТРУКТУРЕ: поле темпа
+            // побитово равно 0.35f в одной из двух раскладок (это же —
+            // финальная проверка именного пути, семантику она подтверждает
+            // сама по себе).
+            for (int kind = 1; kind <= 2; ++kind) {
+                const std::uint64_t off =
+                    kind == 1 ? go_active::DELAYPROMISE_TIMESPAN
+                              : go_active::DELAYPROMISE_SCALED_TIMESPAN;
+                std::uint32_t bits = 0;
+                if (io_.read(object + off, bits) && bits == kCadenceBits)
+                    return kind;
+            }
+            return 0;
         }
-        if (!verdict) return 0;
-        if (class_is(klass, "DelayIgnoreTimeScalePromise", "")) {
-            promise_class_ = klass; return 1;
-        }
-        scaled_class_ = klass; return 2;
+        // Читалось и чужое — окончательный отказ, кэшируем смело.
+        remember(item_classes_, klass, false);
+        return 0;
     }
 public:
     viewmodel::Status status = viewmodel::Status::Off;
@@ -240,10 +268,26 @@ public:
             std::uint64_t rk = 0;
             if (!pointer(runner, rk) || rk < 0x10000) continue;
             bool runner_ok = false;
-            if (!cached(runner_classes_, rk, runner_ok)) {
-                runner_ok = class_is(rk, "PlayerLoopRunner",
-                                     "Cysharp.Threading.Tasks.Internal");
-                remember(runner_classes_, rk, runner_ok);
+            bool runner_cached = cached(runner_classes_, rk, runner_ok);
+            if (!runner_cached) {
+                const int st = class_state(rk, "PlayerLoopRunner",
+                                           "Cysharp.Threading.Tasks.Internal");
+                if (st < 0) {
+                    // Имена не читаются: не кэшируем отказ (EIO преходящ) и
+                    // проверяем раннера по структуре — валидный массив
+                    // элементов с вразумительной длиной. Запись всё равно
+                    // защищена побитовой сверкой 0.35f в самом обещании.
+                    std::uint64_t probe_items = 0;
+                    int32_t probe_len = -1;
+                    if (pointer(runner + go_active::LOOPRUNNER_ITEMS, probe_items) &&
+                        probe_items &&
+                        io_.read(probe_items + go_active::IL2CPP_ARRAY_LENGTH, probe_len) &&
+                        probe_len >= 0 && probe_len <= kMaxItemsPerArray)
+                        runner_ok = true;
+                } else {
+                    runner_ok = (st > 0);
+                    remember(runner_classes_, rk, runner_ok);
+                }
             }
             if (!runner_ok) continue;
             std::uint64_t items = 0;

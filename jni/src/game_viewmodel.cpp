@@ -34,7 +34,14 @@ struct Memory {
         if (!klass) return false;
         char n[64]{}, ns[64]{};
         auto np = ptr(klass + IL2CPP_CLASS_NAME), sp = ptr(klass + IL2CPP_CLASS_NAMESPACE);
-        if (!np || !sp || !g_mem.read_quiet(np, n, sizeof(n)) || !g_mem.read_quiet(sp, ns, sizeof(ns))) return false;
+        // Указатели имён невалидны — класс структурно мёртв, это не «нет данных».
+        if (np < 0x10000 || sp < 0x10000) return false;
+        // Строки имён лежат в памяти метаданных, которая на части устройств не
+        // читается транспортом (EIO; см. class_identity в game.cpp — там же
+        // прецедент структурного допуска). Не прочиталось — верим структуре:
+        // объект уже пришёл по проверенной цепочке (свой пайплайн игрока или
+        // TypeInfo-слот этого релиза). Прочиталось — только точное имя.
+        if (!g_mem.read_quiet(np, n, sizeof(n)) || !g_mem.read_quiet(sp, ns, sizeof(ns))) return true;
         n[63] = ns[63] = 0;
         return std::strcmp(n, name) == 0 && std::strcmp(ns, "Oxide") == 0;
     }
@@ -169,11 +176,26 @@ struct HeapMemory {
         if (klass < 0x10000) return false;
         uint64_t np=memory.ptr(klass+go_active::IL2CPP_CLASS_NAME);
         uint64_t sp=memory.ptr(klass+go_active::IL2CPP_CLASS_NAMESPACE);
+        if (np < 0x10000 || sp < 0x10000) return false;   // мёртвый класс, не «нет данных»
         char n[96]{}, ns[96]{};
         const size_t nl=std::strlen(name)+1, sl=std::strlen(namespaze)+1;
-        return nl<=sizeof(n) && sl<=sizeof(ns) && np && sp &&
-            g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
-            std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
+        if (nl>sizeof(n) || sl>sizeof(ns)) return false;
+        // Имена классов лежат в памяти метаданных: на части устройств она не
+        // читается транспортом ВООБЩЕ (EIO), а под нагрузкой чтения падают и
+        // на «здоровых» (до 4% за кадр, лог 16.09). Раньше любой такой сбой
+        // ронял всю цепочку оружия («не применено», «ожидание») — теперь
+        // нечитаемое имя допускает объект ПО СТРУКТУРЕ (прецедент —
+        // class_identity в game.cpp), а прочитанное сверяется как раньше.
+        if (!g_mem.read_quiet(np,n,nl) || !g_mem.read_quiet(sp,ns,sl)) return true;
+        if (std::memcmp(ns,namespaze,sl)!=0) return false;
+        if (std::memcmp(n,name,nl)==0) return true;
+        // Читаемое, но другое имя: принимаем класс-НАСЛЕДНИК (имя содержит
+        // базовое) — у части стволов конфиги и компоненты в своих подклассах
+        // («…WeaponConfig» и т.п.), и точное сравнение оставляло их без
+        // настроенных полей. Остальная цепочка (бэклинки, кросс-ссылки
+        // калькулятора, ворота записи) подтверждает объект независимо.
+        n[sizeof(n)-1]=0;
+        return std::strstr(n,name)!=nullptr;
     }
     bool named(uint64_t object, const char* name, const char* namespaze) {
         return object>=0x10000 && named_klass(memory.ptr(object),name,namespaze);
