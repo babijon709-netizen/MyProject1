@@ -406,7 +406,7 @@ void SHdr(const char* t, float top) {
         dl->AddText(fn, fs, {pos.x + 34.f, pos.y}, C::U(C::Dim()), t);
         ImGui::Dummy({1.f, tsz.y});
     }
-    ImGui::Dummy({1.f, 8.f});
+    ImGui::Dummy({1.f, Layout::SectionGap});
 }
 
 

@@ -90,7 +90,7 @@ bool SliderRow(const char* id, const char* lbl, float* v, float mn, float mx, co
                bool last, bool first, AppState::SliderAnim& anim, float dt);
 void CardBg(float h, ImDrawFlags flags = ImDrawFlags_RoundCornersAll);
 void DrawToggle(ImDrawList* dl, float ax, float cy, float t);
-void SHdr(const char* t, float top = 18.f);
+void SHdr(const char* t, float top = 12.f);
 bool CollapsibleHeader(const char* id, const char* lbl, int secId = 0);
 void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH);
 void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH);

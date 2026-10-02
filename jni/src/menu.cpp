@@ -64,6 +64,8 @@ static float pill_vel =  0.f;
 struct TabRect { float sx; };
 static TabRect tab_rects[kTabCount];
 
+static void DrawSelectionBadge(ImDrawList* dl, ImVec2 center, float radius);
+
 // ---- Акцент интерфейса: палитра стиля всего GUI ---------------------------
 // 0 — классический фиолет (без оверрайда: Light/Dark как раньше), 1..7 —
 // пресеты, kAccentCustom — свой цвет из g_state.ui_accent_rgb (тап открывает
@@ -266,7 +268,7 @@ float TabContent(int tab, float dt, float cW) {
             }
         }
 
-        ImGui::Dummy({1.f, 12.f});
+        ImGui::Dummy({1.f, Layout::SectionGap});
 
 } else if (tab == 2) {
         cfg::esp::box          = g_state.esp_box;
@@ -395,10 +397,10 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##vmd", XS("Показывать до"), &g_state.marker_dist,
                   25.f, 300.f, XS("%.0f м"), true, true, g_state.sl_marker_dist, dt);
 
-        ImGui::Dummy({1.f, 12.f});
+        ImGui::Dummy({1.f, Layout::SectionGap});
         CollapsibleHeader("##veh1", XS("Ещё настройки"), 1);
 
-        ImGui::Dummy({1.f, 12.f});
+        ImGui::Dummy({1.f, Layout::SectionGap});
 
     } else if (tab == 4) {
         // Конфиги (saved profiles). Kept at index 4 so the Мемори tab sits
@@ -412,7 +414,7 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Новый конфиг"));
         {
-            const float btnH = 72.f;
+            const float btnH = Layout::BtnH;
             auto pos = ImGui::GetCursorScreenPos();
             float cardX0 = pos.x + inset, cardX1 = pos.x + avW - inset;
 
@@ -646,6 +648,7 @@ float TabContent(int tab, float dt, float cW) {
                     dl->AddRectFilled({x0, pos.y}, {x1, pos.y + rowH},
                         C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
                     dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
+                    DrawSelectionBadge(dl, {x1 - 14.f, pos.y + 14.f}, 7.f);
                 } else if (g_state.ui_show_sep) {
                     dl->AddRect({x0, pos.y}, {x1, pos.y + rowH}, C::U(C::Sep()), R::Card, 0, 1.2f);
                 }
@@ -704,9 +707,10 @@ float TabContent(int tab, float dt, float cW) {
                 const bool sel = (g_state.ui_accent_idx == i);
                 const ImVec4 col = (i == kAccentCustom) ? g_state.ui_accent_rgb : kAccentCols[i];
                 dl->AddCircleFilled({cx, cy}, d * 0.5f, C::U(col), 40);
-                if (sel)
+                if (sel) {
                     dl->AddCircle({cx, cy}, d * 0.5f + 3.f, C::U(C::Txt()), 40, 3.f);
-                else if (g_state.ui_show_sep)
+                    DrawSelectionBadge(dl, {cx, cy}, ImMin(8.f, d * 0.18f));
+                } else if (g_state.ui_show_sep)
                     dl->AddCircle({cx, cy}, d * 0.5f + 1.f, C::UA(C::Sep(), 0.9f), 40, 1.2f);
                 char aid[16]; snprintf(aid, sizeof(aid), "##acc%d", i);
                 ImGui::SetCursorScreenPos({cx - d * 0.5f, cy - d * 0.5f});
@@ -821,6 +825,7 @@ float TabContent(int tab, float dt, float cW) {
                     dl->AddRectFilled({ox0, pos.y}, {ox1, pos.y + cardH},
                         C::UA(C::Acc(), g_darkTheme ? 0.16f : 0.10f), R::Card);
                     dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::UA(C::Acc(), 0.8f), R::Card, 0, 2.f);
+                    DrawSelectionBadge(dl, {ox1 - 14.f, pos.y + 14.f}, 7.f);
                 } else if (g_state.ui_show_sep) {
                     dl->AddRect({ox0, pos.y}, {ox1, pos.y + cardH}, C::U(C::Sep()), R::Card, 0, 1.2f);
                 }
@@ -913,7 +918,7 @@ float TabContent(int tab, float dt, float cW) {
             esp_viewmodel_tick(vm);
         }
         ImGui::PopID();
-        ImGui::Dummy({1.f, 12.f});
+        ImGui::Dummy({1.f, Layout::SectionGap});
 
         SHdr(XS("Оружие"));
         CardBg(Layout::RowH * 2.f);
@@ -1093,10 +1098,10 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::RowH);
         ToggleRow("##wd0", XS("Всегда день"), &g_state.always_day, g_state.a_always_day, true, true);
 
-        ImGui::Dummy({1.f, 12.f});
+        ImGui::Dummy({1.f, Layout::SectionGap});
     }
 
-    ImGui::Dummy({1.f, 12.f});
+    ImGui::Dummy({1.f, Layout::SectionGap});
     return ImGui::GetCursorPosY() - sY;
 }
 
@@ -1121,12 +1126,14 @@ void CenterMenuOnDisplay() {
 
 
 // Названия вкладок — одни и те же в шапке контента и в обеих панелях.
+// Верхний уровень намеренно короткий: Аим, Визуал, Интерфейс, Пресеты и
+// Расширенные. Редкие настройки остаются внутри соответствующих sheets.
 // Русские оригиналы лежат здесь (они же ключи таблицы переводов), а язык
 // подставляется на каждом обращении: подпись вкладки нужна и для отрисовки, и
 // для расчёта ширины панели, а язык может смениться на ходу — массив со
 // строками, собранный один раз при запуске, остался бы на языке запуска.
 static const char* const kTabTitlesRu[kTabCount] = {
-    XS_RU("Меню"), XS_RU("Аим"), XS_RU("ESP"), XS_RU("Разное"), XS_RU("Конфиги"), XS_RU("Опции")
+    XS_RU("Меню"), XS_RU("Аим"), XS_RU("Визуал"), XS_RU("Расширенные"), XS_RU("Пресеты"), XS_RU("Интерфейс")
 };
 static const char* TabTitle(int k) {
     if (k < 0 || k >= kTabCount) return "";
@@ -1243,6 +1250,21 @@ static ImU32 TrafficLightColor(int i) {
 // выше — под кружок аватарки и светофор; кружка там больше нет, и полоса снова
 // обычной высоты (только под заголовок вкладки).
 static float MenuHeaderH(bool) { return Layout::HeaderH; }
+
+// Небольшой check-badge у выбранных элементов. Он дублирует активность
+// контуром/иконкой, поэтому выбранное состояние читается даже без цвета.
+static void DrawSelectionBadge(ImDrawList* dl, ImVec2 center, float radius) {
+    dl->AddCircleFilled(center, radius, C::U(C::Acc()), 24);
+    dl->AddCircle(center, radius, C::UA(C::Txt(), 0.72f), 24, 1.2f);
+    const float sx = radius * 0.52f;
+    const float sy = radius * 0.48f;
+    dl->AddLine({center.x - sx, center.y},
+                {center.x - radius * 0.10f, center.y + sy},
+                IM_COL32(255, 255, 255, 255), ImMax(1.4f, radius * 0.24f));
+    dl->AddLine({center.x - radius * 0.10f, center.y + sy},
+                {center.x + sx, center.y - sy},
+                IM_COL32(255, 255, 255, 255), ImMax(1.4f, radius * 0.24f));
+}
 
 // Где стоит светофор: в САМОМ левом верхнем углу окна, в обеих раскладках.
 // (В раскладке с нижней панелью он стоял по центру полосы шапки — рядом с
@@ -2158,10 +2180,11 @@ void RenderMenu() {
     // Подпись вкладки берётся на текущем языке: и в шапке, и в панели, и в
     // расчёте ширины ячейки.
     auto tabNames = [](int k) { return TabTitle(k); };
-    // Вкладка «Меню» (id 0) удалена: её функционал переехал в «Опции».
-    // id контента вкладок не меняются — конфиги и логика остаются как были.
+    // Вкладка «Меню» (id 0) удалена: её функционал переехал в «Интерфейс».
+    // Основные разделы идут первыми, а редкие/расширенные настройки — последними.
+    // id контента вкладок не меняются, поэтому сохранённые состояния совместимы.
     static constexpr int kTabShown = 5;
-    static constexpr int kTabOrder[kTabShown] = {1, 2, 3, 4, 5};
+    static constexpr int kTabOrder[kTabShown] = {1, 2, 5, 4, 3};
 
     // Пропорции ячейки левой панели: подпись как можно крупнее (цель — вдвое
     // крупнее базовых 0.88 от кегля меню) и жирная, иконка — слева.
@@ -2272,6 +2295,14 @@ void RenderMenu() {
                 IM_COL32(255, 255, 255, active ? 255 : 200), letter);
         }
         fdl->AddText(font, fs, lpos, C::U(col), tabNames(i));
+
+        // Active is not conveyed by colour alone: a compact check badge sits
+        // on the selected icon in both the left rail and the bottom bar.
+        if (active) {
+            const float badgeR = ImMin(8.f, ImMax(5.f, icoW * 0.14f));
+            DrawSelectionBadge(fdl,
+                {icoX + icoW - badgeR * 0.35f, icoY + badgeR * 0.35f}, badgeR);
+        }
     };
 
     auto TabTap = [&](int i) {

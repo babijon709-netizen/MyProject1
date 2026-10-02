@@ -83,19 +83,25 @@ namespace C {
 
 
 namespace Layout {
-    static constexpr float RowH      = 78.f;
-    static constexpr float SliderH   = 108.f;
-    static constexpr float HeaderH   = 66.f;
+    // Плотность интерфейса: вертикальный ритм основан на 8 px, но каждый
+    // интерактивный ряд всё ещё заметно выше минимальной touch-зоны 48 px.
+    // Это сокращает пустое место примерно на 15–20% без ущерба тапам.
+    static constexpr float RowH      = 66.f;
+    static constexpr float SliderH   = 94.f;
+    static constexpr float HeaderH   = 58.f;
     static constexpr float Inset     = 16.f;
     static constexpr float PadX      = 20.f;
-    static constexpr float BtnH      = 62.f;
+    static constexpr float BtnH      = 56.f;
+    static constexpr float SectionTop = 12.f;
+    static constexpr float SectionGap = 8.f;
     // Нижняя панель вкладок: строка по центру, иконка + подпись.
-    // Кнопки крупные: панель выше и ячейки шире (~2x от первоначальных).
-    static constexpr float BottomH   = 150.f;
-    static constexpr float TabW      = 136.f;
+    // Ячейка остаётся достаточно высокой для touch-ввода, но не съедает
+    // треть окна на небольшом экране.
+    static constexpr float BottomH   = 126.f;
+    static constexpr float TabW      = 124.f;
     // Левая панель вкладок: вертикальный столбец по центру.
     static constexpr float RailW     = 128.f;
-    static constexpr float TabHV     = 108.f;
+    static constexpr float TabHV     = 94.f;
 }
 
 void ApplyTheme();
