@@ -34,6 +34,10 @@ struct AppState {
     bool  esp_pickup = false;
     bool  esp_bots = false, esp_vehicles = false;
     bool  esp_scrap = false;              // бочки и дорожные знаки
+    // Ящики, встроенные в постройки («Большой/Обычный ящик»): отдельный
+    // тумблер, независимый от «Ящиков» (мировых контейнеров). По умолчанию
+    // вкл — как было до разделения.
+    bool  esp_house_boxes = true;
     bool  esp_turrets = false, esp_backpacks = false, esp_sleepers = false;
     ViewmodelSettings viewmodel;
     bool fast_fire = false, fast_reload = false;
@@ -44,6 +48,10 @@ struct AppState {
     float marker_dist = 150.f;
     float esp_thick = 1.5f;
     float gun_str = 5.f, gun_fov = 80.f, gun_trigger_delay = 0.0f;
+    // Упреждение аима: на сколько миллисекунд забегать вперёд по скорости
+    // цели (0 = вести ровно по кости, как сейчас). 50 мс ≈ прежняя
+    // константа 0.05 с. Живёт в конфиге (расширение v4).
+    float aim_lead_ms = 0.f;
     // Автофарм: главный выключатель + какие ресурсы добывать.
     bool  farm_on = false;
     bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
@@ -100,7 +108,7 @@ struct AppState {
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
-    float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0;
+    float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0, a_esp_house_boxes = 0;
     float a_esp_turrets = 0, a_esp_backpacks = 0, a_esp_sleepers = 0;
     float a_always_day = 0;
     float a_ui_dark = 1;
@@ -110,7 +118,7 @@ struct AppState {
     float a_freecam_btn_show = 0;
     float a_fps_90 = 0, a_fps_120 = 0, a_fps_144 = 0, a_fps_rst = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size, sl_aim_lead;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()

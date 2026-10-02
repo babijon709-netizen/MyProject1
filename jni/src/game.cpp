@@ -6119,14 +6119,25 @@ static float head_lift_for_range(const Vec3& world) {
 // turning from his -- the three things that have no reliable answer on this
 // build. Set per player just below, applied here, and it only shifts the
 // point the aim steers to: the ESP box still draws where the man actually is.
-// Упреждение ВЫКЛЮЧЕНО (было 0.05 с). Оно уводило прицел туда, где цель
-// ОКАЖЕТСЯ через несколько кадров, и на肉眼 это выглядело как «аим пытается
+// Упреждение ВЫКЛЮЧЕНО по умолчанию (0.0 с; историческое значение было
+// 0.05 с). При включении оно уводило прицел туда, где цель ОКАЖЕТСЯ через
+// несколько кадров, и на глаз это выглядело как «аим пытается
 // запредиктить движение»: точка прыгала вперёд по ходу цели, аим за ней,
-// цель меняла направление — начинались качели (жалоба 19.09). Теперь аим
-// ведёт ровно по текущему положению кости. Константа оставлена: вернуть
-// упреждение — одна правка числа.
-static constexpr float kAimLeadSeconds = 0.0F;
+// цель меняла направление — начинались качели (жалоба 19.09). Поэтому
+// константа стала слайдером «Упреждение» (0 = вести ровно по кости):
+// желающий подбирает забег под свой пинг сам, дефолт — прежнее «без
+// упреждения».
+static float g_aim_lead_seconds = 0.0F;
 static Vec3 g_aim_lead{};
+
+void esp_set_aim_lead(float seconds) {
+    // Без isfinite (-ffast-math): значение приходит со слайдера 0..150 мс
+    // и проверяется при загрузке конфига, сюда мусор не попадает — обычный
+    // кламп достаточен и безопасен.
+    if (seconds < 0.0F) seconds = 0.0F;
+    if (seconds > 0.15F) seconds = 0.15F;
+    g_aim_lead_seconds = seconds;
+}
 
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
     Vec3 world = world_in;
@@ -8276,9 +8287,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         {
             auto vt = g_player_track.find(s_transforms[i]);
             if (vt != g_player_track.end()) {
-                g_aim_lead.x = vt->second.vel.x * kAimLeadSeconds;
-                g_aim_lead.y = vt->second.vel.y * kAimLeadSeconds;
-                g_aim_lead.z = vt->second.vel.z * kAimLeadSeconds;
+                g_aim_lead.x = vt->second.vel.x * g_aim_lead_seconds;
+                g_aim_lead.y = vt->second.vel.y * g_aim_lead_seconds;
+                g_aim_lead.z = vt->second.vel.z * g_aim_lead_seconds;
             } else {
                 g_aim_lead = {};
             }

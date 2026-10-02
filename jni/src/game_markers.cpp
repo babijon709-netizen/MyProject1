@@ -40,6 +40,7 @@ static bool g_markers_scrap_enabled = false;
 static bool g_markers_turret_enabled = false;
 static bool g_markers_backpack_enabled = false;
 static bool g_markers_sleeper_enabled = false;
+static bool g_markers_house_enabled = false;
 // Аим по ботам: скан и позиции ботов живут, даже когда их маркеры выключены.
 static bool g_bot_aim_enabled = false;
 static float g_marker_max_distance = 150.0F;
@@ -89,7 +90,7 @@ static void marker_scan_abort();
 
 void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
                              bool vehicles, bool bots, bool scrap, bool turrets,
-                             bool backpacks, bool sleepers) {
+                             bool backpacks, bool sleepers, bool house) {
     // Loot containers and ground pickups are filtered out during the registry
     // walk, so switching a category on has to invalidate the cached list.
     if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled ||
@@ -107,8 +108,11 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
     g_markers_turret_enabled = turrets;
     g_markers_backpack_enabled = backpacks;
     g_markers_sleeper_enabled = sleepers;
+    g_markers_house_enabled = house;
     // Машины и боты опознаются при скане всегда (как руда и животные) и
-    // отфильтровываются при отрисовке — инвалидация кэша им не нужна.
+    // отфильтровываются при отрисовке — инвалидация кэша им не нужна. Ящики
+    // в домах — так же: сканируются вместе с loot-семьёй, а тумблер режет
+    // их только при отрисовке (esp_get_markers).
 }
 
 
@@ -610,8 +614,9 @@ static bool loot_marker(uint64_t component, const char* object_name, const char*
                         const char* panel, MarkerLook& look) {
     // Контейнер, встроенный в постройку, — поставлен игроком. Раньше такие
     // скрывались целиком; теперь ЯЩИКИ в домах показываются («Большой
-    // ящик»/«Обычный ящик», секция «Ящики»), а прочая мебель (печки, кровати,
-    // шкафы, спальники) и безымянные постройчные контейнеры — по-прежнему нет.
+    // ящик»/«Обычный ящик», тумблер «Ящики в домах»), а прочая мебель (печки,
+    // кровати, шкафы, спальники) и безымянные постройчные контейнеры —
+    // по-прежнему нет.
     const bool building_piece = valid_obj(rd_ptr(component + LOOTOBJECT_BUILDING_PIECE));
 
     // Three name sources: the component's GameObject, the network object's
@@ -634,7 +639,9 @@ static bool loot_marker(uint64_t component, const char* object_name, const char*
                          (info.deploy_word &&
                           (strstr(info.deploy_word, "large") != nullptr ||
                            strstr(info.deploy_word, "big") != nullptr));
-        look.kind = ESP_MARKER_LOOT;
+        // Свой вид маркера: у ящиков в домах отдельный тумблер («Ящики в
+        // домах»), независимый от «Ящиков» (мировые контейнеры).
+        look.kind = ESP_MARKER_HOUSE;
         look.label = big ? "Большой ящик" : "Обычный ящик";
         look.rainbow = false;
         look.has_color = false;
@@ -1210,10 +1217,12 @@ static bool rebuild_marker_entities() {
                 }
             }
             if (!known && (component_class == MARKER_CLASS_LOOT || family_unknown) &&
-                (g_markers_loot_enabled || g_markers_scrap_enabled)) {
+                (g_markers_loot_enabled || g_markers_scrap_enabled || g_markers_house_enabled)) {
                 known = loot_marker(component, object_name, root_name, loot_panel, look);
                 if (known && look.kind == ESP_MARKER_SCRAP && !g_markers_scrap_enabled) known = false;
                 if (known && look.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) known = false;
+                // Ящики в домах фильтруются при отрисовке, не здесь: их
+                // список живёт вместе с loot-семьёй и не требует перескана.
             }
             if (!known && component_class == MARKER_CLASS_VEHICLE) {
                 // Машина — только если И класс, И имя говорят «машина»:
@@ -1426,6 +1435,7 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_TURRET && !g_markers_turret_enabled) continue;
         if (entity.kind == ESP_MARKER_BACKPACK && !g_markers_backpack_enabled) continue;
         if (entity.kind == ESP_MARKER_SLEEPER && !g_markers_sleeper_enabled) continue;
+        if (entity.kind == ESP_MARKER_HOUSE && !g_markers_house_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
         // Animals and bots DO move — throttled re-reads, see marker_track_position.
         marker_track_position(entity);
@@ -1449,7 +1459,8 @@ std::vector<EspMarker> esp_get_markers() {
                   : (entity.kind == ESP_MARKER_VEHICLE) ? 1.2F
                   : (entity.kind == ESP_MARKER_TURRET)   ? 1.3F
                   : (entity.kind == ESP_MARKER_SLEEPER)  ? 0.8F
-                  : (entity.kind == ESP_MARKER_BACKPACK) ? 0.5F : 0.9F;
+                  : (entity.kind == ESP_MARKER_BACKPACK) ? 0.5F
+                  : (entity.kind == ESP_MARKER_HOUSE)    ? 0.6F : 0.9F;
         if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
         if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
         if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;

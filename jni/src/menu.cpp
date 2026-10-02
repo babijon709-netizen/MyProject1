@@ -192,9 +192,15 @@ float TabContent(int tab, float dt, float cW) {
         }
 
         SHdr(XS("Наводка"));
-        CardBg(Layout::SliderH * 2);
+        CardBg(Layout::SliderH * 3);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
-        SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", true, false, g_state.sl_gun_str, dt);
+        SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", false, false, g_state.sl_gun_str, dt);
+        // Упреждение: аим ведёт не по текущему положению кости, а по точке,
+        // куда цель уйдёт за N мс (скорость цели × время). 0 — вести ровно по
+        // кости (дефолт: упреждение исторически выключено — на резкой смене
+        // направления оно раскачивало прицел). Подбирается под свой пинг.
+        SliderRow("##aldd", XS("Упреждение"), &g_state.aim_lead_ms,
+                  0.f, 150.f, XS("%.0f мс"), true, false, g_state.sl_aim_lead, dt);
 
         // ---- Тач-зона аима -------------------------------------------------
         // Где именно лежит палец, которым аимбот водит камеру. Выбирается
@@ -370,6 +376,9 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vor", XS("Руда"),      &g_state.esp_ore,          &g_state.a_esp_ore,          nullptr},
                 {"##van", XS("Животные"), &g_state.esp_animal,       &g_state.a_esp_animal,       &cfg::esp::animal_col},
                 {"##vlt", XS("Ящики"),    &g_state.esp_loot,         &g_state.a_esp_loot,         &cfg::esp::loot_col},
+                // Ящики, встроенные в постройки игроков: свой тумблер, цвет —
+                // тот же «ящичный» (loot_col), точки выбора цвета нет.
+                {"##vhb", XS("Ящики в домах"), &g_state.esp_house_boxes, &g_state.a_esp_house_boxes, nullptr},
                 {"##vsc", XS("Скрап"),    &g_state.esp_scrap,        &g_state.a_esp_scrap,        &cfg::esp::scrap_col},
                 {"##vpk", XS("Предметы"), &g_state.esp_pickup,       &g_state.a_esp_pickup,       &cfg::esp::pickup_col},
                 {"##vbt", XS("Боты"),     &g_state.esp_bots,         &g_state.a_esp_bots,         &cfg::esp::bot_col},
@@ -378,7 +387,7 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vbp", XS("Рюкзаки"),  &g_state.esp_backpacks,    &g_state.a_esp_backpacks,    &cfg::esp::backpack_col},
                 {"##vsl", XS("Спящие"),   &g_state.esp_sleepers,     &g_state.a_esp_sleepers,     &cfg::esp::sleeper_col},
             };
-            constexpr int NW = 10;
+            constexpr int NW = 11;
             CardBg(rowH * NW);
             for (int i = 0; i < NW; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
@@ -1740,7 +1749,8 @@ void RenderMenu() {
     Tick(g_state.a_esp_pickup, g_state.esp_pickup,         dt);
     Tick(g_state.a_esp_bots,   g_state.esp_bots,           dt);
     Tick(g_state.a_esp_vehicles, g_state.esp_vehicles,     dt);
-    Tick(g_state.a_esp_scrap, g_state.esp_scrap,           dt);
+    Tick(g_state.a_esp_scrap,  g_state.esp_scrap,          dt);
+    Tick(g_state.a_esp_house_boxes, g_state.esp_house_boxes, dt);
     Tick(g_state.a_esp_turrets, g_state.esp_turrets,       dt);
     Tick(g_state.a_esp_backpacks, g_state.esp_backpacks,   dt);
     Tick(g_state.a_esp_sleepers, g_state.esp_sleepers,     dt);

@@ -44,12 +44,15 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
                                 g_state.esp_loot, g_state.esp_pickup,
                                 g_state.esp_vehicles, g_state.esp_bots,
                                 g_state.esp_scrap, g_state.esp_turrets,
-                                g_state.esp_backpacks, g_state.esp_sleepers);
+                                g_state.esp_backpacks, g_state.esp_sleepers,
+                                g_state.esp_house_boxes);
         // Аим по ботам — тем же условием, что кости для аима: работает и
         // когда маркеры ботов выключены.
         esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
         esp_set_always_day(g_state.always_day);
         esp_set_marker_max_distance(g_state.marker_dist);
+        // Упреждение аима (слайдер на вкладке аима): в игру уходит в секундах.
+        esp_set_aim_lead(g_state.aim_lead_ms * 0.001f);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
@@ -75,7 +78,7 @@ void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -323,7 +326,7 @@ void DrawEspOverlay() {
     // One pill with the resource / animal / bot / vehicle name at the object's
     // position; the scan itself is done by the game layer and reuses this
     // frame's camera.
-    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup || g_state.esp_bots || g_state.esp_vehicles || g_state.esp_scrap || g_state.esp_turrets || g_state.esp_backpacks || g_state.esp_sleepers) {
+    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup || g_state.esp_bots || g_state.esp_vehicles || g_state.esp_scrap || g_state.esp_turrets || g_state.esp_backpacks || g_state.esp_sleepers || g_state.esp_house_boxes) {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;
@@ -347,6 +350,7 @@ void DrawEspOverlay() {
                        : marker.kind == ESP_MARKER_TURRET   ? cfg::esp::turret_col
                        : marker.kind == ESP_MARKER_BACKPACK ? cfg::esp::backpack_col
                        : marker.kind == ESP_MARKER_SLEEPER  ? cfg::esp::sleeper_col
+                       : marker.kind == ESP_MARKER_HOUSE    ? cfg::esp::loot_col
                                                            : cfg::esp::animal_col);
             EspPill(marker.x, marker.y, marker.name, col, kMarkerScale);
             char label[24];

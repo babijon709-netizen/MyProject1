@@ -40,12 +40,16 @@ inline ViewmodelSettings sanitize(ViewmodelSettings s) {
 // missing/truncated/unknown trailers load disabled defaults, never stale state.
 struct ConfigExtension {
     uint32_t magic = 0x31574d56u; // VMW1
-    uint32_t version = 3;
-    uint32_t size = 32;
+    // v4 grows the trailer by one float (aim lead, ms). A v4 record is 36
+    // bytes; v1–v3 were 32. decode() accepts both sizes, so a v3 config
+    // still loads its viewmodel settings whole, just without a lead.
+    uint32_t version = 4;
+    uint32_t size = 36;
     uint32_t flags = 0;
     float fov = 90.f, x = 0.f, y = 0.f, z = 0.f;
+    float aim_lead_ms = 0.f;   // v4: aim prediction lead, 0..150 ms (0 = off)
 };
-static_assert(sizeof(ConfigExtension) == 32, "stable config extension");
+static_assert(sizeof(ConfigExtension) == 36, "stable config extension");
 inline ConfigExtension encode(ViewmodelSettings s) {
     s = sanitize(s);
     ConfigExtension e;
@@ -58,14 +62,16 @@ inline ConfigExtension encode(ViewmodelSettings s) {
 }
 inline ViewmodelSettings decode(const void* bytes, size_t size) {
     ViewmodelSettings s;
-    if (size != sizeof(ConfigExtension)) return s;
-    ConfigExtension e; std::memcpy(&e, bytes, sizeof(e));
+    // 32 = v1–v3 layout (no aim lead); 36 = v4. A short record memcpy's into
+    // the 36-byte struct and leaves aim_lead_ms at its default 0.
+    if (size != 32 && size != sizeof(ConfigExtension)) return s;
+    ConfigExtension e; std::memcpy(&e, bytes, size);
     // v1: discard retired loot/instruction-patch flags 4..6. v2: bit 4 stays
     // retired, bits 5..6 opt into the object-data implementations. v3: bit 4 is
     // fast pickup, so a v1/v2 file that still carries the retired bit loads
     // with the feature off instead of turning it on.
-    if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3) ||
-        e.size != sizeof(e) || (e.flags & ~1023u)) return s;
+    if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3 && e.version != 4) ||
+        e.size != size || (e.flags & ~1023u)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
     const int fps_modes[] = {0, 144, 90, 120};
@@ -75,6 +81,14 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     s.fast_loot = e.version >= 3 && (e.flags & 16u) != 0;
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
     return sanitize(s);
+}
+// Aim prediction lead from a v4 trailer, in milliseconds. Old (v1–v3) or
+// malformed trailers read as 0 — prediction off, never a stale value.
+inline float decode_aim_lead_ms(const void* bytes, size_t size) {
+    if (size != sizeof(ConfigExtension)) return 0.f;
+    ConfigExtension e; std::memcpy(&e, bytes, sizeof(e));
+    if (e.magic != 0x31574d56u || e.version != 4 || e.size != sizeof(e)) return 0.f;
+    return (e.aim_lead_ms >= 0.f && e.aim_lead_ms <= 150.f) ? e.aim_lead_ms : 0.f;
 }
 enum class Status { Off, Waiting, Active, ADS, Failed };
 struct Diagnostics {

@@ -9,6 +9,7 @@
 static const LangPair kUiEn[] = {
     {"%.0f м", "%.0f m"},
     {"%.0f м/с", "%.0f m/s"},
+    {"%.0f мс", "%.0f ms"},
     {"%.0f см", "%.0f cm"},
     {"%.1f м", "%.1f m"},
     {"3D боксы", "3D boxes"},
@@ -191,6 +192,7 @@ static const LangPair kUiEn[] = {
     {"Удалить", "Delete"},
     {"Удалить конфиг?", "Delete config?"},
     {"Умный", "Smart"},
+    {"Упреждение", "Prediction"},
     {"Файл не найден", "File not found"},
     {"Фрикам", "Freecam"},
     {"Фрикам включён", "Freecam on"},
@@ -209,6 +211,7 @@ static const LangPair kUiEn[] = {
     {"Экстернал режим", "External mode"},
     {"Язык", "Language"},
     {"Ящики", "Crates"},
+    {"Ящики в домах", "House boxes"},
     {"быстрая загрузка", "fast load"},
     {"в процессе остался старый патч — перезапустите игру", "an old patch is still in the process — restart the game"},
     {"ведёт", "tracking"},

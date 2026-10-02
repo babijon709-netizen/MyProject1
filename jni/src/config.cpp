@@ -263,6 +263,9 @@ struct CfgBlob {
     //   x = bit 0 loot ESP, bit 1 pickup ESP, bit 2 bots ESP, bit 3 vehicles ESP,
     //       bit 4 screen freecam button HIDDEN (inverted: old configs hold 0
     //       here, i.e. the button stays visible, as before), bit 5 scrap ESP,
+    //       bit 6 fast fire, bit 7 fast reload, bit 8 house boxes HIDDEN
+    //       (inverted like bit 4: old configs hold 0, i.e. visible, as before;
+    //       the float mantissa holds 24 bits, so there is room),
     //   y = marker draw distance (m),
     //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
     //   w = pickup colour packed as r*65536 + g*256 + b (exact in a float,
@@ -323,7 +326,10 @@ static void ConfigSaveToPath(const std::string& path) {
         const int flags = (g_state.esp_loot ? 1 : 0) | (g_state.esp_pickup ? 2 : 0) |
                           (g_state.esp_bots ? 4 : 0) | (g_state.esp_vehicles ? 8 : 0) |
                           (g_state.freecam_btn_show ? 0 : 16) | (g_state.esp_scrap ? 32 : 0) |
-                          (g_state.fast_fire ? 64 : 0) | (g_state.fast_reload ? 128 : 0);
+                          (g_state.fast_fire ? 64 : 0) | (g_state.fast_reload ? 128 : 0) |
+                          // Инвертировано, как бит 4: старые конфиги держат 0,
+                          // то есть ящики в домах видны — как до разделения.
+                          (g_state.esp_house_boxes ? 0 : 256);
         auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
         const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
                                    + ch(cfg::esp::pickup_col.y) * 256
@@ -343,6 +349,8 @@ static void ConfigSaveToPath(const std::string& path) {
         extension.flags |= (g_state.esp_turrets ? 128u : 0u) |
                            (g_state.esp_backpacks ? 256u : 0u) |
                            (g_state.esp_sleepers ? 512u : 0u);
+        // v4: упреждение аима в миллисекундах (0 = выкл).
+        extension.aim_lead_ms = g_state.aim_lead_ms;
         uint8_t extra[sizeof(extension)];
         memcpy(extra, &extension, sizeof(extra));
         XorBuf(extra, sizeof(extra));
@@ -398,14 +406,22 @@ void ConfigLoad(int idx, bool announce) {
     XorBuf(extra, extraGot);
     g_state.viewmodel = viewmodel::decode(extra, extraGot);
     g_state.esp_turrets = g_state.esp_backpacks = g_state.esp_sleepers = false;
-    if (extraGot == sizeof(viewmodel::ConfigExtension)) {
+    // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4 ниже может
+    // вернуть своё значение. Сам прицеп теперь 36 байт (v4); прицеп v3 был
+    // 32 — обрабатываем оба размера, иначе старые конфиги потеряли бы
+    // турели/рюкзаки/спящих.
+    g_state.aim_lead_ms = 0.f;
+    if (extraGot == 32 || extraGot == sizeof(viewmodel::ConfigExtension)) {
         viewmodel::ConfigExtension extension;
-        memcpy(&extension, extra, sizeof(extension));
-        if (extension.magic == 0x31574d56u && extension.version == 3 &&
-            extension.size == sizeof(extension)) {
+        memcpy(&extension, extra, extraGot);   // v3: 32 байта, хвост — дефолты
+        if (extension.magic == 0x31574d56u &&
+            (extension.version == 3 || extension.version == 4) &&
+            extension.size == extraGot) {
             g_state.esp_turrets = (extension.flags & 128u) != 0;
             g_state.esp_backpacks = (extension.flags & 256u) != 0;
             g_state.esp_sleepers = (extension.flags & 512u) != 0;
+            if (extension.version == 4)
+                g_state.aim_lead_ms = viewmodel::decode_aim_lead_ms(extra, extraGot);
         }
     }
     g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
@@ -437,7 +453,7 @@ void ConfigLoad(int idx, bool announce) {
     // Packed scalars. A config written before these existed holds the old ping
     // colour here, so each value is range-checked and falls back to its default.
     {
-        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 256.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
+        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 512.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
         g_state.esp_loot   = (flags & 1) != 0;
         g_state.esp_pickup = (flags & 2) != 0;
         g_state.esp_bots     = (flags & 4) != 0;
@@ -446,6 +462,7 @@ void ConfigLoad(int idx, bool announce) {
         g_state.esp_scrap = (flags & 32) != 0;
         g_state.fast_fire = (flags & 64) != 0;
         g_state.fast_reload = (flags & 128) != 0;
+        g_state.esp_house_boxes = (flags & 256) == 0;
         g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;
