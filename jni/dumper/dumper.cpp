@@ -241,10 +241,17 @@ static void parse_maps(pid_t pid) {
         ++g_reg_count;
     }
     fclose(f);
-    // Порядок скана: сначала скрытые и ПЕРЕЗАПИСЫВАЕМЫЕ анонимные области
-    // (метадата почти всегда там), потом файловые, в конце read-only
-    // анонимные и «(deleted)». Даже упираясь в потолок скана, к блобу
-    // попадаем быстро.
+    // Порядок скана: ЧИТАЕМЫЕ регионы (перезаписываемые анонимные и файловые)
+    // первыми — движок в метаданные читает постоянно, значит регион у него
+    // читаемый; скрытые (PROT_NONE) и «(deleted)» — ПОСЛЕ, на остаток
+    // бюджета. Старый порядок (скрытые первыми) выедал весь потолок скана
+    // на тысячах мусорных скрытых регионов, и читательская часть памяти
+    // оставалась не просмотренной.
+    // Перестановка ТОЛЬКО через промежуточный массив: in-place
+    // «g_regs[i] = g_regs[order[i]]» через индексный массив некорректна —
+    // когда order[i] < i, на чтение берётся уже перезаписанный элемент, и
+    // список регионов получается с дублями и провалами (часть памяти
+    // сканируется дважды, часть — никогда).
     {
         int score[8192];
         for (int i = 0; i < g_reg_count; ++i) {
@@ -254,17 +261,19 @@ static void parse_maps(pid_t pid) {
                 if (!strncmp(q, " (deleted)", 10)) { deleted = true; break; }
                 else ++q;
             const bool writable = r.perms[1] == 'w';
-            if (r.kind == kHidden) score[i] = 0;
-            else if (deleted) score[i] = 5;
-            else if (r.path[0] == 0) score[i] = writable ? 1 : 4;  // анонимные
-            else score[i] = writable ? 2 : 3;                      // файловые
+            if (deleted) score[i] = 5;
+            else if (r.kind == kHidden) score[i] = 4;
+            else if (r.path[0] == 0) score[i] = writable ? 0 : 3;  // анонимные
+            else score[i] = writable ? 1 : 2;                      // файловые
         }
         int order[8192];
         int n = 0;
         for (int s = 0; s < 6; ++s)
             for (int i = 0; i < g_reg_count; ++i)
                 if (score[i] == s) order[n++] = i;
-        for (int i = 0; i < g_reg_count; ++i) g_regs[i] = g_regs[order[i]];
+        static Reg tmp[8192];   // 1.25 МБ — не на стек
+        for (int i = 0; i < g_reg_count; ++i) tmp[i] = g_regs[order[i]];
+        for (int i = 0; i < g_reg_count; ++i) g_regs[i] = tmp[i];
     }
 }
 
@@ -653,14 +662,36 @@ static void region_span(uint64_t addr, uint64_t* rlo, uint64_t* rhi) {
     }
 }
 
+// «Текстовость» образца. Чистые строки метаданных (NUL-терминированный
+// UTF-8 / UTF-16, имена классов) дают высокий балл: множество 0x00 и
+// печатного ASCII (0x20-0x7E), почти нет управляющих 0x01-0x1F. Если этот
+// текст XOR-нут константным ключом, балл заметно падает (NUL превращается
+// в байт ключа, печатные рассыпаются по всему диапазону). ВАЖНО: количество
+// РАЗЛИЧНЫХ значений байта здесь бесполезно — XOR константой является
+// биекцией по 256 значениям, множество значений лишь переставляется, и у
+// текста и его XOR-копии оно одинаково.
+static double textlikeness(const uint8_t* p, int n) {
+    if (n <= 0) return 0;
+    double nul = 0, pr = 0, ctrl = 0;
+    for (int i = 0; i < n; ++i) {
+        if (p[i] == 0) ++nul;
+        else if (p[i] >= 0x20 && p[i] <= 0x7e) ++pr;
+        else if (p[i] >= 0x01 && p[i] <= 0x1f) ++ctrl;
+    }
+    return (nul + pr - ctrl) / n;
+}
+
 // Дамп полной метадаты. Если шапка была расшифрована (v38+ c XOR-нутыми
 // тройками) — сначала пишем КАНОНИЧЕСКУЮ шапку (магия + версия +
-// отсортированные тройки): файл сразу берёт Il2CppDumper. Тело — как есть
-// (шифрована только шапка). Нечитаемые страницы — нулями (файл не
-// «съезжает»), потери считаются; частичная выгрузка переименовывается в
-// *.partial и честно пишется в лог.
+// отсортированные тройки): файл сразу берёт Il2CppDumper. Тело — как есть,
+// ИСКЛЮЧЕНИЕ: если строковая секция тоже XOR-нута тем же ключом (body_xor) —
+// выгружаем тело расшифрованным этим ключом, иначе строки в файле остались
+// бы зашифрованными.
+// Нечитаемые страницы — нулями (файл не «съезжает»), потери считаются;
+// частичная выгрузка переименовывается в *.partial и честно пишется в лог.
 static void dump_blob_full(const char* out_dir, uint64_t addr, uint64_t size,
-                           int version, bool v38, const uint32_t* sorted) {
+                           int version, bool v38, const uint32_t* sorted,
+                           uint32_t key, bool body_xor) {
     if (!size || g_written >= kWriteCap) return;
     if (size > (2ull << 30)) size = 2ull << 30;
     if (g_written + size > kWriteCap) size = kWriteCap - g_written;
@@ -698,6 +729,15 @@ static void dump_blob_full(const char* out_dir, uint64_t addr, uint64_t size,
         uint64_t holes = 0;
         read_holes(addr + body_start + body_pos, wbuf, want, &holes);
         failed += holes;
+        if (body_xor) {
+            // Ключ — 32-битный, применяется к каждому слову тела (как к
+            // словам шапки). Фаза паттерна — от начала блоба.
+            uint32_t ph = (uint32_t)((body_start + body_pos) & 3);
+            for (size_t j = 0; j < want; ++j) {
+                wbuf[j] ^= (uint8_t)(key >> (ph << 3));
+                ph = (ph + 1) & 3;
+            }
+        }
         if (fwrite(wbuf, 1, want, f) != want) break;
         done += want;
         body_pos += want;
@@ -782,7 +822,11 @@ int main(int argc, char** argv) {
     const size_t kNeed = sizeof(kNeedle);
     static const uint8_t kMagic[4] = {0xAF, 0x1B, 0xB1, 0xFA};   // LE 0xFAB11BAF
     static uint8_t buf[1024 * 1024];
-    const uint64_t kScanCap = 8ull << 30;
+    // Потолог скана: вся читаемая память процесса игры — ~8-10 ГБ; 16 ГБ —
+    // с запасом, чтобы читательские регионы (0..3) прошли целиком, а скрытые
+    // (4) и «(deleted)» (5) получили остаток. Дамп — разовая операция,
+    // 15-30 секунд скана допустимы.
+    const uint64_t kScanCap = 16ull << 30;
     uint64_t scanned = 0;
     uint64_t hits[16];
     int hit_count = 0;
@@ -1108,6 +1152,7 @@ int main(int argc, char** argv) {
     uint64_t blob_at = 0, blob_extent = 0, blob_rlo = 0, blob_rhi = 0;
     int blob_version = 0, blob_names = 0, blob_v38 = 0;
     uint32_t blob_key = 0;
+    int blob_body_xor = 0;
     uint32_t blob_sorted[93] = {};
     for (int m = 0; m < magic_count && m < 8; ++m) {
         BlobInfo b;
@@ -1185,6 +1230,29 @@ int main(int argc, char** argv) {
                     (unsigned long long)((blob_rhi - blob_at) >> 20));
                 blob_extent = blob_rhi - blob_at;
             }
+            // XOR-нута ли СТРОКОВАЯ секция тем же ключом (протектор шифрует
+            // и весь блоб, а не только шапку)? Считаем «текстовость» 4-КБ
+            // образца сырым и под ключом: чистые строки дают ~1.0, их
+            // XOR-копия — заметно меньше. Расшифровываем тело в файле,
+            // только если ключ ЯВНО «текстовее» (иначе — снимаем как есть).
+            if (blob_v38 && blob_key && cd.string_off) {
+                static uint8_t smp[4096];
+                uint64_t sh = 0;
+                read_holes(blob_at + cd.string_off, smp, sizeof(smp), &sh);
+                const double t_raw = textlikeness(smp, (int)sizeof(smp));
+                for (size_t j = 0; j < sizeof(smp); ++j)
+                    smp[j] ^= (uint8_t)(blob_key >> ((j & 3) << 3));
+                const double t_key = textlikeness(smp, (int)sizeof(smp));
+                if (t_key > t_raw + 0.15 && t_key > 0.5) {
+                    blob_body_xor = 1;
+                    say("  строковая секция XOR-нута тем же ключом — тело в файле "
+                        "расшифровано (ключ 0x%08x, текстовость: сыро %.2f, "
+                        "ключом %.2f)", (unsigned)blob_key, t_raw, t_key);
+                } else {
+                    say("  строки в памяти чистые (текстовость: сыро %.2f, "
+                        "ключом %.2f) — тело снимаю как есть", t_raw, t_key);
+                }
+            }
         } else {
             say("кандидатов без наших имён — снимаю старое окно");
         }
@@ -1242,7 +1310,7 @@ int main(int argc, char** argv) {
         // Главное — весь блок метаданных (с канонической шапкой, если та
         // была расшифрована).
         dump_blob_full(out_dir, blob_at, blob_extent, blob_version,
-                       blob_v38 != 0, blob_sorted);
+                       blob_v38 != 0, blob_sorted, blob_key, blob_body_xor != 0);
     }
     if (hit_count) {
         dump_range(out_dir, "benzhack_meta.bin", win_lo, win_hi - win_lo, 16ull << 20);
