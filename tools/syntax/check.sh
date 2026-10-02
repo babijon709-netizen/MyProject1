@@ -19,7 +19,8 @@ FILES="${*:-jni/src/main.cpp jni/src/process.cpp jni/src/audio.cpp jni/src/theme
 jni/src/hud.cpp jni/src/esp_draw.cpp jni/src/aim.cpp jni/src/farm.cpp \
 jni/src/widgets.cpp jni/src/menu.cpp jni/src/config.cpp \
 jni/src/game.cpp jni/src/game_viewmodel.cpp jni/src/game_markers.cpp jni/src/game_farm.cpp jni/src/offset_resolver.cpp jni/src/lang.cpp \
-jni/src/Android_draw/draw.cpp jni/src/Android_touch/TouchHelperA.cpp jni/src/VidAvatar.cpp}"
+jni/src/Android_draw/draw.cpp jni/src/Android_touch/TouchHelperA.cpp jni/src/VidAvatar.cpp \
+jni/dumper/dumper.cpp}"
 rc=0
 for f in $FILES; do
     if g++ -std=c++17 -fsyntax-only -Wall $INC "$f" 2> /tmp/syntax_err.txt; then
