@@ -412,7 +412,14 @@ static int count_names_in(uint64_t addr, uint64_t size) {
 // практически невозможно. Ключ не перебираем: выводится из контекста.
 
 static const uint64_t kMinBlobSize = 1ull << 20;   // реальная метадата >= 1 МБ
-static const int kV38MinVer = 38, kV38MaxVer = 110;
+static const int kV38MinVer = 29, kV38MaxVer = 110;
+// Тройки (offset,size,count), 31 шт., шапка 0x17C — формат версий 29..110
+// (до 29 — пары (off,size), их ведёт parse_blob по чистой магии). Unity
+// 6000.3 — 33/35/38/39, все четыре — тройки, поэтому мозаику пробуем для
+// ЛЮБОЙ версии 29..110: чистая версия 33/35 не проходила старый затвор
+// [38..110], и «магия стёрта + чистая версия 33/35 + чистые таблицы» была
+// невидима для всех путей (нашёл бы только якорь без затвора — и тот,
+// судя по ранам, не сработал).
 static const int kV38Triples = 31;
 static const uint64_t kV38HeaderSize = 8 + 93 * 4; // 0x17C
 
@@ -1279,6 +1286,36 @@ int main(int argc, char** argv) {
     } else {
         say("шапки метадаты не найдено ни одним путём (магия, мозаика, метки, "
             "якоря) — метаданные целиком зашифрованы или не загружены; снимаю старое окно");
+        // Формуляр: ни один путь не сработал — вываливаем в лог сырые первые
+        // 0x17C байта двух наиболее вероятных шапок, чтобы оффлайн по ним
+        // снять точную схему маскирования (XOR-построение, замещение,
+        // перестановка байт). (a) файловая маппинг по чистой магии,
+        // (b) начало региона, в котором нашлась строка-блок (рантайм-копия:
+        // её размер в ране = ровно размер блоба, шапка — в начале региона).
+        auto hexhdr = [&](const char* tag, uint64_t addr) {
+            static uint8_t hb[0x17C];
+            if (!rd_at(addr, hb, sizeof(hb))) {
+                say("DIAG %s @0x%llx: не читается", tag,
+                    (unsigned long long)addr);
+                return;
+            }
+            for (uint64_t off = 0; off < sizeof(hb); off += 16) {
+                char line[140];
+                int n = snprintf(line, sizeof(line), "DIAG %s @0x%llx+0x%03x: ",
+                                 tag, (unsigned long long)addr, (unsigned)off);
+                for (size_t b = 0; b < 16; ++b)
+                    n += snprintf(line + n, sizeof(line) - (size_t)n, "%02x ",
+                                  hb[off + b]);
+                say("%s", line);
+            }
+        };
+        for (int m = 0; m < magic_count; ++m)
+            hexhdr("file", magic_hits[m]);
+        for (int i = 0; i < g_reg_count; ++i)
+            if (win_at >= g_regs[i].start && win_at < g_regs[i].end) {
+                hexhdr("runt", g_regs[i].start);
+                break;
+            }
     }
     if (blob_extent > (2ull << 30)) blob_extent = 2ull << 30;
     if (blob_at) {
