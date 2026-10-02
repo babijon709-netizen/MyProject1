@@ -250,7 +250,10 @@ static bool region_candidate(const Region& r, bool include_closed = false) {
     if (r.end - r.start < kPage) return false;
     if (r.perms[0] == 'r') return true;
     if (!include_closed) return false;
-    if (r.end - r.start > (64ull << 20)) return false;
+    // Кэп только для ИМЕННЫХ резервов (scudo/webview/cfi — гигабайты
+    // пустоты); безымянные закрытые области (протектор прячет блоб именно
+    // в них, наблюдались 118/82/248 МБ) берём ЛЮБОГО размера: нечитаемые
+    // куски read_span_holes обратит в нули и посчитает.
     static const char* const kReserveJunk[] = {
         "scudo", "libwebview", "cfi shadow",
     };
@@ -1286,10 +1289,29 @@ static int Run(int argc, char* argv[]) {
         }
         if (by_marker)
             log.say("по меткам : %d блоб(ов) найдено без магии", by_marker);
-        else if (!markers.empty() && blobs.empty())
+        else if (!markers.empty() && blobs.empty()) {
             log.say("строковые метки метадаты видны (%d шт.), но заголовок "
                     "к ним не подобрался — вероятно, закрыт страницами",
                     (int)markers.size());
+            // Адреса меток — куда протектор положил строковую таблицу:
+            // по ним видно, в каких областях строки и как они сгруппированы.
+            const int kMaxPrint = 40;
+            for (size_t mi = 0; mi < markers.size() && (int)mi < kMaxPrint;
+                 ++mi) {
+                const Region* in = nullptr;
+                for (const Region& r : cand)
+                    if (markers[mi].addr >= r.start &&
+                        markers[mi].addr < r.end) {
+                        in = &r;
+                        break;
+                    }
+                log.say("   метка 0x%llx «%s» — %s",
+                        (unsigned long long)markers[mi].addr, markers[mi].marker,
+                        in ? in->perms : "вне скана");
+            }
+            if (markers.size() > (size_t)kMaxPrint)
+                log.say("   ... и ещё %d шт.", (int)markers.size() - kMaxPrint);
+        }
     }
 
     if (blobs.empty()) {
