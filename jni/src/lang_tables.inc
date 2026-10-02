@@ -390,6 +390,12 @@ static const LangPair kVisualEn[] = {
     {"Ящик с вышки", "Oil Rig Crate"},
     {"Ящик с едой", "Food Crate"},
     {"Ящик с танка", "Bradley Crate"},
+    {"компонент чужой (нет нас в составе)", "foreign component (not in roster)"},
+    {"нет", "none"},
+    {"нет командного компонента", "no team component"},
+    {"нет объекта команды", "no team object"},
+    {"нет списка участников", "no member list"},
+    {"список пуст", "list is empty"},
     {"ягод", "Berries"},
 };
 

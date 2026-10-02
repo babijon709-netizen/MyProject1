@@ -288,6 +288,13 @@ VISUAL_EN = {
     'Дер. копьё': 'Wooden Spear', 'Жел. копьё': 'Iron Spear',
     'Кам. топорик': 'Stone Hatchet', 'Лед. копьё': 'Ice Spear',
     'Охот. винтовка': 'Hunting Rifle', 'Шип. дубина': 'Spiked Club',
+    # диагностика ростера команды (aim-лог, ROSTER_FAIL_*)
+    'нет': 'none',
+    'нет командного компонента': 'no team component',
+    'компонент чужой (нет нас в составе)': 'foreign component (not in roster)',
+    'нет объекта команды': 'no team object',
+    'нет списка участников': 'no member list',
+    'список пуст': 'list is empty',
 }
 
 # Подписи, которым игра даёт несколько английских имён: какое брать в оверлей.
