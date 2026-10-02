@@ -38,6 +38,18 @@
 // остаться СТАРЫЕ блобы — сохраняем каждый отдельным файлом, адреса и
 // версии в логе.
 //
+// Формат v38+ (Unity 2022+/6000.x, наша игра — v39): шапка 0x17C, 31 ре-
+// гион ТРОЙКАМИ (offset, size, count). Протектор XOR-ит таблицу одним
+// ключом и ПЕРЕМЕШИВАЕТ тройки; в памяти магия вдобавок затёрта. Приёмка
+// только по МОЗАИКЕ: расшифрованные тройки, отсортированные по offset,
+// обязаны плотно замостить блоб от 0x17C (щели выравнивания <= 16 байт),
+// count <= size, точный размер блоба = конец мозаики. Ключ не перебираем:
+// он выводится из контекста (магия, версия, слот 0x17C первого региона).
+// Выгрузка пишет КАНОНИЧЕСКУЮ шапку (магия + версия + отсортированные
+// тройки) — файл сразу готов для Il2CppDumper. Отдельный якорный прогон
+// в начале больших областей ловит случай «версия тоже XOR-нута»: блоб —
+// большое mmap-выделение и начинается у начала области.
+//
 // Доступ к памяти — ТОЛЬКО через g_mem (выбранный транспорт, KERNEL.md §1):
 // чтения идут g_mem.read_quiet мимо кадрового кэша, своего /proc/<pid>/mem
 // команда не открывает никогда. Из /proc берутся лишь карта (maps) и
@@ -88,6 +100,14 @@ static constexpr std::uint32_t kMetaMagic = 0xFAB11BAF;
 static bool version_ok(std::uint32_t v) {
     return (v >= 16 && v <= 39) || v == 104 || v == 106;
 }
+
+// С v38 (Unity 2022.1+ / 6000.x) заголовок метадаты — не пары (offset,size),
+// а ТРОЙКИ (offset, size, count): 31 регион = 93 u32, шапка 0x17C байт.
+// Протектор этой игры XOR-ит таблицу одним ключом и ПЕРЕМЕШИВАЕТ тройки.
+static constexpr std::uint32_t kV38MinVer = 38;
+static constexpr std::uint32_t kV38MaxVer = 110;   // верх - условность, решает мозаика
+static constexpr int kV38Triples = 31;             // регионов в заголовке
+static constexpr std::uint32_t kV38HeaderSize = 8 + 93 * 4;   // 0x17C
 
 // Минимальный размер блоба метаданных реальной игры: строковый пул имён
 // классов/полей один занимает мегабайты. Отсекает мелкие совпадения магии.
@@ -247,12 +267,13 @@ struct Blob {
     std::uint64_t addr = 0;
     std::uint64_t size = 0;
     std::uint32_t version = 0;
-    // Заголовок блоба был зашифрован протектором и найден расшифровкой:
-    // каждый u32 XOR-ится key, первые три u32 (sanity, version, first_off)
-    // переставлены схемой perm (0 = без перестановки). Выгрузка пишет файл
-    // УЖЕ расшифрованным — Il2CppDumper берёт его как есть.
+    // Заголовок v38+ нашли расшифровкой (таблица XOR-нута ключом,
+    // тройки перемешаны): key хранит ключ, canonical_head — уже
+    // восстановленную шапку (магия + версия + 31 отсортированная тройка).
+    // Выгрузка пишет canonical_head вместо сырых первых байт — файл сразу
+    // берёт любой дампер. key == 0 и пустой head — заголовок чистый.
     std::uint32_t descramble_key = 0;
-    int          descramble_perm = 0;
+    std::vector<unsigned char> canonical_head;
 };
 
 // Проверка заголовка по месту найденной магии. Структурная, без таблицы
@@ -415,34 +436,144 @@ static void find_markers(const unsigned char* buf, size_t len, std::uint64_t add
     }
 }
 
-// Протектор может шифровать заголовок: каждый u32 XOR-ится ключом, а первые
-// три u32 (sanity, version, first_off) — вдобавок переставлены. Ключ не
-// перебираем: он выводится из самой магии, key = raw[sanity_slot] ^ 0xFAB11BAF.
-// kTriplePerms[p][j] — из какого raw-слота пришёл j-й расшифрованный u32.
-static const int kTriplePerms[6][3] = {
-    {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0},
+// ---- v38+: тройки (offset, size, count) и защита протектора --------------
+//
+// Схема протектора (сверена с рабочим самописным дампером этой игры):
+// таблица регионов XOR-ится ОДНИМ ключом, а сами тройки ПЕРЕМЕШИВАЮТСЯ.
+// Проверка «мозаикой»: расшифрованные тройки, отсортированные по offset,
+// должны плотно замостить файл от 0x17C (допускаются выравнивающие щели
+// до 16 байт), каждая непустая тройка имеет count>0 и count<=size. Это
+// совпадение на мусоре практически невозможно — в отличие от парной
+// эвристики, которую dalvik-куча обманывала (ложные блобы 243/190/16 МБ).
+
+struct V38Match {
+    std::uint32_t version = 0;      // восстановленная версия
+    std::uint32_t key = 0;          // ключ XOR таблицы (0 = таблица чистая)
+    std::uint64_t size = 0;         // ТОЧНЫЙ размер блоба = конец мозаики
+    std::uint32_t sorted[93] = {};  // тройки по возрастанию offset
 };
 
-// Расшифровка буфера: u32 XOR ключом (хвост <4 байт — побайтно младшими
-// байтами ключа); perm применяется один раз к первым 12 байтам файла.
-static void descramble_buf(unsigned char* buf, size_t len, std::uint32_t key,
-                           int perm, bool apply_perm) {
-    if (!key) return;
-    const size_t n = len / 4;
-    for (size_t k = 0; k < n; ++k) {
-        std::uint32_t v;
-        memcpy(&v, buf + 4 * k, 4);
-        v ^= key;
-        memcpy(buf + 4 * k, &v, 4);
+// Мозаика: f — 93 расшифрованных u32; avail — сколько байт доступно от
+// кандидата до конца области (в памяти размер файла неизвестен — он и
+// есть результат мозаики).
+static bool v38_tile(const std::uint32_t* f, std::uint64_t avail,
+                     std::uint64_t* size_out, std::uint32_t* sorted_out) {
+    struct T { std::uint32_t o, s, c; };
+    T g[kV38Triples];
+    for (int i = 0; i < kV38Triples; ++i) {
+        g[i].o = f[3 * i];
+        g[i].s = f[3 * i + 1];
+        g[i].c = f[3 * i + 2];
+        if (g[i].s) {
+            if (g[i].c == 0 || g[i].c > g[i].s) return false;
+            if ((std::uint64_t)g[i].o + g[i].s > avail) return false;
+        }
     }
-    for (size_t k = n * 4; k < len; ++k)
-        buf[k] ^= (unsigned char)(key >> (8 * (k & 3)));
-    if (apply_perm && perm > 0) {
-        std::uint32_t t[3];
-        for (int j = 0; j < 3; ++j)
-            memcpy(&t[j], buf + 4 * kTriplePerms[perm][j], 4);
-        memcpy(buf, t, 12);
+    for (int i = 1; i < kV38Triples; ++i) {          // вставки, 31 элемент
+        const T t = g[i];
+        int j = i - 1;
+        while (j >= 0 && g[j].o > t.o) { g[j + 1] = g[j]; --j; }
+        g[j + 1] = t;
     }
+    std::uint64_t pos = kV38HeaderSize;
+    for (int i = 0; i < kV38Triples; ++i) {
+        if (g[i].o < pos) return false;              // регион до шапки
+        if ((std::uint64_t)g[i].o - pos > 16) return false;  // дыра в мозаике
+        pos = ((std::uint64_t)g[i].o + g[i].s + 3) & ~3ull;
+    }
+    if (pos < kMinBlobSize || pos > avail) return false;
+    *size_out = pos;
+    if (sorted_out)
+        for (int i = 0; i < kV38Triples; ++i) {
+            sorted_out[3 * i] = g[i].o;
+            sorted_out[3 * i + 1] = g[i].s;
+            sorted_out[3 * i + 2] = g[i].c;
+        }
+    return true;
+}
+
+// Кандидаты ключа для позиции заголовка. w0/w1 — первые два u32 (слоты
+// магии и версии), t — 93 u32 таблицы. Ключ не перебираем: он выводится
+// из контекста (магия, версия, пустые регионы, первый offset).
+static int v38_key_candidates(std::uint32_t w0, std::uint32_t w1,
+                              const std::uint32_t* t,
+                              std::uint32_t* out, int cap) {
+    int n = 0;
+    auto add = [&](std::uint32_t k) {
+        if (!k) return;
+        for (int i = 0; i < n; ++i)
+            if (out[i] == k) return;
+        if (n < cap) out[n++] = k;
+    };
+    add(w0 ^ kMetaMagic);                    // вся шапка XOR одним ключом
+    for (std::uint32_t v = kV38MinVer; v <= kV38MaxVer; ++v)
+        add(w1 ^ v);                         // версия XOR-нута тем же ключом
+    if (w1 >= kV38MinVer && w1 <= kV38MaxVer)
+        // версия чистая, значит шапка от_magic затёрта, а таблица XOR-нута:
+        // первый регион всегда начинается на 0x17C -> t[j] ^ 0x17C = ключ
+        for (int j = 0; j < 93; ++j) add(t[j] ^ kV38HeaderSize);
+    return n;
+}
+
+// Полная проверка заголовка v38+ на позиции hdr (нужно >= 0x17C байт).
+// must_cover_rel (если задан) — смещение строки-метки от начала кандидата:
+// метка обязана попасть внутрь одного из регионов мозаики.
+static bool v38_try(const unsigned char* hdr, std::uint64_t avail,
+                    std::uint64_t must_cover_rel, V38Match* out) {
+    if (avail < kV38HeaderSize) return false;
+    std::uint32_t w0 = 0, w1 = 0;
+    memcpy(&w0, hdr, 4);
+    memcpy(&w1, hdr + 4, 4);
+    std::uint32_t t[93];
+    memcpy(t, hdr + 8, sizeof(t));
+    std::uint32_t f[93];
+    V38Match m;
+    // попытка для одного ключа: расшифровать, сложить мозаику, накрыть метку
+    auto attempt = [&](std::uint32_t k, std::uint32_t ver) {
+        for (int j = 0; j < 93; ++j) f[j] = t[j] ^ k;
+        if (!v38_tile(f, avail, &m.size, m.sorted)) return false;
+        if (must_cover_rel != ~0ull) {
+            bool covered = false;
+            for (int i = 0; i < kV38Triples; ++i)
+                if (must_cover_rel >= m.sorted[3 * i] &&
+                    must_cover_rel <
+                        (std::uint64_t)m.sorted[3 * i] + m.sorted[3 * i + 1]) {
+                    covered = true;
+                    break;
+                }
+            if (!covered) return false;
+        }
+        m.version = ver;
+        m.key = k;
+        return true;
+    };
+    // магия на месте — таблица может быть чистой (канонический файл)
+    if (w0 == kMetaMagic && w1 >= kV38MinVer && w1 <= kV38MaxVer)
+        if (attempt(0, w1)) { *out = m; return true; }
+    std::uint32_t keys[128];
+    const int nk = v38_key_candidates(w0, w1, t, keys, 128);
+    for (int ki = 0; ki < nk; ++ki) {
+        const std::uint32_t k = keys[ki];
+        const std::uint32_t ve = w1 ^ k;             // версия расшифрованная
+        if (ve >= kV38MinVer && ve <= kV38MaxVer && attempt(k, ve)) {
+            *out = m;
+            return true;
+        }
+        if (w1 >= kV38MinVer && w1 <= kV38MaxVer && attempt(k, w1)) {
+            *out = m;                                 // версия была чистой
+            return true;
+        }
+    }
+    return false;
+}
+
+// Каноническая шапка для выгрузки: магия, версия, тройки по возрастанию.
+static void v38_canonical(const V38Match& m, std::vector<unsigned char>* out) {
+    out->resize(kV38HeaderSize);
+    std::uint32_t magic = kMetaMagic;
+    memcpy(&(*out)[0], &magic, 4);
+    memcpy(&(*out)[4], &m.version, 4);
+    memcpy(&(*out)[8], m.sorted, 93 * 4);
 }
 
 // Сканирование одного прочитанного блока: магию ищем на КАЖДОМ байте —
@@ -478,6 +609,35 @@ static void scan_block(const unsigned char* buf, size_t len, std::uint64_t addr,
             continue;
         }
 
+        std::uint32_t ver_plain = 0;
+        memcpy(&ver_plain, hdr + 4, 4);
+        if (ver_plain >= kV38MinVer && ver_plain <= kV38MaxVer) {
+            // v38+: заголовок из ТРОЕК, парная логика неприменима. Магия на
+            // месте, но таблица может быть XOR-нута и перемешана протектором.
+            V38Match m;
+            if (v38_try(hdr, region_end - at, ~0ull, &m)) {
+                Blob b;
+                b.addr = at;
+                b.size = m.size;
+                b.version = m.version;
+                b.descramble_key = m.key;
+                if (m.key) v38_canonical(m, &b.canonical_head);
+                blobs->push_back(b);
+                log->say("  ++ global-metadata v%u: адрес 0x%llx, %.1f МБ%s",
+                         (unsigned)m.version, (unsigned long long)at,
+                         (double)m.size / (1024.0 * 1024.0),
+                         m.key ? ", таблица XOR-нута — заголовок восстановлю" : "");
+                continue;
+            }
+            if (s_rejected < 30) {
+                ++s_rejected;
+                log->say("   ?? магия по адресу 0x%llx: v%u — мозаика троек "
+                         "не сходится%s",
+                         (unsigned long long)at, (unsigned)ver_plain,
+                         s_rejected == 30 ? " (дальше отвергнутые не пишу)" : "");
+            }
+            continue;
+        }
         std::uint32_t version = 0;
         std::uint64_t size = 0;
         const char* reason = nullptr;
@@ -504,71 +664,51 @@ static void scan_block(const unsigned char* buf, size_t len, std::uint64_t addr,
                  (double)size / (1024.0 * 1024.0));
     }
 
-    // Второй проход — зашифрованные заголовки. Строки метадаты в памяти
-    // лежат открытым текстом (иначе маркеры бы не находились), значит тело
-    // блоба не шифровано и трогать его нельзя — расшифровке подлежит только
-    // заголовок 0x210. Отсев дешёвый: версия после XOR должна сойтись,
-    // первая пара — попасть в правдоподобный диапазон.
-    static int s_descr_rejected = 0;
-    for (size_t i = 0; i + 0x48 <= len; i += 4) {
-        std::uint32_t t[3];
-        memcpy(t, buf + i, 12);
-        for (int perm = 0; perm < 6; ++perm) {
-            const std::uint32_t key = t[kTriplePerms[perm][0]] ^ kMetaMagic;
-            if (key == 0) continue;
-            const std::uint32_t ver = t[kTriplePerms[perm][1]] ^ key;
-            if (!version_ok(ver)) continue;
-            const std::uint32_t fo = t[kTriplePerms[perm][2]] ^ key;
-            if (fo < 0x48 || fo > 0x400 || (fo % 8) != 0) continue;
-
-            const std::uint64_t at = addr + i;
-            bool dup = false;
-            for (const Blob& b : *blobs)
-                if (at >= b.addr && at < b.addr + b.size) {
-                    dup = true;
-                    break;
-                }
-            if (dup) continue;
-
-            std::uint64_t want = 0x210;
-            if (want > region_end - at) want = region_end - at;
-            if (want < 0x48) continue;
-            unsigned char raw[0x210], dec[0x210];
-            if (!g_mem.read_quiet(at, raw, (size_t)want)) continue;
-            memcpy(dec, raw, (size_t)want);
-            descramble_buf(dec, (size_t)want, key, perm, /*apply_perm=*/true);
-
-            std::uint32_t version = 0;
-            std::uint64_t size = 0;
-            const char* reason = nullptr;
-            if (!validate_blob_header(dec, (size_t)want, at, region_end,
-                                      &version, &size, &reason,
-                                      /*must_cover_rel=*/~0ull,
-                                      /*require_magic=*/true)) {
-                if (s_descr_rejected < 10) {
-                    ++s_descr_rejected;
-                    log->say("   ?? зашифрованный кандидат 0x%llx "
-                             "(ключ 0x%08x): %s",
-                             (unsigned long long)at, (unsigned)key,
-                             reason ? reason : "?");
-                }
-                continue;
+    // Второй проход — заголовки v38+ БЕЗ магии (затёрта протектором или
+    // XOR-нута вместе со всей шапкой). Строки метадаты в памяти лежат
+    // открытым текстом (иначе маркеры не находились бы), шифрована только
+    // шапка. Затвор дешёвый: версия — чистая или снимающаяся ключом из
+    // слота магии — должна попасть в диапазон v38+.
+    static int s_v38_rejected = 0;
+    for (size_t i = 0; i + kV38HeaderSize <= len; i += 4) {
+        std::uint32_t w0 = 0, w1 = 0;
+        memcpy(&w0, buf + i, 4);
+        memcpy(&w1, buf + i + 4, 4);
+        const std::uint32_t km = w0 ^ kMetaMagic;
+        if (!((w1 >= kV38MinVer && w1 <= kV38MaxVer) ||
+              (km && (w1 ^ km) >= kV38MinVer && (w1 ^ km) <= kV38MaxVer)))
+            continue;
+        const std::uint64_t at = addr + i;
+        bool dup = false;
+        for (const Blob& b : *blobs)
+            if (at >= b.addr && at < b.addr + b.size) {
+                dup = true;
+                break;
             }
-            Blob b;
-            b.addr = at;
-            b.size = size;
-            b.version = version;
-            b.descramble_key = key;
-            b.descramble_perm = perm;
-            blobs->push_back(b);
-            log->say("  ++ global-metadata v%u, заголовок зашифрован "
-                     "(XOR 0x%08x%s): адрес 0x%llx, %.1f МБ — файл запишу "
-                     "с расшифрованным заголовком",
-                     (unsigned)version, (unsigned)key,
-                     perm ? ", перестановка троек" : "",
-                     (unsigned long long)at,
-                     (double)size / (1024.0 * 1024.0));
+        if (dup) continue;
+        V38Match m;
+        if (!v38_try(buf + i, region_end - at, ~0ull, &m)) {
+            if (s_v38_rejected < 10) {
+                ++s_v38_rejected;
+                log->say("   ?? заголовок без магии 0x%llx — мозаика v38+ "
+                         "не сошлась",
+                         (unsigned long long)at);
+            }
+            continue;
         }
+        Blob b;
+        b.addr = at;
+        b.size = m.size;
+        b.version = m.version;
+        b.descramble_key = m.key;
+        if (m.key) v38_canonical(m, &b.canonical_head);
+        blobs->push_back(b);
+        log->say("  ++ global-metadata v%u, магия затёрта/зашифрована%s: "
+                 "адрес 0x%llx, %.1f МБ",
+                 (unsigned)m.version,
+                 m.key ? " (ключ XOR подобран из таблицы)" : "",
+                 (unsigned long long)at,
+                 (double)m.size / (1024.0 * 1024.0));
     }
 }
 
@@ -646,6 +786,42 @@ static void scan_regions(const std::vector<Region>& regions,
             log->say("   !! нечитаемо %.1f МБ из %.1f МБ (закрытые страницы)",
                      (double)holes / (1024.0 * 1024.0),
                      (double)size / (1024.0 * 1024.0));
+        // Якорный прогон v38+ в начале области: блоб метадаты — большое
+        // mmap-выделение и почти всегда начинается у начала области (±
+        // страница на служебные заголовки аллокатора). Здесь допустим и
+        // самый тяжёлый случай — версия XOR-нута вместе с магией: на якорях
+        // полный перебор ключей дёшев.
+        if (size >= (8ull << 20)) {
+            static unsigned char abuf[0x1000 + kV38HeaderSize];
+            const std::uint64_t take =
+                size < sizeof(abuf) ? size : sizeof(abuf);
+            std::uint64_t aholes = 0;
+            read_span_holes(r.start, abuf, (size_t)take, &aholes);
+            for (std::uint64_t o = 0; o + kV38HeaderSize <= take; o += 4) {
+                const std::uint64_t at = r.start + o;
+                bool dup = false;
+                for (const Blob& b : *blobs)
+                    if (at >= b.addr && at < b.addr + b.size) {
+                        dup = true;
+                        break;
+                    }
+                if (dup) continue;
+                V38Match m;
+                if (!v38_try(abuf + o, r.end - at, ~0ull, &m)) continue;
+                Blob b;
+                b.addr = at;
+                b.size = m.size;
+                b.version = m.version;
+                b.descramble_key = m.key;
+                if (m.key) v38_canonical(m, &b.canonical_head);
+                blobs->push_back(b);
+                log->say("  ++ global-metadata v%u у начала области: адрес "
+                         "0x%llx, %.1f МБ%s",
+                         (unsigned)m.version, (unsigned long long)at,
+                         (double)m.size / (1024.0 * 1024.0),
+                         m.key ? ", таблица XOR-нута — заголовок восстановлю" : "");
+            }
+        }
     }
     if (scanned_total) *scanned_total = scanned;
 }
@@ -655,7 +831,11 @@ static void scan_regions(const std::vector<Region>& regions,
 // эту строку. Так блоб находится, даже если протектор затёр или заменил
 // магию — реальный sanity печатается для протокола.
 static bool blob_from_marker(const MarkerHit& hit, const Region& region,
-                             std::vector<Blob>* blobs, Log* log) {
+                             std::vector<Blob>* blobs,
+                             const std::vector<MarkerHit>* all_hits,
+                             Log* log) {
+    static int s_giveups = 0;
+    if (s_giveups >= 64) return false;   // декой-заливка меток не утопит скан
     for (const Blob& b : *blobs)
         if (hit.addr >= b.addr && hit.addr < b.addr + b.size)
             return false;                       // метка внутри найденного блоба
@@ -682,14 +862,63 @@ static bool blob_from_marker(const MarkerHit& hit, const Region& region,
         // буфер целиком (условие «h + 0x210 <= win_hi» такое начало теряло).
         for (std::uint64_t h = win_lo; h < win_hi && h + 0x210 <= read_hi; h += 4) {
             const unsigned char* hdr = win + (size_t)(h - win_lo);
-            std::uint32_t ver = 0;
+            std::uint32_t w0 = 0, ver = 0;
+            memcpy(&w0, hdr, 4);
             memcpy(&ver, hdr + 4, 4);
+            // v38+: тройки + мозаика + накрытие метки. Затвор дешёвый
+            // (версия чистая либо снимается ключом из слота магии), иначе
+            // перебор ключей на каждом смещении слишком долог.
+            const std::uint32_t km = w0 ^ kMetaMagic;
+            if ((ver >= kV38MinVer && ver <= kV38MaxVer) ||
+                (km && (ver ^ km) >= kV38MinVer && (ver ^ km) <= kV38MaxVer)) {
+                V38Match m;
+                if (v38_try(hdr, region.end - h, hit.addr - h, &m)) {
+                    if (w0 != kMetaMagic)
+                        log->say("   !! магия заголовка изменена протектором: "
+                                 "0x%08x вместо 0x%08x",
+                                 (unsigned)w0, (unsigned)kMetaMagic);
+                    Blob b;
+                    b.addr = h;
+                    b.size = m.size;
+                    b.version = m.version;
+                    b.descramble_key = m.key;
+                    if (m.key) v38_canonical(m, &b.canonical_head);
+                    blobs->push_back(b);
+                    log->say("  ++ global-metadata v%u по строковой метке "
+                             "(«%s»): адрес 0x%llx, %.1f МБ%s",
+                             (unsigned)m.version, hit.marker,
+                             (unsigned long long)h,
+                             (double)m.size / (1024.0 * 1024.0),
+                             m.key ? ", заголовок расшифрован" : "");
+                    return true;
+                }
+                continue;          // v38+ без сошедшейся мозаики не принимаем
+            }
+            // Старые версии (v<38): пары + структура + накрытие метки.
+            if (ver >= kV38MinVer) continue;
             if (!version_ok(ver)) continue;     // дешёвый отсев мусора
             std::uint32_t version = 0;
             std::uint64_t size = 0;
             if (validate_blob_header(hdr, (size_t)(read_hi - h), h, region.end,
                                      &version, &size, nullptr, hit.addr - h,
                                      /*require_magic=*/false)) {
+                if (size > (128ull << 20)) continue;   // старые не гигантские
+                // Вторая РАЗЛИЧНАЯ метка внутри блоба: в строковой таблице
+                // метадаты их всегда несколько (mscorlib + Assembly-CSharp);
+                // декой-строка в dalvik-куче лежит одна.
+                if (all_hits) {
+                    int distinct = 0;
+                    for (const char* m1 : kStringMarkers) {
+                        if (!strcmp(m1, hit.marker)) continue;
+                        for (const MarkerHit& mh : *all_hits)
+                            if (!strcmp(mh.marker, m1) && mh.addr >= h &&
+                                mh.addr < h + size) {
+                                ++distinct;
+                                break;
+                            }
+                    }
+                    if (distinct < 1) continue;
+                }
                 std::uint32_t sanity = 0;
                 memcpy(&sanity, hdr, 4);
                 if (sanity != kMetaMagic)
@@ -711,6 +940,10 @@ static bool blob_from_marker(const MarkerHit& hit, const Region& region,
         }
         back += win_hi - win_lo;
     }
+    ++s_giveups;
+    if (s_giveups == 64)
+        log->say("   !! маркерный путь: 64 неудачи подряд — остальные метки "
+                 "не гоняю (похоже на декой-заливку)");
     return false;
 }
 
@@ -725,25 +958,25 @@ static bool dump_blob(const Blob& b, const char* path, Log* log) {
         return false;
     }
     static unsigned char buf[kChunk];
-    if (b.descramble_key)
-        log->say("   заголовок блоба был зашифрован (XOR 0x%08x) — первые "
-                 "0x210 байт файла записываю расшифрованными",
-                 (unsigned)b.descramble_key);
     std::uint64_t done = 0, failed = 0;
+    // Заголовок v38+ нашли расшифровкой — файл пишем СРАЗУ каноническим:
+    // магия, версия, 31 отсортированная тройка (offset,size,count). Такой
+    // файл берёт любой дампер (Il2CppDumper/Cpp2IL) без починки.
+    if (!b.canonical_head.empty()) {
+        fwrite(b.canonical_head.data(), 1, b.canonical_head.size(), f);
+        done = b.canonical_head.size();
+        log->say("   заголовок восстановлен: XOR 0x%08x снят, тройки "
+                 "отсортированы — файл канонический v%u",
+                 (unsigned)b.descramble_key, (unsigned)b.version);
+    }
     while (done < b.size) {
         const std::uint64_t left = b.size - done;
         const size_t want = (size_t)(left < kChunk ? left : kChunk);
         // Дыры (закрытые страницы) — нулями, чтобы файл не съезжал; счётчик
         // потерь скажет, сколько вылетело. Весь блоб в дырах — файл не пишем.
+        // Шифрована только шапка (тело в памяти открыто — иначе маркеры не
+        // находились бы), тело пишем как есть.
         read_span_holes(b.addr + done, buf, want, &failed);
-        // Зашифрован только заголовок (таблицы в памяти открыты — иначе
-        // строковые маркеры не находились бы), тело пишем как есть.
-        if (b.descramble_key && done < 0x210) {
-            const size_t head =
-                (size_t)((0x210 - done) < want ? (0x210 - done) : want);
-            descramble_buf(buf, head, b.descramble_key, b.descramble_perm,
-                           /*apply_perm=*/done == 0);
-        }
         fwrite(buf, 1, want, f);
         done += want;
         if ((done / (8u << 20)) != ((done - want) / (8u << 20)))
@@ -1000,7 +1233,7 @@ static int Run(int argc, char* argv[]) {
                     owner = &r;
                     break;
                 }
-            if (owner && blob_from_marker(hit, *owner, &blobs, &log))
+            if (owner && blob_from_marker(hit, *owner, &blobs, &markers, &log))
                 ++by_marker;
         }
         if (by_marker)
