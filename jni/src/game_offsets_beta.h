@@ -573,6 +573,7 @@ inline constexpr std::uint64_t TEAM_DATA_MEMBERS     = 0x20;  // List<TeamMember
 inline constexpr std::uint64_t TEAM_MEMBER_ID        = 0x10;  // string id (userID аккаунта)
 inline constexpr std::uint64_t TEAM_MEMBER_CLAN_TAG  = 0x18;  // string clanTag
 inline constexpr std::uint64_t TEAM_MEMBER_NICK      = 0x20;  // string nick (видимый ник)
+inline constexpr std::uint64_t TEAM_MEMBER_NET_ID    = 0x2C;  // uint netId (Mirror ID сервера)
 
 // Vehicles: both are SyncVars (uint netId of the vehicle / index of the seat),
 // zero while the player is on foot. A mounted player stops updating

@@ -137,10 +137,12 @@ std::vector<BotAimEnt> esp_bot_aim_list();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 
 // Диагностика признака «союзник» для аим-лога: длина своих строк группы,
-// найден ли командный объект (запасной источник) и сколько в нём ников.
+// найден ли командный объект (запасной источник), сколько в нём участников
+// и где именно сломана цепочка чтения (fail_desc — человекочитаемо).
 void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
                        int* roster_valid, int* roster_count,
-                       char* roster_team, size_t roster_team_cap);
+                       char* roster_team, size_t roster_team_cap,
+                       const char** fail_desc);
 
 // ---- Автообновление оффсетов (offset_resolver.cpp) ---------------------------
 // Читает IL2CPP-метаданные живого процесса: ищет классы по именам (заменяет

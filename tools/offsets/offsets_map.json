@@ -2941,5 +2941,17 @@
    "file": "dump.cs",
    "how": "string nick, 0x20 в обеих сборках"
   }
+ },
+ "TEAM_MEMBER_NET_ID": {
+  "kind": "field",
+  "class": "TeamMember",
+  "struct": "TeamMember_Fields",
+  "field": "netId",
+  "type": "uint",
+  "offset": 44,
+  "src": {
+   "file": "dump.cs",
+   "how": "uint netId, 0x2C в обеих сборках; сопоставляется с NetworkIdentity.netId игрока (NETBEHAVIOUR_NET_IDENTITY 0x40 -> NETID_NET_ID 0x58)"
+  }
  }
 }

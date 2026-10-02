@@ -411,9 +411,10 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             // запасной источник — состав команды из командного объекта.
             int dteam = 0, dclan = 0, rval = 0, rcnt = 0;
             char rteam[32] = {};
-            esp_get_ally_diag(&dteam, &dclan, &rval, &rcnt, rteam, sizeof(rteam));
-            LogLine("аим: союзники — своя группа: команда %d симв., клан %d симв.; состав команды: %s, участников %d",
-                    dteam, dclan, rval ? "найден" : "нет", rcnt);
+            const char* rfail = "нет";
+            esp_get_ally_diag(&dteam, &dclan, &rval, &rcnt, rteam, sizeof(rteam), &rfail);
+            LogLine("аим: союзники — своя группа: команда %d симв., клан %d симв.; состав команды: %s, участников %d, команда «%s» (цепочка: %s)",
+                    dteam, dclan, rval ? "найден" : "нет", rcnt, rteam, rfail);
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;

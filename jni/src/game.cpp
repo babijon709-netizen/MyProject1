@@ -454,6 +454,11 @@ static void read_player_group(uint64_t player, PlayerGroup& out) {
 static bool groups_are_allied(const PlayerGroup& local, const PlayerGroup& other) {
     if (local.team[0] && strcmp(local.team, other.team) == 0) return true;
     if (local.clan[0] && strcmp(local.clan, other.clan) == 0) return true;
+    // Тег клана короткий и постоянно виден у ника (читается и у чужих
+    // объектов). Полные строки teamName/clanId помечены в дампе
+    // notserialized и на чужих клиентах часто пустые — сравнение по тегу
+    // страхует случай, когда они не синхронизировались.
+    if (local.tag[0] && strcmp(local.tag, other.tag) == 0) return true;
     return false;
 }
 
@@ -472,14 +477,64 @@ static PlayerGroup s_last_local_group;
 struct TeamRoster {
     char     nicks[16][32] = {};
     char     ids[16][40] = {};     // stable userID; nickname can differ from display label
+    uint32_t netids[16] = {};      // server-assigned Mirror netId — строки не нужны
     char     team_name[32] = {};
     uint64_t owner = 0;   // local player this roster belongs to
     uint8_t  count = 0;
     bool     valid = false;        // объект команды найден и прочитан
     int      refresh = 30;         // первая попытка — сразу
     int      misses = 0;
+    uint8_t  last_fail = 0;        // 0 ok, иначе шаг цепи (см. ROSTER_FAIL_*)
 };
 static TeamRoster s_team_roster;
+
+// player_display_name определён ниже — объявление для проверки «мы в составе».
+static bool player_display_name(uint64_t player, char* out, size_t cap);
+
+// Mirror помечает игрока, которым управляет это устройство:
+// NetworkBehaviour.netIdentity (+0x40) -> NetworkIdentity.isLocalPlayer
+// (+0x4A, bool). У остальных игроков флаг false — это единственный признак,
+// который читается у ЛЮБОГО игрока (в отличие от m_EventHandler: чужому
+// MouseLook'у ввод не нужен, поле пустое, и проверка владельца молчит).
+static constexpr uint64_t NETBEHAVIOUR_NET_IDENTITY   = 0x40;
+static constexpr uint64_t NETIDENTITY_IS_LOCAL_PLAYER = 0x4A;
+
+enum : uint8_t {
+    ROSTER_FAIL_OK = 0,
+    ROSTER_FAIL_NO_TEAMC,     // нет командного компонента (не в команде / чтёне)
+    ROSTER_FAIL_BACKREF,      // компонент чужой: не наш игрок в составе
+    ROSTER_FAIL_NO_DATA,      // нет объекта команды
+    ROSTER_FAIL_NO_LIST,      // нет списка участников
+    ROSTER_FAIL_EMPTY         // список прочитан, но пуст
+};
+
+// netId локального игрока: NetworkBehaviour.netIdentity (0x40) ->
+// NetworkIdentity.netId (NETID_NET_ID). Ноль, если не прочиталось.
+static uint32_t local_net_id(uint64_t player) {
+    const uint64_t identity = rd_ptr(player + NETBEHAVIOUR_NET_IDENTITY);
+    if (!identity) return 0;
+    uint32_t netid = 0;
+    return rd_exact(identity + NETID_NET_ID, netid) ? netid : 0;
+}
+
+static bool roster_contains_local(const TeamRoster& fresh, uint64_t local_player) {
+    // Состав «наш» только если в нём есть сам локальный игрок. Проверяем по
+    // трём источникам — какой прочитается, тот и сработает:
+    uint32_t lnet = local_net_id(local_player);
+    if (lnet) {
+        for (uint8_t i = 0; i < fresh.count; ++i)
+            if (fresh.netids[i] == lnet) return true;
+    }
+    char luid[40] = {}, lnick[32] = {};
+    read_managed_string_ex(rd_ptr(local_player + PLAYER_USER_ID), luid, sizeof(luid), 39);
+    if (luid[0])
+        for (uint8_t i = 0; i < fresh.count; ++i)
+            if (fresh.ids[i][0] && strcmp(fresh.ids[i], luid) == 0) return true;
+    if (player_display_name(local_player, lnick, sizeof(lnick)))
+        for (uint8_t i = 0; i < fresh.count; ++i)
+            if (fresh.nicks[i][0] && strcmp(fresh.nicks[i], lnick) == 0) return true;
+    return false;
+}
 
 static void team_roster_revalidate(uint64_t local_player) {
     TeamRoster& roster = s_team_roster;
@@ -489,37 +544,50 @@ static void team_roster_revalidate(uint64_t local_player) {
     if (!valid_obj(local_player)) return;
     // Do not erase the last confirmed roster on a single failed read, but
     // expire it if the owner has actually left the team.
-    auto missed = [&] {
+    auto missed = [&](uint8_t step) {
+        roster.last_fail = step;
         if (++roster.misses >= 3) { roster.valid = false; roster.count = 0; }
     };
     uint64_t teamc = rd_ptr(local_player + PLAYER_TEAM_OBJECT);
-    if (!valid_obj(teamc)) { missed(); return; }
-    // Компонент должен принадлежать именно нашему игроку: при сбитом оффсете
-    // сюда попадёт чужой объект, и обратная ссылка это ловит.
-    uint64_t back = rd_ptr(teamc + TEAM_OBJECT_PLAYER);
-    if (back && back != local_player) { missed(); return; }
+    if (!valid_obj(teamc)) { missed(ROSTER_FAIL_NO_TEAMC); return; }
     uint64_t data = rd_ptr(teamc + TEAM_OBJECT_DATA);
-    if (!valid_obj(data)) { missed(); return; }
+    if (!valid_obj(data)) { missed(ROSTER_FAIL_NO_DATA); return; }
     TeamRoster fresh{};
     fresh.owner = local_player;
     read_managed_string_ex(rd_ptr(data + TEAM_DATA_NAME), fresh.team_name,
                            sizeof(fresh.team_name), 31);
     uint64_t members[16];
     const uint64_t member_list = rd_ptr(data + TEAM_DATA_MEMBERS);
-    if (!valid_obj(member_list)) { missed(); return; }
+    if (!valid_obj(member_list)) { missed(ROSTER_FAIL_NO_LIST); return; }
     int count = read_managed_collection(member_list, members, 16);
     if (count == 0 && roster.valid && roster.count && ++roster.misses < 3) return;
     for (int i = 0; i < count; ++i) {
         if (!valid_obj(members[i])) continue;
         char nick[32] = {}, uid[40] = {};
+        uint32_t netid = 0;
         read_managed_string_ex(rd_ptr(members[i] + TEAM_MEMBER_NICK), nick, sizeof(nick), 31);
         read_managed_string_ex(rd_ptr(members[i] + TEAM_MEMBER_ID), uid, sizeof(uid), 39);
-        if (!nick[0] && !uid[0]) continue;
+        rd_exact(members[i] + TEAM_MEMBER_NET_ID, netid);
+        // netId — самый надёжный ключ: не строка, не меняется в сессии,
+        // синхронизирован по определению (по нему сервер шлёт пакеты игроку).
+        if (!nick[0] && !uid[0] && !netid) continue;
         snprintf(fresh.nicks[fresh.count], sizeof(fresh.nicks[0]), "%s", nick);
         snprintf(fresh.ids[fresh.count], sizeof(fresh.ids[0]), "%s", uid);
+        fresh.netids[fresh.count] = netid;
         ++fresh.count;
     }
+    // Компонент должен принадлежать именно нашему игроку: при сбитом
+    // PLAYER_TEAM_OBJECT сюда попадёт чужой euD и чужая команда. Основная
+    // проверка — обратная ссылка teamc.player на нашего PlayerManager. Но она
+    // может указывать не на нас (поле заполняет сервер) или читаться нулём —
+    // тогда принимаем состав только если в нём реально есть локальный игрок.
+    const uint64_t back = rd_ptr(teamc + TEAM_OBJECT_PLAYER);
+    if (back != 0 && back != local_player && !roster_contains_local(fresh, local_player)) {
+        missed(ROSTER_FAIL_BACKREF);
+        return;
+    }
     fresh.valid = true;   // объект есть: пустой список — легальное состояние
+    fresh.last_fail = fresh.count ? ROSTER_FAIL_OK : ROSTER_FAIL_EMPTY;
     roster = fresh;
 }
 
@@ -542,16 +610,38 @@ static bool team_roster_contains_name(const char* name) {
     return false;
 }
 
+// «Свой» по netId: серверный ID участника == NetworkIdentity.netId игрока.
+// Самый надёжный признак — оба значения выдаёт сервер, строки не участвуют.
+static bool team_roster_contains_netid(uint32_t netid) {
+    const TeamRoster& roster = s_team_roster;
+    if (!roster.valid || !netid) return false;
+    for (int i = 0; i < roster.count; ++i)
+        if (roster.netids[i] && roster.netids[i] == netid) return true;
+    return false;
+}
+
 // Диагностика для аим-лога: почему союзников видно/не видно.
 void esp_get_ally_diag(int* local_team_len, int* local_clan_len,
                        int* roster_valid, int* roster_count,
-                       char* roster_team, size_t roster_team_cap) {
+                       char* roster_team, size_t roster_team_cap,
+                       const char** fail_desc) {
     if (local_team_len) *local_team_len = s_last_local_group.team[0] ? (int)strlen(s_last_local_group.team) : 0;
     if (local_clan_len) *local_clan_len = s_last_local_group.clan[0] ? (int)strlen(s_last_local_group.clan) : 0;
     if (roster_valid)  *roster_valid  = s_team_roster.valid ? 1 : 0;
     if (roster_count)  *roster_count  = s_team_roster.count;
     if (roster_team && roster_team_cap > 0)
         snprintf(roster_team, roster_team_cap, "%s", s_team_roster.team_name);
+    if (fail_desc) *fail_desc = "нет";
+    if (fail_desc && !s_team_roster.valid) {
+        switch (s_team_roster.last_fail) {
+            case ROSTER_FAIL_NO_TEAMC:  *fail_desc = "нет командного компонента"; break;
+            case ROSTER_FAIL_BACKREF:   *fail_desc = "компонент чужой (нет нас в составе)"; break;
+            case ROSTER_FAIL_NO_DATA:   *fail_desc = "нет объекта команды"; break;
+            case ROSTER_FAIL_NO_LIST:   *fail_desc = "нет списка участников"; break;
+            case ROSTER_FAIL_EMPTY:     *fail_desc = "список пуст"; break;
+            default: break;
+        }
+    }
 }
 
 static bool player_display_name(uint64_t player, char* out, size_t cap) {
@@ -3179,13 +3269,6 @@ static uint64_t mouse_look_owner(uint64_t mouse_look) {
 // m_LookRoot — Transform, которым MouseLook вертит камеру (Oxide.MouseLook,
 // dump.cs релиза). По нему и опознаём «свой» объект.
 static constexpr uint64_t MOUSELOOK_LOOK_ROOT = 0x28;
-// Mirror помечает игрока, которым управляет это устройство:
-// NetworkBehaviour.netIdentity (+0x40) -> NetworkIdentity.isLocalPlayer
-// (+0x4A, bool). У остальных игроков флаг false — это единственный признак,
-// который читается у ЛЮБОГО игрока (в отличие от m_EventHandler: чужому
-// MouseLook'у ввод не нужен, поле пустое, и проверка владельца молчит).
-static constexpr uint64_t NETBEHAVIOUR_NET_IDENTITY   = 0x40;
-static constexpr uint64_t NETIDENTITY_IS_LOCAL_PLAYER = 0x4A;
 
 // -1 — прочитать не удалось, 0 — чужой, 1 — локальный.
 static int player_is_local(uint64_t player) {
@@ -5397,6 +5480,8 @@ static void prune_player_aux(const std::vector<uint64_t>& players) {
 struct PlayerTrack {
     char uid[40] = {};      // userID, empty when it could not be read
     int  uid_recheck = 0;   // objects are pooled and reused for other players
+    uint32_t netid = 0;     // NetworkIdentity.netId — ключ для сопоставления с составом
+    int  netid_recheck = 0; // команда, как у uid: пул выдаёт объекты разным игрокам
     Vec3 last{};
     bool has_last = false;
     int  still_frames = 0;  // consecutive frames without movement
@@ -5623,6 +5708,13 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
             // Старый кеш не трогаем. Если кеша нет вовсе, пробуем быстрее.
             track.uid_recheck = track.uid[0] ? 120 : 20;
         }
+    }
+    // netId тем же ритмом: по нему сопоставляем игрока с составом команды,
+    // а при смене владельца пул-объекта ID должен перестать совпадать.
+    if (--track.netid_recheck <= 0) {
+        const uint32_t netid = local_net_id(player);
+        if (netid) { track.netid = netid; track.netid_recheck = 120; }
+        else track.netid_recheck = track.netid ? 120 : 20;
     }
     // Velocity, measured between the moments the position actually changed.
     // A remote player's position only arrives on the network tick, so most
@@ -8083,7 +8175,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // confirmed ally across brief failures of the managed strings.
             const auto track = g_player_track.find(s_transforms[i]);
             const char* uid = track != g_player_track.end() ? track->second.uid : "";
+            const uint32_t pnetid = track != g_player_track.end() ? track->second.netid : 0;
+            // netId — первый по надёжности: серверные значения с обеих сторон,
+            // строки (userID/ник) не участвуют; остальные — запасные.
             const bool allied = (local_group_valid && groups_are_allied(local_group, tc.group)) ||
+                                team_roster_contains_netid(pnetid) ||
                                 team_roster_contains_id(uid) || team_roster_contains_name(tc.name);
             if (allied) tc.ally_hold = 60;
             else if (tc.ally_hold > 0) --tc.ally_hold;
