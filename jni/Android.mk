@@ -25,7 +25,7 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/include $(LOCAL_PATH)/include/ImGui $(LOCAL_PA
 # linked. gui_only_stubs.cpp supplies inert host interfaces so the original menu
 # remains renderable as a standalone Android overlay.
 LOCAL_SRC_FILES := \
-    src/gui_only_main.cpp src/gui_only_stubs.cpp \
+    src/gui_only_main.cpp src/gui_only_stubs.cpp src/gui_only_input.cpp \
     src/audio.cpp src/theme.cpp src/hud.cpp src/widgets.cpp src/menu.cpp src/config.cpp \
     src/lang.cpp src/Android_draw/draw.cpp src/VidAvatar.cpp \
     src/third_party/tjpgd/tjpgd.c src/Blur/Blur.cpp \

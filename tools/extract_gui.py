@@ -41,6 +41,7 @@ FILES = [
     "include/cfg.h",
     "include/config.h",
     "include/hud.h",
+    "include/gui_only_input.h",
     "include/lang.h",
     "include/logfile.h",
     "include/main.h",
@@ -59,6 +60,7 @@ FILES = [
     # GUI implementation and rendering support.
     "src/gui_only_main.cpp",
     "src/gui_only_stubs.cpp",
+    "src/gui_only_input.cpp",
     "src/Android_draw/draw.cpp",
     "src/Blur/Blur.cpp",
     "src/Blur/Blur.h",

@@ -7,6 +7,7 @@
 #include "app_state.h"
 #include "overlay_geometry.h"
 #include "Blur/Blur.h"
+#include "gui_only_input.h"
 
 #include <atomic>
 #include <chrono>
@@ -43,6 +44,7 @@ int main() {
     Blur::Init();
     CfgWatchInit();
     AudioInit();
+    Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
     LoadTabIcons();
     ApplyTheme();
     RestoreLang();
@@ -56,6 +58,7 @@ int main() {
 
     while (main_thread_flag.load()) {
         g_frame_done.store(false);
+        gui_input::ApplyToImGui();
         drawBegin();
         RenderMenu();
         DrawToast(ImGui::GetIO().DeltaTime);
@@ -69,6 +72,7 @@ int main() {
     CfgWatchFree();
     AudioFree();
     Blur::Free();
+    Touch_Close();
     shutdown();
     return 0;
 }

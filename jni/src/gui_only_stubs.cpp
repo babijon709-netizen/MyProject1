@@ -11,6 +11,7 @@
 #include "game.h"
 #include "process.h"
 #include "viewmodel.h"
+#include "gui_only_input.h"
 
 #include <atomic>
 #include <cstddef>
@@ -141,9 +142,13 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() { return {}; }
 viewmodel::FpsUiInfo esp_viewmodel_fps_ui() { return {}; }
 void esp_viewmodel_reset(bool) {}
 
-bool Touch_Init(int, int, uint32_t, bool) { return false; }
-void UpdateScreenData(int, int, uint32_t) {}
-void Touch_Close() {}
+bool Touch_Init(int w, int h, uint32_t orientation, bool) {
+    return gui_input::Start(w, h, orientation);
+}
+void UpdateScreenData(int w, int h, uint32_t orientation) {
+    gui_input::UpdateScreen(w, h, orientation);
+}
+void Touch_Close() { gui_input::Stop(); }
 void Touch_Down(float, float) {}
 void Touch_Move(float, float) {}
 void Touch_Up() {}
