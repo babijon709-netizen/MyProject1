@@ -1,66 +1,274 @@
 дамп памяти: выход /storage/emulated/0/Download
-процесс com.catsbit.oxidesurvivalisland — pid 31751
-регионов в работе: 4721, образ libil2cpp.so 0x6cb3e9c000..0x6e0d7de000
-из них скрытых (без прав чтения, но читаемых): 1019
+процесс com.catsbit.oxidesurvivalisland — pid 10513
+регионов в работе: 4615, образ libil2cpp.so 0x6cc26bd000..0x6e0d190000
+из них скрытых (без прав чтения, но читаемых): 1044
    ?? заголовок без магии 0x12c000ac — мозаика v38+ не сошлась
    ?? заголовок без магии 0x12c000f4 — мозаика v38+ не сошлась
    ?? заголовок без магии 0x12c00aac — мозаика v38+ не сошлась
    ?? заголовок без магии 0x12c00ad4 — мозаика v38+ не сошлась
-   ?? заголовок без магии 0x12c00bcc — мозаика v38+ не сошлась
-   ?? заголовок без магии 0x12c00c2c — мозаика v38+ не сошлась
-   ?? заголовок без магии 0x12c00c54 — мозаика v38+ не сошлась
-   ?? заголовок без магии 0x12c00cd0 — мозаика v38+ не сошлась
+   ?? заголовок без магии 0x12c00c7c — мозаика v38+ не сошлась
+   ?? заголовок без магии 0x12c00cdc — мозаика v38+ не сошлась
+   ?? заголовок без магии 0x12c00d04 — мозаика v38+ не сошлась
    ?? заголовок без магии 0x12c00d80 — мозаика v38+ не сошлась
-   ?? заголовок без магии 0x12c00e04 — мозаика v38+ не сошлась (дальше не пишу)
+   ?? заголовок без магии 0x12c00e30 — мозаика v38+ не сошлась
+   ?? заголовок без магии 0x12c00eb4 — мозаика v38+ не сошлась (дальше не пишу)
   метка «mscorlib.dll» @0x32e7ec38 (регион 1, )
-  метка «mscorlib.dll» @0x32f13c38 (регион 1, )
-  строка найдена @0x6cd018ee77 (регион 29, )
-  строка найдена @0x6cd0551647 (регион 29, )
-  строка найдена @0x6d15df9450 (регион 42, )
-  строка найдена @0x6d1974f154 (регион 42, )
-  строка найдена @0x6d1974f17c (регион 42, )
-  строка найдена @0x6db0a65420 (регион 117, )
-  строка найдена @0x6db0a71c35 (регион 117, )
-  метка «Assembly-CSharp.dll» @0x6dd0eb6e80 (регион 119, )
-  метка «Assembly-CSharp.dll» @0x6dd13b6008 (регион 119, )
-  метка «mscorlib.dll» @0x6de0025e72 (регион 120, )
-  строка найдена @0x6de00b6398 (регион 120, )
-  строка найдена @0x6de00faa5d (регион 120, )
-  строка найдена @0x6de09b12f8 (регион 120, )
-  регион 322 (0x6ec0000000..0x6f00000000) не читается — пропускаю остаток
-  метка «mscorlib.dll» @0x6f999650c0 (регион 415, )
-  метка «mscorlib.dll» @0x6f999660f8 (регион 415, )
-  метка «mscorlib.dll» @0x6f99967130 (регион 415, )
-  метка «mscorlib.dll» @0x6f99968168 (регион 415, )
-  метка «mscorlib.dll» @0x6f999691a0 (регион 415, )
-  метка «mscorlib.dll» @0x6f9996a1d8 (регион 415, )
-  метка «mscorlib.dll» @0x6f9996b210 (регион 415, )
-  метка «mscorlib.dll» @0x6f9996c248 (регион 415, )
-  метка «mscorlib.dll» @0x6f9996d280 (регион 415, )
-  метка «mscorlib.dll» @0x6f9996e2b8 (регион 415, )
-  метка «mscorlib.dll» @0x6f9996f2f0 (регион 415, )
-  метка «mscorlib.dll» @0x70c5ab0bb2 (регион 492, )
-  метка «mscorlib.dll» @0x71a5bccb28 (регион 521, )
-  метка «mscorlib.dll» @0x71a5cd5e18 (регион 521, )
-  регион 958 (0x5ee7600000..0x5ee8602000) не читается — пропускаю остаток
-  регион 962 (0x5ee9200000..0x5eea202000) не читается — пропускаю остаток
-  регион 1030 (0x5eec000000..0x5eed001000) не читается — пропускаю остаток
-  регион 1119 (0x5eee400000..0x5eef401000) не читается — пропускаю остаток
-  регион 1319 (0x5ef3800000..0x5ef4801000) не читается — пропускаю остаток
-  регион 1374 (0x5ef5c00000..0x5ef6c01000) не читается — пропускаю остаток
-  метка «Assembly-CSharp.dll» @0x6cb6060446 (регион 2420, Nkwj6MHlL9cA==/com.catsbit.oxidesurvivalisland--2ATpjaT9y3d3-ZKjqki1Q==/lib/arm64/libil2cpp.so
-)
-  метка «mscorlib.dll» @0x6cb60b96b6 (регион 2420, Nkwj6MHlL9cA==/com.catsbit.oxidesurvivalisland--2ATpjaT9y3d3-ZKjqki1Q==/lib/arm64/libil2cpp.so
-)
-  метка «Assembly-CSharp.dll» @0x6cc4112446 (регион 2421, Nkwj6MHlL9cA==/com.catsbit.oxidesurvivalisland--2ATpjaT9y3d3-ZKjqki1Q==/lib/arm64/libil2cpp.so
-)
-  метка «mscorlib.dll» @0x6cc416b6b6 (регион 2421, Nkwj6MHlL9cA==/com.catsbit.oxidesurvivalisland--2ATpjaT9y3d3-ZKjqki1Q==/lib/arm64/libil2cpp.so
-)
-  метка «Assembly-CSharp.dll» @0x6e01686446 (регион 2427, Nkwj6MHlL9cA==/com.catsbit.oxidesurvivalisland--2ATpjaT9y3d3-ZKjqki1Q==/lib/arm64/libil2cpp.so
-)
-  метка «mscorlib.dll» @0x6e016df6b6 (регион 2427, Nkwj6MHlL9cA==/com.catsbit.oxidesurvivalisland--2ATpjaT9y3d3-ZKjqki1Q==/lib/arm64/libil2cpp.so
-)
-  метка «mscorlib.dll» @0x6e289e1636 (регион 2433, KNkwj6MHlL9cA==/com.catsbit.oxidesurvivalisland--2ATpjaT9y3d3-ZKjqki1Q==/lib/arm64/libunity.so
-)
-  метка «mscorlib.dll» @0x6e43795636 (регион 2436, KNkwj6MHlL9cA==/com.catsbit.oxidesurvivalisland--2ATpjaT9y3d3-ZKjqki1Q==/lib/arm64/libunity.so
-)
+  строка найдена @0x6ce01677b7 (регион 41, )
+  строка найдена @0x6ce0551637 (регион 41, )
+  строка найдена @0x6d137327c0 (регион 44, )
+  строка найдена @0x6d15961494 (регион 44, )
+  строка найдена @0x6d159614bc (регион 44, )
+  строка найдена @0x6db0a65420 (регион 114, )
+  строка найдена @0x6db0a71c35 (регион 114, )
+  метка «Assembly-CSharp.dll» @0x6dd0eb6e80 (регион 116, )
+  метка «Assembly-CSharp.dll» @0x6dd13b6008 (регион 116, )
+  метка «mscorlib.dll» @0x6de0025e72 (регион 117, )
+  строка найдена @0x6de00b6398 (регион 117, )
+  строка найдена @0x6de00faa5d (регион 117, )
+  строка найдена @0x6de0bb77d8 (регион 117, )
+  метка «mscorlib.dll» @0x6e200ce170 (регион 137, )
+  метка «mscorlib.dll» @0x6e200cf1a8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d01e0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d1218 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d2250 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d3288 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d42c0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d52f8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d6330 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d7368 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d83a0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200d93d8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200da410 (регион 137, )
+  метка «mscorlib.dll» @0x6e200db448 (регион 137, )
+  метка «mscorlib.dll» @0x6e200dc480 (регион 137, )
+  метка «mscorlib.dll» @0x6e200dd4b8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200de4f0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200df528 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e0560 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e1598 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e25d0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e3608 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e4640 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e5678 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e66b0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e76e8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e8720 (регион 137, )
+  метка «mscorlib.dll» @0x6e200e9758 (регион 137, )
+  метка «mscorlib.dll» @0x6e200ea790 (регион 137, )
+  метка «mscorlib.dll» @0x6e200eb7c8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200ec800 (регион 137, )
+  метка «mscorlib.dll» @0x6e200ed838 (регион 137, )
+  метка «mscorlib.dll» @0x6e200ee870 (регион 137, )
+  метка «mscorlib.dll» @0x6e200ef8a8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f08e0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f1918 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f2950 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f3988 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f49c0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f59f8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f6a30 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f7a68 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f8aa0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200f9ad8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200fab10 (регион 137, )
+  метка «mscorlib.dll» @0x6e200fbb48 (регион 137, )
+  метка «mscorlib.dll» @0x6e200fcb80 (регион 137, )
+  метка «mscorlib.dll» @0x6e200fdbb8 (регион 137, )
+  метка «mscorlib.dll» @0x6e200febf0 (регион 137, )
+  метка «mscorlib.dll» @0x6e200ffc28 (регион 137, )
+  метка «mscorlib.dll» @0x6e20100c60 (регион 137, )
+  метка «mscorlib.dll» @0x6e20101c98 (регион 137, )
+  метка «mscorlib.dll» @0x6e20102cd0 (регион 137, )
+  метка «mscorlib.dll» @0x6e20103d08 (регион 137, )
+  метка «mscorlib.dll» @0x6e20104d40 (регион 137, )
+  метка «mscorlib.dll» @0x6e20105d78 (регион 137, )
+  метка «mscorlib.dll» @0x6e20106db0 (регион 137, )
+  метка «mscorlib.dll» @0x6e20107de8 (регион 137, )
+  метка «mscorlib.dll» @0x6e20108e20 (регион 137, )
+  метка «mscorlib.dll» @0x6e20109e58 (регион 137, )
+бюджет времени (120 с) исчерпан — скан окончен досрочно, блоб ищу по якорям/меткам
+просмотрено 1794 МБ за 120.0 с, строк: 10, шапок RVM: 0, меток: 64, кандидатов: 0
+   !! маркерный путь: 64 неудачи подряд — остальные метки не гоняю (похоже на декой-заливку)
+  блок @0x6ce01677b7 — табличных имён 11 из 43
+  блок @0x6ce0551637 — табличных имён 11 из 43
+  блок @0x6d137327c0 — табличных имён 6 из 43
+  блок @0x6d15961494 — табличных имён 3 из 43
+  блок @0x6d159614bc — табличных имён 3 из 43
+  блок @0x6db0a65420 — табличных имён 31 из 43
+  блок @0x6db0a71c35 — табличных имён 31 из 43
+  блок @0x6de00b6398 — табличных имён 35 из 43
+  блок @0x6de00faa5d — табличных имён 35 из 43
+  блок @0x6de0bb77d8 — табличных имён 19 из 43
+выбран блок @0x6de00b6398 — окно 0x6de0000000..0x6de08b6398 (8 МБ), имён 35 из 43 (старый режим)
+шапки метадаты не найдено ни одним путём (магия, мозаика, метки, якоря) — метаданные целиком зашифрованы или не загружены; снимаю старое окно
+DIAG runt @0x6de0000000+0x000: 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x010: f0 04 00 e0 6d 00 00 00 d0 86 f8 32 6e 00 00 00 
+DIAG runt @0x6de0000000+0x020: 60 01 00 d0 6d 00 00 00 70 47 52 7b 6e 00 00 00 
+DIAG runt @0x6de0000000+0x030: d8 fd e2 32 6e 00 00 00 10 c0 00 e0 6d 00 00 00 
+DIAG runt @0x6de0000000+0x040: 10 00 01 e0 6d 00 00 00 50 00 00 e0 6d 00 00 00 
+DIAG runt @0x6de0000000+0x050: 88 01 e3 32 6e 00 00 00 90 80 f4 55 71 00 00 b4 
+DIAG runt @0x6de0000000+0x060: a0 80 f4 55 71 00 00 b4 a0 80 f4 55 71 00 00 b4 
+DIAG runt @0x6de0000000+0x070: 00 01 02 02 01 01 02 02 01 02 03 03 01 02 02 02 
+DIAG runt @0x6de0000000+0x080: 02 01 02 02 6d 00 00 00 10 f6 3a 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x090: f0 ed 9d 80 6d 00 00 00 4d 00 07 00 08 00 01 00 
+DIAG runt @0x6de0000000+0x0a0: 24 00 00 00 00 00 00 00 48 00 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x0b0: 02 00 00 00 4b 00 00 00 57 61 74 65 72 42 6c 6f 
+DIAG runt @0x6de0000000+0x0c0: 63 6b 5f 35 30 6d 5f 4c 4f 44 32 00 6d 00 00 00 
+DIAG runt @0x6de0000000+0x0d0: 14 ae 87 bf 99 99 99 be 70 3d 8a bf e1 7a 94 be 
+DIAG runt @0x6de0000000+0x0e0: b8 1e 85 bf 7b 14 ae be 14 ae 87 bf c2 f5 a8 be 
+DIAG runt @0x6de0000000+0x0f0: 70 0e 00 a0 6d 00 00 00 f8 01 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x100: 2a 00 00 00 00 00 55 00 f8 01 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x110: e0 3f 00 d0 6d 00 00 00 4d 00 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x120: 27 00 00 00 00 00 00 00 80 00 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x130: 40 4c 00 d0 6d 00 00 00 41 00 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x140: 6d 01 00 00 00 00 00 00 00 08 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x150: a0 6c 02 d0 6d 00 00 00 41 00 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x160: 24 00 00 00 00 00 00 00 80 00 00 00 00 00 00 00 
+DIAG runt @0x6de0000000+0x170: f0 a1 22 d0 6d 00 00 00 4d 00 00 00 
+  ТАБЛИЦА ТИПОВ v2: layout S16, 0x6cd04aa380, run 304, dp 0..31696 (вперёд 304 + назад 0)
+  ТАБЛИЦА ТИПОВ v2: layout S16, 0x6cde55c380, run 304, dp 0..31696 (вперёд 304 + назад 0)
+таблица типов v2: просмотрено 24568 МБ за 59.6 с, найдено 2
+  types tail[+0]: type=11 dp=9683
+  types tail[+1]: type=11 dp=9683
+  types tail[+2]: type=11 dp=9683
+  types tail[+3]: type=11 dp=10423
+  types tail[+4]: type=11 dp=10423
+  types tail[+5]: type=11 dp=10423
+  types tail[+6]: type=12 dp=26184
+  types tail[+7]: type=12 dp=26184
+  types tail[+8]: type=12 dp=26189
+  types tail[+9]: type=12 dp=26180
+  types tail[+10]: type=11 dp=20904
+  types tail[+11]: type=11 dp=20904
+  types tail[+12]: type=11 dp=20904
+  types tail[+13]: type=11 dp=20905
+  types tail[+14]: type=11 dp=20905
+  types tail[+15]: type=11 dp=20905
+  types tail[+16]: type=11 dp=20906
+  types tail[+17]: type=11 dp=20906
+  types tail[+18]: type=11 dp=20906
+  types tail[+19]: type=12 dp=20882
+  types tail[+20]: type=12 dp=254
+  types tail[+21]: type=12 dp=254
+  types tail[+22]: type=12 dp=8762
+  types tail[+23]: type=12 dp=8762
+  types tail[+24]: type=12 dp=8770
+  types tail[+25]: type=12 dp=8770
+  types tail[+26]: type=12 dp=8772
+  types tail[+27]: type=12 dp=21116
+  types tail[+28]: type=12 dp=229
+  types tail[+29]: type=12 dp=228
+  types tail[+30]: type=12 dp=29308
+  types tail[+31]: type=12 dp=29276
+  types tail[+32]: type=12 dp=29310
+  types tail[+33]: type=11 dp=29309
+  types tail[+34]: type=11 dp=29309
+  types tail[+35]: type=11 dp=29309
+  types tail[+36]: type=12 dp=29312
+  types tail[+37]: type=11 dp=29311
+  types tail[+38]: type=11 dp=29311
+  types tail[+39]: type=11 dp=29311
+  types tail[+40]: type=12 dp=29314
+  types tail[+41]: type=11 dp=29313
+  types tail[+42]: type=11 dp=29313
+  types tail[+43]: type=11 dp=29313
+  types tail[+44]: type=12 dp=273
+  types tail[+45]: type=12 dp=9829
+  types tail[+46]: type=12 dp=9829
+  types tail[+47]: type=12 dp=9829
+  types tail[+48]: type=12 dp=10535
+  types tail[+49]: type=12 dp=9833
+  types tail[+50]: type=12 dp=9833
+  types tail[+51]: type=12 dp=9833
+  types tail[+52]: type=12 dp=214
+  types tail[+53]: type=12 dp=264
+  types tail[+54]: type=12 dp=217
+  types tail[+55]: type=12 dp=215
+  types tail[+56]: type=12 dp=253
+  types tail[+57]: type=12 dp=272
+  types tail[+58]: type=12 dp=15633
+  types tail[+59]: type=11 dp=14640
+  types tail[+60]: type=11 dp=14640
+  types tail[+61]: type=12 dp=14639
+  types tail[+62]: type=11 dp=14641
+  types tail[+63]: type=11 dp=14641
+  /storage/emulated/0/Download/benzhack_types_0.bin — layout S16, массив 0x6cd04aa380, run 304, dp 0..31696, префикс 0, хвост 2048, всего 2352
+  types tail[+0]: type=11 dp=9683
+  types tail[+1]: type=11 dp=9683
+  types tail[+2]: type=11 dp=9683
+  types tail[+3]: type=11 dp=10423
+  types tail[+4]: type=11 dp=10423
+  types tail[+5]: type=11 dp=10423
+  types tail[+6]: type=12 dp=26184
+  types tail[+7]: type=12 dp=26184
+  types tail[+8]: type=12 dp=26189
+  types tail[+9]: type=12 dp=26180
+  types tail[+10]: type=11 dp=20904
+  types tail[+11]: type=11 dp=20904
+  types tail[+12]: type=11 dp=20904
+  types tail[+13]: type=11 dp=20905
+  types tail[+14]: type=11 dp=20905
+  types tail[+15]: type=11 dp=20905
+  types tail[+16]: type=11 dp=20906
+  types tail[+17]: type=11 dp=20906
+  types tail[+18]: type=11 dp=20906
+  types tail[+19]: type=12 dp=20882
+  types tail[+20]: type=12 dp=254
+  types tail[+21]: type=12 dp=254
+  types tail[+22]: type=12 dp=8762
+  types tail[+23]: type=12 dp=8762
+  types tail[+24]: type=12 dp=8770
+  types tail[+25]: type=12 dp=8770
+  types tail[+26]: type=12 dp=8772
+  types tail[+27]: type=12 dp=21116
+  types tail[+28]: type=12 dp=229
+  types tail[+29]: type=12 dp=228
+  types tail[+30]: type=12 dp=29308
+  types tail[+31]: type=12 dp=29276
+  types tail[+32]: type=12 dp=29310
+  types tail[+33]: type=11 dp=29309
+  types tail[+34]: type=11 dp=29309
+  types tail[+35]: type=11 dp=29309
+  types tail[+36]: type=12 dp=29312
+  types tail[+37]: type=11 dp=29311
+  types tail[+38]: type=11 dp=29311
+  types tail[+39]: type=11 dp=29311
+  types tail[+40]: type=12 dp=29314
+  types tail[+41]: type=11 dp=29313
+  types tail[+42]: type=11 dp=29313
+  types tail[+43]: type=11 dp=29313
+  types tail[+44]: type=12 dp=273
+  types tail[+45]: type=12 dp=9829
+  types tail[+46]: type=12 dp=9829
+  types tail[+47]: type=12 dp=9829
+  types tail[+48]: type=12 dp=10535
+  types tail[+49]: type=12 dp=9833
+  types tail[+50]: type=12 dp=9833
+  types tail[+51]: type=12 dp=9833
+  types tail[+52]: type=12 dp=214
+  types tail[+53]: type=12 dp=264
+  types tail[+54]: type=12 dp=217
+  types tail[+55]: type=12 dp=215
+  types tail[+56]: type=12 dp=253
+  types tail[+57]: type=12 dp=272
+  types tail[+58]: type=12 dp=15633
+  types tail[+59]: type=11 dp=14640
+  types tail[+60]: type=11 dp=14640
+  types tail[+61]: type=12 dp=14639
+  types tail[+62]: type=11 dp=14641
+  types tail[+63]: type=11 dp=14641
+  /storage/emulated/0/Download/benzhack_types_1.bin — layout S16, массив 0x6cde55c380, run 304, dp 0..31696, префикс 0, хвост 2048, всего 2352
+указателей сочтено: 4096 МБ за 3.2 с
+пишу дампы:
+  benzhack_meta.bin — 0x6de0000000..0x6de08b6398 (8 МБ)
+  benzhack_ptr1.bin — 0x6d10000000..0x6d10040000 (0 МБ)
+  benzhack_ptr2.bin — 0x6d800e0200..0x6d80120200 (0 МБ)
+  benzhack_ptr3.bin — 0x6dd0000000..0x6dd0040000 (0 МБ)
+  benzhack_hidden1.bin — 0x72795000..0x72995000 (2 МБ)
+  benzhack_hidden2.bin — 0xebad6000..0xebad6000 (0 МБ)
+  benzhack_hidden3.bin — 0x6c60800000..0x6c60a00000 (2 МБ)
+  пишущиеся сегменты образа 0x6e0c8f7000..0x6e0cf31000 (6 МБ)
+  benzhack_imagedata.bin — 0x6e0c8f7000..0x6e0cf31000 (6 МБ)
+всего записано 19 МБ
+опись: /storage/emulated/0/Download/benzhack_dump_index.txt
+готово
