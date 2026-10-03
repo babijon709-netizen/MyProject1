@@ -1,0 +1,405 @@
+Assemblies (201):
+  Assembly-CSharp  version=n  token=0x20000001
+  mscorlib  version=n  token=0x20000001
+  UnityEngine.UIElementsModule  version=n  token=0x20000001
+  Unity.RenderPipelines.Core.Runtime  version=n  token=0x20000001
+  UnityEngine.CoreModule  version=n  token=0x20000001
+  Unity.InputSystem  version=n  token=0x20000001
+  System.Xml  version=n  token=0x20000001
+  System  version=n  token=0x20000001
+  Mirror.BouncyCastle.Cryptography  version=n  token=0x20000001
+  Unity.RenderPipelines.Universal.Runtime  version=n  token=0x20000001
+  UniTask.Linq  version=n  token=0x20000001
+  Newtonsoft.Json  version=n  token=0x20000001
+  Assembly-CSharp-firstpass  version=n  token=0x20000001
+  System.Data  version=n  token=0x20000001
+  UniTask  version=n  token=0x20000001
+  Zenject  version=n  token=0x20000001
+  MeshBakerCore  version=n  token=0x20000001
+  Unity.TextMeshPro  version=n  token=0x20000001
+  System.Core  version=n  token=0x20000001
+  Google.Protobuf  version=n  token=0x20000001
+  DissonanceVoip  version=n  token=0x20000001
+  Unity.Localization  version=n  token=0x20000001
+  UnityEngine.TextCoreTextEngineModule  version=n  token=0x20000001
+  UnityEngine.UI  version=n  token=0x20000001
+  Mirror.Examples  version=n  token=0x20000001
+  Centrifugal.Centrifuge  version=n  token=0x20000001
+  Mirror  version=n  token=0x20000001
+  Unity.RenderPipelines.GPUDriven.Runtime  version=n  token=0x20000001
+  Mirror.Components  version=n  token=0x20000001
+  DOTween  version=n  token=0x20000001
+  Discord.Sdk  version=n  token=0x20000001
+  UnityEngine.IMGUIModule  version=n  token=0x20000001
+  Unity.ResourceManager  version=n  token=0x20000001
+  Facebook.Unity  version=n  token=0x20000001
+  UnityEngine.Purchasing.Stores  version=n  token=0x20000001
+  Oxide.Utils  version=n  token=0x20000001
+  Drawing  version=n  token=0x20000001
+  Mono.Security  version=n  token=0x20000001
+  Unity.Addressables  version=n  token=0x20000001
+  UniWebView-CSharp  version=n  token=0x20000001
+  AlmostEngine  version=n  token=0x20000001
+  UnityEngine  version=n  token=0x20000001
+  UnityEngine.AndroidJNIModule  version=n  token=0x20000001
+  Unity.Collections  version=n  token=0x20000001
+  Coffee.UIEffect  version=n  token=0x20000001
+  Whinarn.UnityMeshSimplifier.Runtime  version=n  token=0x20000001
+  Mirror.Transports  version=n  token=0x20000001
+  UnityEngine.PropertiesModule  version=n  token=0x20000001
+  UnityEngine.AnimationModule  version=n  token=0x20000001
+  UnityEngine.Physics2DModule  version=n  token=0x20000001
+  UnityEngine.PhysicsModule  version=n  token=0x20000001
+  OxideApi.Shared  version=n  token=0x20000001
+  System.Net.Http  version=n  token=0x20000001
+  UnityEngine.ParticleSystemModule  version=n  token=0x20000001
+  Tapjoy.Plugin.Runtime  version=n  token=0x20000001
+  IngameDebugConsole.Runtime  version=n  token=0x20000001
+  WorldStreaming  version=n  token=0x20000001
+  UnityEngine.TerrainModule  version=n  token=0x20000001
+  Firebase.App  version=n  token=0x20000001
+  UnityEngine.AudioModule  version=n  token=0x20000001
+  Coffee.UIParticle  version=n  token=0x20000001
+  AppsFlyer  version=n  token=0x20000001
+  Unity.Services.Analytics  version=n  token=0x20000001
+  SimpleWebTransport  version=n  token=0x20000001
+  System.Drawing  version=n  token=0x20000001
+  System.Text.Json  version=n  token=0x20000001
+  UnityEngine.AIModule  version=n  token=0x20000001
+  DOTween.Modules  version=n  token=0x20000001
+  UnityEngine.UnityWebRequestModule  version=n  token=0x20000001
+  Unity.Mathematics  version=n  token=0x20000001
+  MaxSdk.Scripts  version=n  token=0x20000001
+  Unity.Splines  version=n  token=0x20000001
+  UnityEngine.InputForUIModule  version=n  token=0x20000001
+  Oxide.Trains.Logic  version=n  token=0x20000001
+  System.Numerics  version=n  token=0x20000001
+  UnityEngine.HierarchyCoreModule  version=n  token=0x20000001
+  UnityEngine.UIModule  version=n  token=0x20000001
+  kcp2k  version=n  token=0x20000001
+  System.Xml.Linq  version=n  token=0x20000001
+  UnityEngine.Purchasing  version=n  token=0x20000001
+  WaterSystem  version=n  token=0x20000001
+  Unity.Services.Core.Internal  version=n  token=0x20000001
+  UnityEngine.TextCoreFontEngineModule  version=n  token=0x20000001
+  com.theymes.sdk  version=n  token=0x20000001
+  Oxide.Storage  version=n  token=0x20000001
+  Unity.Burst  version=n  token=0x20000001
+  Mirror.Authenticators  version=n  token=0x20000001
+  XNode  version=n  token=0x20000001
+  OccaSoftware.AutoExposure.Runtime  version=n  token=0x20000001
+  UnityEngine.Purchasing.Security  version=n  token=0x20000001
+  Oxide.Auth  version=n  token=0x20000001
+  Firebase.Crashlytics  version=n  token=0x20000001
+  Oxide.Benchmark.Client  version=n  token=0x20000001
+  Oxide.LodStreaming  version=n  token=0x20000001
+  UnityEngine.InputLegacyModule  version=n  token=0x20000001
+  Firebase.Messaging  version=n  token=0x20000001
+  Firebase.Platform  version=n  token=0x20000001
+  PlayerCustomization.Share  version=n  token=0x20000001
+  Unity.Notifications.Android  version=n  token=0x20000001
+  Tapjoy.Plugin.Sample  version=n  token=0x20000001
+  Unity.AI.Navigation  version=n  token=0x20000001
+  UnityEngine.UnityAnalyticsCommonModule  version=n  token=0x20000001
+  NavMeshComponentsExamples  version=n  token=0x20000001
+  Oxide.Benchmark  version=n  token=0x20000001
+  Oxide.GroundDefense  version=n  token=0x20000001
+  Telepathy  version=n  token=0x20000001
+  Zenject-usage  version=n  token=0x20000001
+  UnityEngine.VFXModule  version=n  token=0x20000001
+  RTLTMPro  version=n  token=0x20000001
+  UnityEngine.SharedInternalsModule  version=n  token=0x20000001
+  UnityEngine.TextRenderingModule  version=n  token=0x20000001
+  ServersManaging.Common  version=n  token=0x20000001
+  Google.Play.AppUpdate  version=n  token=0x20000001
+  Oxide.Ads  version=n  token=0x20000001
+  System.IO.Compression  version=n  token=0x20000001
+  UnityEngine.AssetBundleModule  version=n  token=0x20000001
+  UnityEngine.DirectorModule  version=n  token=0x20000001
+  UnityEngine.GameCenterModule  version=n  token=0x20000001
+  UnityEngine.UnityAnalyticsModule  version=n  token=0x20000001
+  NavMeshComponents  version=n  token=0x20000001
+  Firebase.Analytics  version=n  token=0x20000001
+  Oxide.DeviceAttestation  version=n  token=0x20000001
+  UnityEngine.UnityWebRequestAssetBundleModule  version=n  token=0x20000001
+  Firebase.RemoteConfig  version=n  token=0x20000001
+  Microsoft.Extensions.Logging.Abstractions  version=n  token=0x20000001
+  UnityEngine.InputModule  version=n  token=0x20000001
+  UnityEngine.JSONSerializeModule  version=n  token=0x20000001
+  Oxide.Railways  version=n  token=0x20000001
+  UnityEngine.ImageConversionModule  version=n  token=0x20000001
+  UnityEngine.UnityWebRequestTextureModule  version=n  token=0x20000001
+  Oxide.LocalStreaming  version=n  token=0x20000001
+  UnityEngine.VehiclesModule  version=n  token=0x20000001
+  Unity.Services.Core.Registration  version=n  token=0x20000001
+  UnityEngine.StreamingModule  version=n  token=0x20000001
+  Unity.InputSystem.ForUI  version=n  token=0x20000001
+  UnityEngine.ScreenCaptureModule  version=n  token=0x20000001
+  UnityEngine.TerrainPhysicsModule  version=n  token=0x20000001
+  UnityEngine.TilemapModule  version=n  token=0x20000001
+  Google.Play.Common  version=n  token=0x20000001
+  UnityEngine.GridModule  version=n  token=0x20000001
+  UnityEngine.SpriteShapeModule  version=n  token=0x20000001
+  Oxide.Spatial  version=n  token=0x20000001
+  UniTask.TextMeshPro  version=n  token=0x20000001
+  UniTask.Addressables  version=n  token=0x20000001
+  Oxide.Crafting.Logic  version=n  token=0x20000001
+  Google.Play.Integrity  version=n  token=0x20000001
+  Oxide.Notifications.Logic  version=n  token=0x20000001
+  UniTask.DOTween  version=n  token=0x20000001
+  manefunction.dotween-ui-controller  version=n  token=0x20000001
+  Logs.Shared  version=n  token=0x20000001
+  Oxide.ItemVisuals  version=n  token=0x20000001
+  WebServices.Responses  version=n  token=0x20000001
+  Google.Play.Core  version=n  token=0x20000001
+  Purchasing.Common  version=n  token=0x20000001
+  Unity.Services.Core.Configuration  version=n  token=0x20000001
+  Unity.Services.Core.Scheduler  version=n  token=0x20000001
+  Facebook.Unity.Settings  version=n  token=0x20000001
+  Oxide.Features.Rendering.PostProcessing  version=n  token=0x20000001
+  PlayerCustomization.Client  version=n  token=0x20000001
+  Unity.Services.Core  version=n  token=0x20000001
+  Unity.UnifiedRayTracing.Runtime  version=n  token=0x20000001
+  Oxide.LogAndReport  version=n  token=0x20000001
+  OxideApi.Client  version=n  token=0x20000001
+  SeppePeelman.EditorTools.SurfaceAlignTool  version=n  token=0x20000001
+  WebServices.Shared  version=n  token=0x20000001
+  Unity.RenderPipeline.Universal.ShaderLibrary  version=n  token=0x20000001
+  Unity.Services.Core.Device  version=n  token=0x20000001
+  Google.Play.Review  version=n  token=0x20000001
+  GUPS.Obfuscator  version=n  token=0x20000001
+  System.Runtime.Serialization  version=n  token=0x20000001
+  Unity.MemoryProfiler  version=n  token=0x20000001
+  UnityEngine.Purchasing.SecurityCore  version=n  token=0x20000001
+  OccaSoftware.Exposure.Demo  version=n  token=0x20000001
+  Oxide.Lobby.Promo.Logic  version=n  token=0x20000001
+  Oxide.Lobby  version=n  token=0x20000001
+  Oxide.Shop.Skins.Culling  version=n  token=0x20000001
+  System.Runtime.CompilerServices.Unsafe  version=n  token=0x20000001
+  UnityEngine.Purchasing.WinRTCore  version=n  token=0x20000001
+  UnityEngine.UnityConsentModule  version=n  token=0x20000001
+  OccaSoftware.Exposure.Shaders  version=n  token=0x20000001
+  System.Configuration  version=n  token=0x20000001
+  System.Globalization  version=n  token=0x20000001
+  Unity.Services.Core.Telemetry  version=n  token=0x20000001
+  UnityEngine.MultiplayerModule  version=n  token=0x20000001
+  AppleAuth  version=n  token=0x20000001
+  Oxide.Cheats.Core  version=n  token=0x20000001
+  Unity.RenderPipelines.Core.Runtime.Shared  version=n  token=0x20000001
+  UnityEngine.IdentifiersModule  version=n  token=0x20000001
+  UnityEngine.Purchasing.AppleCore  version=n  token=0x20000001
+  UnityEngine.Purchasing.AppleMacosStub  version=n  token=0x20000001
+  UnityEngine.Purchasing.AppleStub  version=n  token=0x20000001
+  Facebook.Unity.Android  version=n  token=0x20000001
+  Unity.Collections.LowLevel.ILSupport  version=n  token=0x20000001
+  Unity.InternalAPIEngineBridge.004  version=n  token=0x20000001
+  Unity.Services.Core.Environments.Internal  version=n  token=0x20000001
+  Unity.Services.Core.Threading  version=n  token=0x20000001
+  UnityEngine.Purchasing.WinRTStub  version=n  token=0x20000001
+  Coffee.UIEffect.R  version=n  token=0x20000001
+  Coffee.UIParticle.R  version=n  token=0x20000001
+  Unity.Burst.Unsafe  version=n  token=0x20000001
+  __Generated  version=n  token=0x20000000
+
+Images (201):
+  Assembly-CSharp.dll  types=0..10916 (10917)  token=0x1
+  mscorlib.dll  types=10917..12652 (1736)  token=0x1
+  UnityEngine.UIElementsModule.dll  types=12653..14314 (1662)  token=0x1
+  Unity.RenderPipelines.Core.Runtime.dll  types=14315..15092 (778)  token=0x1
+  UnityEngine.CoreModule.dll  types=15093..16149 (1057)  token=0x1
+  Unity.InputSystem.dll  types=16150..16811 (662)  token=0x1
+  System.Xml.dll  types=16812..17480 (669)  token=0x1
+  System.dll  types=17481..18353 (873)  token=0x1
+  Mirror.BouncyCastle.Cryptography.dll  types=18354..19034 (681)  token=0x1
+  Unity.RenderPipelines.Universal.Runtime.dll  types=19035..19593 (559)  token=0x1
+  UniTask.Linq.dll  types=19594..20163 (570)  token=0x1
+  Newtonsoft.Json.dll  types=20164..20659 (496)  token=0x1
+  Assembly-CSharp-firstpass.dll  types=20660..20921 (262)  token=0x1
+  System.Data.dll  types=20922..21161 (240)  token=0x1
+  UniTask.dll  types=21162..21767 (606)  token=0x1
+  Zenject.dll  types=21768..22654 (887)  token=0x1
+  MeshBakerCore.dll  types=22655..22979 (325)  token=0x1
+  Unity.TextMeshPro.dll  types=22980..23176 (197)  token=0x1
+  System.Core.dll  types=23177..23842 (666)  token=0x1
+  Google.Protobuf.dll  types=23843..24125 (283)  token=0x1
+  DissonanceVoip.dll  types=24126..24412 (287)  token=0x1
+  Unity.Localization.dll  types=24413..24799 (387)  token=0x1
+  UnityEngine.TextCoreTextEngineModule.dll  types=24800..24916 (117)  token=0x1
+  UnityEngine.UI.dll  types=24917..25125 (209)  token=0x1
+  Mirror.Examples.dll  types=25126..25362 (237)  token=0x1
+  Centrifugal.Centrifuge.dll  types=25363..25541 (179)  token=0x1
+  Mirror.dll  types=25542..25720 (179)  token=0x1
+  Unity.RenderPipelines.GPUDriven.Runtime.dll  types=25721..25947 (227)  token=0x1
+  Mirror.Components.dll  types=25948..26029 (82)  token=0x1
+  DOTween.dll  types=26030..26231 (202)  token=0x1
+  Discord.Sdk.dll  types=26232..26496 (265)  token=0x1
+  UnityEngine.IMGUIModule.dll  types=26497..26555 (59)  token=0x1
+  Unity.ResourceManager.dll  types=26556..26701 (146)  token=0x1
+  Facebook.Unity.dll  types=26702..26894 (193)  token=0x1
+  UnityEngine.Purchasing.Stores.dll  types=26895..27140 (246)  token=0x1
+  Oxide.Utils.dll  types=27141..27332 (192)  token=0x1
+  Drawing.dll  types=27333..27435 (103)  token=0x1
+  Mono.Security.dll  types=27436..27520 (85)  token=0x1
+  Unity.Addressables.dll  types=27521..27626 (106)  token=0x1
+  UniWebView-CSharp.dll  types=27627..27737 (111)  token=0x1
+  AlmostEngine.dll  types=27738..27852 (115)  token=0x1
+  UnityEngine.dll  types=27853..27853 (1)  token=0x1
+  UnityEngine.AndroidJNIModule.dll  types=27854..27903 (50)  token=0x1
+  Unity.Collections.dll  types=27904..28068 (165)  token=0x1
+  Coffee.UIEffect.dll  types=28069..28138 (70)  token=0x1
+  Whinarn.UnityMeshSimplifier.Runtime.dll  types=28139..28177 (39)  token=0x1
+  Mirror.Transports.dll  types=28178..28257 (80)  token=0x1
+  UnityEngine.PropertiesModule.dll  types=28258..28424 (167)  token=0x1
+  UnityEngine.AnimationModule.dll  types=28425..28481 (57)  token=0x1
+  UnityEngine.Physics2DModule.dll  types=28482..28588 (107)  token=0x1
+  UnityEngine.PhysicsModule.dll  types=28589..28640 (52)  token=0x1
+  OxideApi.Shared.dll  types=28641..28755 (115)  token=0x1
+  System.Net.Http.dll  types=28756..28836 (81)  token=0x1
+  UnityEngine.ParticleSystemModule.dll  types=28837..28906 (70)  token=0x1
+  Tapjoy.Plugin.Runtime.dll  types=28907..28994 (88)  token=0x1
+  IngameDebugConsole.Runtime.dll  types=28995..29021 (27)  token=0x1
+  WorldStreaming.dll  types=29022..29093 (72)  token=0x1
+  UnityEngine.TerrainModule.dll  types=29094..29119 (26)  token=0x1
+  Firebase.App.dll  types=29120..29168 (49)  token=0x1
+  UnityEngine.AudioModule.dll  types=29169..29225 (57)  token=0x1
+  Coffee.UIParticle.dll  types=29226..29271 (46)  token=0x1
+  AppsFlyer.dll  types=29272..29342 (71)  token=0x1
+  Unity.Services.Analytics.dll  types=29343..29403 (61)  token=0x1
+  SimpleWebTransport.dll  types=29404..29453 (50)  token=0x1
+  System.Drawing.dll  types=29454..29464 (11)  token=0x1
+  System.Text.Json.dll  types=29465..29472 (8)  token=0x1
+  UnityEngine.AIModule.dll  types=29473..29497 (25)  token=0x1
+  DOTween.Modules.dll  types=29498..29594 (97)  token=0x1
+  UnityEngine.UnityWebRequestModule.dll  types=29595..29614 (20)  token=0x1
+  Unity.Mathematics.dll  types=29615..29648 (34)  token=0x1
+  MaxSdk.Scripts.dll  types=29649..29687 (39)  token=0x1
+  Unity.Splines.dll  types=29688..29727 (40)  token=0x1
+  UnityEngine.InputForUIModule.dll  types=29728..29775 (48)  token=0x1
+  Oxide.Trains.Logic.dll  types=29776..29803 (28)  token=0x1
+  System.Numerics.dll  types=29804..29816 (13)  token=0x1
+  UnityEngine.HierarchyCoreModule.dll  types=29817..29863 (47)  token=0x1
+  UnityEngine.UIModule.dll  types=29864..29875 (12)  token=0x1
+  kcp2k.dll  types=29876..29903 (28)  token=0x1
+  System.Xml.Linq.dll  types=29904..29942 (39)  token=0x1
+  UnityEngine.Purchasing.dll  types=29943..30018 (76)  token=0x1
+  WaterSystem.dll  types=30019..30051 (33)  token=0x1
+  Unity.Services.Core.Internal.dll  types=30052..30117 (66)  token=0x1
+  UnityEngine.TextCoreFontEngineModule.dll  types=30118..30142 (25)  token=0x1
+  com.theymes.sdk.dll  types=30143..30170 (28)  token=0x1
+  Oxide.Storage.dll  types=30171..30206 (36)  token=0x1
+  Unity.Burst.dll  types=30207..30252 (46)  token=0x1
+  Mirror.Authenticators.dll  types=30253..30268 (16)  token=0x1
+  XNode.dll  types=30269..30304 (36)  token=0x1
+  OccaSoftware.AutoExposure.Runtime.dll  types=30305..30332 (28)  token=0x1
+  UnityEngine.Purchasing.Security.dll  types=30333..30353 (21)  token=0x1
+  Oxide.Auth.dll  types=30354..30399 (46)  token=0x1
+  Firebase.Crashlytics.dll  types=30400..30426 (27)  token=0x1
+  Oxide.Benchmark.Client.dll  types=30427..30453 (27)  token=0x1
+  Oxide.LodStreaming.dll  types=30454..30474 (21)  token=0x1
+  UnityEngine.InputLegacyModule.dll  types=30475..30487 (13)  token=0x1
+  Firebase.Messaging.dll  types=30488..30510 (23)  token=0x1
+  Firebase.Platform.dll  types=30511..30549 (39)  token=0x1
+  PlayerCustomization.Share.dll  types=30550..30558 (9)  token=0x1
+  Unity.Notifications.Android.dll  types=30559..30577 (19)  token=0x1
+  Tapjoy.Plugin.Sample.dll  types=30578..30589 (12)  token=0x1
+  Unity.AI.Navigation.dll  types=30590..30596 (7)  token=0x1
+  UnityEngine.UnityAnalyticsCommonModule.dll  types=30597..30632 (36)  token=0x1
+  NavMeshComponentsExamples.dll  types=30633..30660 (28)  token=0x1
+  Oxide.Benchmark.dll  types=30661..30696 (36)  token=0x1
+  Oxide.GroundDefense.dll  types=30697..30719 (23)  token=0x1
+  Telepathy.dll  types=30720..30745 (26)  token=0x1
+  Zenject-usage.dll  types=30746..30854 (109)  token=0x1
+  UnityEngine.VFXModule.dll  types=30855..30870 (16)  token=0x1
+  RTLTMPro.dll  types=30871..30888 (18)  token=0x1
+  UnityEngine.SharedInternalsModule.dll  types=30889..30917 (29)  token=0x1
+  UnityEngine.TextRenderingModule.dll  types=30918..30934 (17)  token=0x1
+  ServersManaging.Common.dll  types=30935..30955 (21)  token=0x1
+  Google.Play.AppUpdate.dll  types=30956..30979 (24)  token=0x1
+  Oxide.Ads.dll  types=30980..31006 (27)  token=0x1
+  System.IO.Compression.dll  types=31007..31021 (15)  token=0x1
+  UnityEngine.AssetBundleModule.dll  types=31022..31030 (9)  token=0x1
+  UnityEngine.DirectorModule.dll  types=31031..31039 (9)  token=0x1
+  UnityEngine.GameCenterModule.dll  types=31040..31059 (20)  token=0x1
+  UnityEngine.UnityAnalyticsModule.dll  types=31060..31071 (12)  token=0x1
+  NavMeshComponents.dll  types=31072..31083 (12)  token=0x1
+  Firebase.Analytics.dll  types=31084..31094 (11)  token=0x1
+  Oxide.DeviceAttestation.dll  types=31095..31118 (24)  token=0x1
+  UnityEngine.UnityWebRequestAssetBundleModule.dll  types=31119..31122 (4)  token=0x1
+  Firebase.RemoteConfig.dll  types=31123..31140 (18)  token=0x1
+  Microsoft.Extensions.Logging.Abstractions.dll  types=31141..31157 (17)  token=0x1
+  UnityEngine.InputModule.dll  types=31158..31164 (7)  token=0x1
+  UnityEngine.JSONSerializeModule.dll  types=31165..31166 (2)  token=0x1
+  Oxide.Railways.dll  types=31167..31182 (16)  token=0x1
+  UnityEngine.ImageConversionModule.dll  types=31183..31184 (2)  token=0x1
+  UnityEngine.UnityWebRequestTextureModule.dll  types=31185..31190 (6)  token=0x1
+  Oxide.LocalStreaming.dll  types=31191..31202 (12)  token=0x1
+  UnityEngine.VehiclesModule.dll  types=31203..31205 (3)  token=0x1
+  Unity.Services.Core.Registration.dll  types=31206..31212 (7)  token=0x1
+  UnityEngine.StreamingModule.dll  types=31213..31214 (2)  token=0x1
+  Unity.InputSystem.ForUI.dll  types=31215..31218 (4)  token=0x1
+  UnityEngine.ScreenCaptureModule.dll  types=31219..31221 (3)  token=0x1
+  UnityEngine.TerrainPhysicsModule.dll  types=31222..31223 (2)  token=0x1
+  UnityEngine.TilemapModule.dll  types=31224..31226 (3)  token=0x1
+  Google.Play.Common.dll  types=31227..31238 (12)  token=0x1
+  UnityEngine.GridModule.dll  types=31239..31240 (2)  token=0x1
+  UnityEngine.SpriteShapeModule.dll  types=31241..31242 (2)  token=0x1
+  Oxide.Spatial.dll  types=31243..31260 (18)  token=0x1
+  UniTask.TextMeshPro.dll  types=31261..31269 (9)  token=0x1
+  UniTask.Addressables.dll  types=31270..31281 (12)  token=0x1
+  Oxide.Crafting.Logic.dll  types=31282..31306 (25)  token=0x1
+  Google.Play.Integrity.dll  types=31307..31322 (16)  token=0x1
+  Oxide.Notifications.Logic.dll  types=31323..31337 (15)  token=0x1
+  UniTask.DOTween.dll  types=31338..31350 (13)  token=0x1
+  manefunction.dotween-ui-controller.dll  types=31351..31358 (8)  token=0x1
+  Logs.Shared.dll  types=31359..31367 (9)  token=0x1
+  Oxide.ItemVisuals.dll  types=31368..31386 (19)  token=0x1
+  WebServices.Responses.dll  types=31387..31400 (14)  token=0x1
+  Google.Play.Core.dll  types=31401..31416 (16)  token=0x1
+  Purchasing.Common.dll  types=31417..31425 (9)  token=0x1
+  Unity.Services.Core.Configuration.dll  types=31426..31438 (13)  token=0x1
+  Unity.Services.Core.Scheduler.dll  types=31439..31447 (9)  token=0x1
+  Facebook.Unity.Settings.dll  types=31448..31453 (6)  token=0x1
+  Oxide.Features.Rendering.PostProcessing.dll  types=31454..31464 (11)  token=0x1
+  PlayerCustomization.Client.dll  types=31465..31474 (10)  token=0x1
+  Unity.Services.Core.dll  types=31475..31486 (12)  token=0x1
+  Unity.UnifiedRayTracing.Runtime.dll  types=31487..31490 (4)  token=0x1
+  Oxide.LogAndReport.dll  types=31491..31500 (10)  token=0x1
+  OxideApi.Client.dll  types=31501..31507 (7)  token=0x1
+  SeppePeelman.EditorTools.SurfaceAlignTool.dll  types=31508..31517 (10)  token=0x1
+  WebServices.Shared.dll  types=31518..31527 (10)  token=0x1
+  Unity.RenderPipeline.Universal.ShaderLibrary.dll  types=31528..31545 (18)  token=0x1
+  Unity.Services.Core.Device.dll  types=31546..31553 (8)  token=0x1
+  Google.Play.Review.dll  types=31554..31561 (8)  token=0x1
+  GUPS.Obfuscator.dll  types=31562..31573 (12)  token=0x1
+  System.Runtime.Serialization.dll  types=31574..31578 (5)  token=0x1
+  Unity.MemoryProfiler.dll  types=31579..31587 (9)  token=0x1
+  UnityEngine.Purchasing.SecurityCore.dll  types=31588..31591 (4)  token=0x1
+  OccaSoftware.Exposure.Demo.dll  types=31592..31598 (7)  token=0x1
+  Oxide.Lobby.Promo.Logic.dll  types=31599..31606 (8)  token=0x1
+  Oxide.Lobby.dll  types=31607..31613 (7)  token=0x1
+  Oxide.Shop.Skins.Culling.dll  types=31614..31621 (8)  token=0x1
+  System.Runtime.CompilerServices.Unsafe.dll  types=31622..31624 (3)  token=0x1
+  UnityEngine.Purchasing.WinRTCore.dll  types=31625..31628 (4)  token=0x1
+  UnityEngine.UnityConsentModule.dll  types=31629..31632 (4)  token=0x1
+  OccaSoftware.Exposure.Shaders.dll  types=31633..31639 (7)  token=0x1
+  System.Configuration.dll  types=31640..31649 (10)  token=0x1
+  System.Globalization.dll  types=31650..31650 (1)  token=0x1
+  Unity.Services.Core.Telemetry.dll  types=31651..31655 (5)  token=0x1
+  UnityEngine.MultiplayerModule.dll  types=31656..31658 (3)  token=0x1
+  AppleAuth.dll  types=31659..31666 (8)  token=0x1
+  Oxide.Cheats.Core.dll  types=31667..31669 (3)  token=0x1
+  Unity.RenderPipelines.Core.Runtime.Shared.dll  types=31670..31671 (2)  token=0x1
+  UnityEngine.IdentifiersModule.dll  types=31672..31673 (2)  token=0x1
+  UnityEngine.Purchasing.AppleCore.dll  types=31674..31675 (2)  token=0x1
+  UnityEngine.Purchasing.AppleMacosStub.dll  types=31676..31677 (2)  token=0x1
+  UnityEngine.Purchasing.AppleStub.dll  types=31678..31679 (2)  token=0x1
+  Facebook.Unity.Android.dll  types=31680..31681 (2)  token=0x1
+  Unity.Collections.LowLevel.ILSupport.dll  types=31682..31683 (2)  token=0x1
+  Unity.InternalAPIEngineBridge.004.dll  types=31684..31685 (2)  token=0x1
+  Unity.Services.Core.Environments.Internal.dll  types=31686..31687 (2)  token=0x1
+  Unity.Services.Core.Threading.dll  types=31688..31689 (2)  token=0x1
+  UnityEngine.Purchasing.WinRTStub.dll  types=31690..31691 (2)  token=0x1
+  Coffee.UIEffect.R.dll  types=31692..31693 (2)  token=0x1
+  Coffee.UIParticle.R.dll  types=31694..31695 (2)  token=0x1
+  Unity.Burst.Unsafe.dll  types=31696..31698 (3)  token=0x1
+  __Generated  types=31699..31703 (5)  token=0x0

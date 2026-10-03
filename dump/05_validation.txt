@@ -1,0 +1,226 @@
+total types: 31704
+total methods: 284191
+total fields: 140070
+total parameters: 256950
+  image 0 Assembly-CSharp.dll: 10917
+  image 1 mscorlib.dll: 1736
+  image 2 UnityEngine.UIElementsModule.dll: 1662
+  image 3 Unity.RenderPipelines.Core.Runtime.dll: 778
+  image 4 UnityEngine.CoreModule.dll: 1057
+  image 5 Unity.InputSystem.dll: 662
+  image 6 System.Xml.dll: 669
+  image 7 System.dll: 873
+  image 8 Mirror.BouncyCastle.Cryptography.dll: 681
+  image 9 Unity.RenderPipelines.Universal.Runtime.dll: 559
+  image 10 UniTask.Linq.dll: 570
+  image 11 Newtonsoft.Json.dll: 496
+  image 12 Assembly-CSharp-firstpass.dll: 262
+  image 13 System.Data.dll: 240
+  image 14 UniTask.dll: 606
+  image 15 Zenject.dll: 887
+  image 16 MeshBakerCore.dll: 325
+  image 17 Unity.TextMeshPro.dll: 197
+  image 18 System.Core.dll: 666
+  image 19 Google.Protobuf.dll: 283
+  image 20 DissonanceVoip.dll: 287
+  image 21 Unity.Localization.dll: 387
+  image 22 UnityEngine.TextCoreTextEngineModule.dll: 117
+  image 23 UnityEngine.UI.dll: 209
+  image 24 Mirror.Examples.dll: 237
+  image 25 Centrifugal.Centrifuge.dll: 179
+  image 26 Mirror.dll: 179
+  image 27 Unity.RenderPipelines.GPUDriven.Runtime.dll: 227
+  image 28 Mirror.Components.dll: 82
+  image 29 DOTween.dll: 202
+  image 30 Discord.Sdk.dll: 265
+  image 31 UnityEngine.IMGUIModule.dll: 59
+  image 32 Unity.ResourceManager.dll: 146
+  image 33 Facebook.Unity.dll: 193
+  image 34 UnityEngine.Purchasing.Stores.dll: 246
+  image 35 Oxide.Utils.dll: 192
+  image 36 Drawing.dll: 103
+  image 37 Mono.Security.dll: 85
+  image 38 Unity.Addressables.dll: 106
+  image 39 UniWebView-CSharp.dll: 111
+  image 40 AlmostEngine.dll: 115
+  image 41 UnityEngine.dll: 1
+  image 42 UnityEngine.AndroidJNIModule.dll: 50
+  image 43 Unity.Collections.dll: 165
+  image 44 Coffee.UIEffect.dll: 70
+  image 45 Whinarn.UnityMeshSimplifier.Runtime.dll: 39
+  image 46 Mirror.Transports.dll: 80
+  image 47 UnityEngine.PropertiesModule.dll: 167
+  image 48 UnityEngine.AnimationModule.dll: 57
+  image 49 UnityEngine.Physics2DModule.dll: 107
+  image 50 UnityEngine.PhysicsModule.dll: 52
+  image 51 OxideApi.Shared.dll: 115
+  image 52 System.Net.Http.dll: 81
+  image 53 UnityEngine.ParticleSystemModule.dll: 70
+  image 54 Tapjoy.Plugin.Runtime.dll: 88
+  image 55 IngameDebugConsole.Runtime.dll: 27
+  image 56 WorldStreaming.dll: 72
+  image 57 UnityEngine.TerrainModule.dll: 26
+  image 58 Firebase.App.dll: 49
+  image 59 UnityEngine.AudioModule.dll: 57
+  image 60 Coffee.UIParticle.dll: 46
+  image 61 AppsFlyer.dll: 71
+  image 62 Unity.Services.Analytics.dll: 61
+  image 63 SimpleWebTransport.dll: 50
+  image 64 System.Drawing.dll: 11
+  image 65 System.Text.Json.dll: 8
+  image 66 UnityEngine.AIModule.dll: 25
+  image 67 DOTween.Modules.dll: 97
+  image 68 UnityEngine.UnityWebRequestModule.dll: 20
+  image 69 Unity.Mathematics.dll: 34
+  image 70 MaxSdk.Scripts.dll: 39
+  image 71 Unity.Splines.dll: 40
+  image 72 UnityEngine.InputForUIModule.dll: 48
+  image 73 Oxide.Trains.Logic.dll: 28
+  image 74 System.Numerics.dll: 13
+  image 75 UnityEngine.HierarchyCoreModule.dll: 47
+  image 76 UnityEngine.UIModule.dll: 12
+  image 77 kcp2k.dll: 28
+  image 78 System.Xml.Linq.dll: 39
+  image 79 UnityEngine.Purchasing.dll: 76
+  image 80 WaterSystem.dll: 33
+  image 81 Unity.Services.Core.Internal.dll: 66
+  image 82 UnityEngine.TextCoreFontEngineModule.dll: 25
+  image 83 com.theymes.sdk.dll: 28
+  image 84 Oxide.Storage.dll: 36
+  image 85 Unity.Burst.dll: 46
+  image 86 Mirror.Authenticators.dll: 16
+  image 87 XNode.dll: 36
+  image 88 OccaSoftware.AutoExposure.Runtime.dll: 28
+  image 89 UnityEngine.Purchasing.Security.dll: 21
+  image 90 Oxide.Auth.dll: 46
+  image 91 Firebase.Crashlytics.dll: 27
+  image 92 Oxide.Benchmark.Client.dll: 27
+  image 93 Oxide.LodStreaming.dll: 21
+  image 94 UnityEngine.InputLegacyModule.dll: 13
+  image 95 Firebase.Messaging.dll: 23
+  image 96 Firebase.Platform.dll: 39
+  image 97 PlayerCustomization.Share.dll: 9
+  image 98 Unity.Notifications.Android.dll: 19
+  image 99 Tapjoy.Plugin.Sample.dll: 12
+  image 100 Unity.AI.Navigation.dll: 7
+  image 101 UnityEngine.UnityAnalyticsCommonModule.dll: 36
+  image 102 NavMeshComponentsExamples.dll: 28
+  image 103 Oxide.Benchmark.dll: 36
+  image 104 Oxide.GroundDefense.dll: 23
+  image 105 Telepathy.dll: 26
+  image 106 Zenject-usage.dll: 109
+  image 107 UnityEngine.VFXModule.dll: 16
+  image 108 RTLTMPro.dll: 18
+  image 109 UnityEngine.SharedInternalsModule.dll: 29
+  image 110 UnityEngine.TextRenderingModule.dll: 17
+  image 111 ServersManaging.Common.dll: 21
+  image 112 Google.Play.AppUpdate.dll: 24
+  image 113 Oxide.Ads.dll: 27
+  image 114 System.IO.Compression.dll: 15
+  image 115 UnityEngine.AssetBundleModule.dll: 9
+  image 116 UnityEngine.DirectorModule.dll: 9
+  image 117 UnityEngine.GameCenterModule.dll: 20
+  image 118 UnityEngine.UnityAnalyticsModule.dll: 12
+  image 119 NavMeshComponents.dll: 12
+  image 120 Firebase.Analytics.dll: 11
+  image 121 Oxide.DeviceAttestation.dll: 24
+  image 122 UnityEngine.UnityWebRequestAssetBundleModule.dll: 4
+  image 123 Firebase.RemoteConfig.dll: 18
+  image 124 Microsoft.Extensions.Logging.Abstractions.dll: 17
+  image 125 UnityEngine.InputModule.dll: 7
+  image 126 UnityEngine.JSONSerializeModule.dll: 2
+  image 127 Oxide.Railways.dll: 16
+  image 128 UnityEngine.ImageConversionModule.dll: 2
+  image 129 UnityEngine.UnityWebRequestTextureModule.dll: 6
+  image 130 Oxide.LocalStreaming.dll: 12
+  image 131 UnityEngine.VehiclesModule.dll: 3
+  image 132 Unity.Services.Core.Registration.dll: 7
+  image 133 UnityEngine.StreamingModule.dll: 2
+  image 134 Unity.InputSystem.ForUI.dll: 4
+  image 135 UnityEngine.ScreenCaptureModule.dll: 3
+  image 136 UnityEngine.TerrainPhysicsModule.dll: 2
+  image 137 UnityEngine.TilemapModule.dll: 3
+  image 138 Google.Play.Common.dll: 12
+  image 139 UnityEngine.GridModule.dll: 2
+  image 140 UnityEngine.SpriteShapeModule.dll: 2
+  image 141 Oxide.Spatial.dll: 18
+  image 142 UniTask.TextMeshPro.dll: 9
+  image 143 UniTask.Addressables.dll: 12
+  image 144 Oxide.Crafting.Logic.dll: 25
+  image 145 Google.Play.Integrity.dll: 16
+  image 146 Oxide.Notifications.Logic.dll: 15
+  image 147 UniTask.DOTween.dll: 13
+  image 148 manefunction.dotween-ui-controller.dll: 8
+  image 149 Logs.Shared.dll: 9
+  image 150 Oxide.ItemVisuals.dll: 19
+  image 151 WebServices.Responses.dll: 14
+  image 152 Google.Play.Core.dll: 16
+  image 153 Purchasing.Common.dll: 9
+  image 154 Unity.Services.Core.Configuration.dll: 13
+  image 155 Unity.Services.Core.Scheduler.dll: 9
+  image 156 Facebook.Unity.Settings.dll: 6
+  image 157 Oxide.Features.Rendering.PostProcessing.dll: 11
+  image 158 PlayerCustomization.Client.dll: 10
+  image 159 Unity.Services.Core.dll: 12
+  image 160 Unity.UnifiedRayTracing.Runtime.dll: 4
+  image 161 Oxide.LogAndReport.dll: 10
+  image 162 OxideApi.Client.dll: 7
+  image 163 SeppePeelman.EditorTools.SurfaceAlignTool.dll: 10
+  image 164 WebServices.Shared.dll: 10
+  image 165 Unity.RenderPipeline.Universal.ShaderLibrary.dll: 18
+  image 166 Unity.Services.Core.Device.dll: 8
+  image 167 Google.Play.Review.dll: 8
+  image 168 GUPS.Obfuscator.dll: 12
+  image 169 System.Runtime.Serialization.dll: 5
+  image 170 Unity.MemoryProfiler.dll: 9
+  image 171 UnityEngine.Purchasing.SecurityCore.dll: 4
+  image 172 OccaSoftware.Exposure.Demo.dll: 7
+  image 173 Oxide.Lobby.Promo.Logic.dll: 8
+  image 174 Oxide.Lobby.dll: 7
+  image 175 Oxide.Shop.Skins.Culling.dll: 8
+  image 176 System.Runtime.CompilerServices.Unsafe.dll: 3
+  image 177 UnityEngine.Purchasing.WinRTCore.dll: 4
+  image 178 UnityEngine.UnityConsentModule.dll: 4
+  image 179 OccaSoftware.Exposure.Shaders.dll: 7
+  image 180 System.Configuration.dll: 10
+  image 181 System.Globalization.dll: 1
+  image 182 Unity.Services.Core.Telemetry.dll: 5
+  image 183 UnityEngine.MultiplayerModule.dll: 3
+  image 184 AppleAuth.dll: 8
+  image 185 Oxide.Cheats.Core.dll: 3
+  image 186 Unity.RenderPipelines.Core.Runtime.Shared.dll: 2
+  image 187 UnityEngine.IdentifiersModule.dll: 2
+  image 188 UnityEngine.Purchasing.AppleCore.dll: 2
+  image 189 UnityEngine.Purchasing.AppleMacosStub.dll: 2
+  image 190 UnityEngine.Purchasing.AppleStub.dll: 2
+  image 191 Facebook.Unity.Android.dll: 2
+  image 192 Unity.Collections.LowLevel.ILSupport.dll: 2
+  image 193 Unity.InternalAPIEngineBridge.004.dll: 2
+  image 194 Unity.Services.Core.Environments.Internal.dll: 2
+  image 195 Unity.Services.Core.Threading.dll: 2
+  image 196 UnityEngine.Purchasing.WinRTStub.dll: 2
+  image 197 Coffee.UIEffect.R.dll: 2
+  image 198 Coffee.UIParticle.R.dll: 2
+  image 199 Unity.Burst.Unsafe.dll: 3
+  image 200 __Generated: 5
+PlayerManager hits: 2
+   -> Oxide.PlayerManager
+   -> Mirror.Examples.CouchCoop.CouchPlayerManager
+System namespace types (non-nested-anon): 353
+   System.Object -> typeDef 11328 byval 62175
+   System.String -> typeDef 11019 byval 68668
+   System.Int32 -> typeDef 11135 byval 57631
+   System.Int64 -> typeDef 11136 byval 57666
+   System.Boolean -> typeDef 11068 byval 47937
+   System.Single -> typeDef 11180 byval 67630
+   System.Double -> typeDef 11083 byval 51988
+   System.Char -> typeDef 11071 byval 48932
+   System.Byte -> typeDef 11069 byval 48376
+   System.Int16 -> typeDef 11134 byval 57617
+   System.UInt32 -> typeDef 11209 byval 71338
+   System.IntPtr -> typeDef 11318 byval 57692
+   System.Enum -> typeDef 11274 byval 52665
+   System.ValueType -> typeDef 11354 byval 72459
+   System.Array -> typeDef 11249 byval 46393
+   System.List`1 -> MISSING
+   System.Dictionary`2 -> MISSING

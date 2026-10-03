@@ -1,0 +1,31 @@
+Magic: 0xfab11baf
+Version: 39
+sizes: typeIndex=4 typeDefIndex=2 genericContainerIndex=2 parameterIndex=4
+--- sections (offset,size,count) ---
+  stringLiteral: 0x17c 101408
+  stringLiteralData: 0x18d9c 847736
+  events: 0x409ca8 56544
+  properties: 0x417988 678320
+  methods: 0x4bd338 9094112
+  parameterDefaultValues: 0xd69718 100608
+  fieldDefaultValues: 0xd82018 282492
+  fieldAndParameterDefaultValueData: 0xdc6f98 3137728
+  fieldMarshaledSizes: 0x10c5058 122556
+  parameters: 0x10e2f14 3083400
+  fields: 0x13d3b9c 1680840
+  genericParameters: 0x156e164 160608
+  genericParameterConstraints: 0x15954c4 8928
+  genericContainers: 0x15977a4 98416
+  nestedTypes: 0x15af814 45940
+  interfaces: 0x15bab88 48328
+  vtableMethods: 0x15c6850 1189068
+  interfaceOffsets: 0x16e8d1c 233120
+  typeDefinitions: 0x1721bbc 2599728
+  images: 0x199c6ec 7236
+  assemblies: 0x199e330 13668
+  fieldRefs: 0x19a1894 11640
+  referencedAssemblies: 0x19a460c 4988
+  attributeData: 0x19a5988 1640552
+  windowsRuntimeTypeNames: 0x1c10ef4 0
+  windowsRuntimeStrings: 0x1c10ef4 0
+  exportedTypeDefinitions: 0x1c10ef4 12504

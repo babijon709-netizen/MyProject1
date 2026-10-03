@@ -70,9 +70,36 @@
 //   benzhack_imagedata.bin  — пишущиеся сегменты libil2cpp.so (.data.rel.ro,
 //                             .data, .bss): в .bss лежат глобальные слоты
 //                             Il2CppClass*, из которых виден адрес пула;
+//   benzhack_mreg.bin       — (v2.5) Il2CppMetadataRegistration, 256 Б
+//                             сырьём + адрес в шапке;
+//   benzhack_creg.bin       — (v2.5) Il2CppCodeRegistration, 256 Б сырьём;
+//   benzhack_types_full.bin — (v2.5) ВСЯ таблица types: каждый слот
+//                             TypeIndex {u64 dp, u32 bits}: CLASS/VALUETYPE —
+//                             dp=TypeDefIndex, GENERICINST — dp=Il2CppGenericClass*,
+//                             примитивы — dp=0. Отсюда оффлайн ВСЕ имена
+//                             типов (включая generic-инстанции);
+//   benzhack_ginst.bin      — (v2.5) по каждой unique generic-инстанции:
+//                             TypeDefIndex базового класса + аргументы
+//                             (слоты types или инлайновые записи);
+//   benzhack_fo.bin         — (v2.5) fieldOffsets: на каждый тип указатель
+//                             на массив до 512 int32-смещений полей
+//                             (+benzhack_fo_head.bin — 4 КБ сырьём);
+//   benzhack_mptrs.bin      — (v2.5) codeGenModules: имя модуля + массив
+//                             адресов методов (RVA = адрес − база .so);
+//   benzhack_misc.bin       — (v2.5) genericClasses, genericInsts,
+//                             methodSpecs, genericMethodTable, invokers,
+//                             typeDefinitionsSizes, genericMethodPointers,
+//                             metadataUsages (секции с тегами);
 //   benzhack_dump_index.txt — опись: все регионы, счётчики указателей, адреса
 //                             и размеры каждого снятого файла, строка «blob»
 //                             — адрес/размер/версия полной метадаты.
+//
+// Искать регистрации (v2.5) не по адресам, а по ФОРМЕ:
+//   MetadataRegistration — slot typesCount (5..500k) + указатель на массив
+//   указателей на 16-байтовые записи {dp, bits}, где первые 64 записи —
+//   валидные Il2CppType (CLASS-записи с dp=TypeDefIndex без повторов).
+//   CodeRegistration — codeGenModulesCount (50..500) + массив модулей, у
+//   каждого читаемое строковое имя и plausible methodPointerCount.
 //
 // Собирается тем же NDK, что и чит (второй модуль в jni/Android.mk).
 
@@ -1502,6 +1529,609 @@ static void scan_types_table(const char* out_dir) {
         ttable_dump(out_dir, i, g_ttables[i]);
 }
 
+// ============================================================================
+// v2.5 — регистрации и рантайм-таблицы (для ОФФЛАЙН-сборки полного дампа).
+//
+// Метадата (global-metadata.dat) уже собрана; для dump.cs/script.json уровня
+// Il2CppDumper не хватает то, что живёт ТОЛЬКО в памяти процесса:
+//   * Il2CppMetadataRegistration / Il2CppCodeRegistration (статические
+//     глобальные в libil2cpp.so — в пишущемся сегменте образа);
+//   * массив types (таблица Il2CppType — имена всех слотов TypeIndex,
+//     включая generic-инстанции — оффлайн из метадаты не выводятся);
+//   * generic-инстанции (Il2CppGenericClass + аргументы);
+//   * fieldOffsets (смещения полей — только из рантайма);
+//   * указатели методов (codeGenModules) — RVA методов в .so;
+//   * invokerPointers / methodSpecs / genericMethodTable / typeDefinitionsSizes.
+//
+// Ищем РЕГИСТРАЦИИ по форме (без знания адресов):
+//   MetadataRegistration (128 Б), поле types в +0x38:
+//     +0x00 genericClassesCount / +0x08 genericClasses
+//     +0x10 genericInstsCount   / +0x18 genericInsts
+//     +0x20 genericMethodTableCount / +0x28 genericMethodTable
+//     +0x30 typesCount          / +0x38 types
+//     +0x40 methodSpecsCount    / +0x48 methodSpecs
+//     +0x50 fieldOffsetsCount   / +0x58 fieldOffsets
+//     +0x60 typeDefinitionsSizesCount / +0x68 typeDefinitionsSizes
+//     +0x70 metadataUsagesCount / +0x78 metadataUsages
+//   Подпись: typesCount в (5000, 500000), types -> массив указателей на
+//     записи Il2CppType; первые 64 записи «валидные типы».
+//   CodeRegistration (136 Б, v27.1+/v39), codeGenModules в +0x78:
+//     +0x00 reversePInvokeWrapperCount / +0x08 reversePInvokeWrappers
+//     +0x10 genericMethodPointersCount / +0x18 genericMethodPointers
+//     +0x20 genericAdjustorThunks
+//     +0x28 invokerPointersCount     / +0x30 invokerPointers
+//     +0x38 unresolvedVirtualCallCount / +0x40 unresolvedVirtualCallPointers
+//     +0x48 unresolvedInstanceCallPointers / +0x50 unresolvedStaticCallPointers
+//     +0x58 interopDataCount / +0x60 interopData
+//     +0x68 windowsRuntimeFactoryCount / +0x70 windowsRuntimeFactoryTable
+//     +0x78 codeGenModulesCount / +0x80 codeGenModules
+//   Подпись: codeGenModulesCount в [50,500], массив модулей, у каждого —
+//     читаемое имя (строка) и plausible methodPointerCount.
+//
+// Записи Il2CppType (S16, как нашёл скан типов): {u64 dp @0, u32 bits @8}:
+//   CLASS(0x12)/VALUETYPE(0x11):  dp = TypeDefIndex;
+//   GENERICINST(0x15):            dp = Il2CppGenericClass*;
+//   VAR(0x13)/MVAR(0x1e):         dp = индекс generic-параметра;
+//   ARRAY(0x14)/SZARRAY(0x1d)/PTR(0x0f)/BYREF(0x10): dp = указатель;
+//   примитивы (1..0x16,0x18,0x19,0x1b,0x1c): dp = 0.
+// ============================================================================
+
+static const uint64_t kMregTypesOff = 0x38;   // поле types в MetadataRegistration
+static const uint64_t kCregCgmOff   = 0x78;   // codeGenModulesCount в CodeRegistration
+
+static inline uint64_t le64b(const uint8_t* p) {
+    uint64_t v; memcpy(&v, p, 8); return v;
+}
+static inline uint32_t le32b(const uint8_t* p) {
+    uint32_t v; memcpy(&v, p, 4); return v;
+}
+
+// Валидна ли запись Il2CppType по {bits, dp} (S16-интерпретация).
+static bool type_bits_ok(uint32_t bits, uint64_t dp) {
+    const uint32_t t = (bits >> 16) & 0xff;
+    const bool kind = (t >= 0x01 && t <= 0x21) || t == 0x40 || t == 0x41 ||
+                      t == 0x45 || t == 0x55 || t == 0xff;
+    if (!kind) return false;
+    if (t == 0x11 || t == 0x12) return dp < kDPCap;                 // klassIndex
+    if (t == 0x13 || t == 0x1e) return dp < (1ull << 20);           // var-index
+    if (t == 0x15 || t == 0x14 || t == 0x1d || t == 0x0f || t == 0x10)
+        return dp > 0x10000 && addr_mapped(dp);                     // ptr-union
+    return true;
+}
+
+// Проверка кандидата на массив types: head -> массив указателей на Il2CppType.
+static bool verify_types_array(uint64_t head, int* ncls_out) {
+    uint8_t pb[64 * 8];
+    if (!rd_at(head, pb, sizeof(pb))) return false;
+    int ok = 0, cls = 0, nd = 0;
+    uint64_t seen[32];
+    for (int j = 0; j < 64; ++j) {
+        uint64_t P = untag(le64b(pb + (size_t)j * 8));
+        if (!addr_mapped(P)) continue;
+        uint8_t rec[16];
+        if (!rd_at(P, rec, sizeof(rec))) continue;
+        if (!type_bits_ok(le32b(rec + 8), le64b(rec))) continue;
+        ++ok;
+        const uint32_t t = (le32b(rec + 8) >> 16) & 0xff;
+        if (t == 0x11 || t == 0x12) {
+            const uint64_t dp = le64b(rec);
+            ++cls;
+            int dup = 0;
+            for (int k = 0; k < nd; ++k) if (seen[k] == dp) { dup = 1; break; }
+            if (!dup && nd < 32) seen[nd++] = dp;
+        }
+    }
+    if (ncls_out) *ncls_out = cls;
+    return ok >= 40 && cls >= 25 && nd >= 5;
+}
+
+// Проверка кандидата на codeGenModules-массив.
+static bool verify_cgm_array(uint64_t head) {
+    uint8_t pb[8 * 8];
+    if (!rd_at(head, pb, sizeof(pb))) return false;
+    int ok = 0;
+    for (int j = 0; j < 8; ++j) {
+        uint64_t M = untag(le64b(pb + (size_t)j * 8));
+        if (!addr_mapped(M)) continue;
+        uint8_t md[24];
+        if (!rd_at(M, md, sizeof(md))) continue;
+        uint64_t name_p = untag(le64b(md));
+        uint64_t mp = untag(le64b(md + 8));
+        uint64_t mc = le64b(md + 16);
+        if (name_p < 0x10000 || !addr_mapped(name_p)) continue;
+        if (mp && (!addr_mapped(mp) || mc > 300000)) continue;
+        char nm[64] = {};
+        if (!rd_at(name_p, nm, 63)) continue;
+        bool text = true;
+        for (int k = 0; k < 63; ++k) {
+            unsigned char c = (unsigned char)nm[k];
+            if (c == 0) break;
+            if (c < 0x20 || c > 0x7e) { text = false; break; }
+        }
+        if (text && nm[0]) ++ok;
+    }
+    return ok >= 6;
+}
+
+// Сканируем диапазон по 1 МБ ищем обе регистрации. Найдённые базы (или 0).
+static void find_registrations(uint64_t lo, uint64_t hi, uint64_t* mreg_out,
+                               uint64_t* creg_out, double deadline) {
+    static uint8_t buf[1u << 20];
+    const double t_scan = now_s();
+    uint64_t scanned = 0;
+    for (uint64_t at = lo; at < hi && (!mreg_out || !*mreg_out || !*creg_out)
+                              && now_s() < deadline;) {
+        const size_t want = (size_t)((hi - at < sizeof(buf)) ? (hi - at) : sizeof(buf));
+        if (!rd_at(at, buf, want)) { at += 4096; continue; }
+        for (size_t i = 0; i + 16 <= want; i += 8) {
+            const uint64_t abs = at + i;
+            if (abs & 7) continue;
+            // MetadataRegistration: types-указатель в abs, typesCount в abs-8.
+            if (!mreg_out || !*mreg_out) {
+                const uint64_t cnt = le64b(buf + i - 8);
+                if (cnt < 5000 || cnt > 500000) continue;
+                const uint64_t V = untag(le64b(buf + i));
+                if (V < 0x10000 || (V & 7) || !addr_mapped(V)) continue;
+                if (!verify_types_array(V, nullptr)) continue;
+                *mreg_out = abs - kMregTypesOff;
+                say("  РЕГИСТРАЦИЯ: MetadataRegistration @0x%llx (typesCount=%llu, "
+                    "types=0x%llx)", (unsigned long long)*mreg_out,
+                    (unsigned long long)cnt, (unsigned long long)V);
+            }
+            // CodeRegistration: база 16-выровнена; поля в +0x78/+0x80.
+            if (creg_out && !*creg_out && (abs & 15) == 0) {
+                const uint64_t c = le64b(buf + i + 0x78);
+                if (c < 50 || c > 500) continue;
+                const uint64_t M = untag(le64b(buf + i + 0x80));
+                if (M < 0x10000 || (M & 7) || !addr_mapped(M)) continue;
+                if (!verify_cgm_array(M)) continue;
+                *creg_out = abs;
+                say("  РЕГИСТРАЦИЯ: CodeRegistration @0x%llx (codeGenModules=%llu)",
+                    (unsigned long long)*creg_out, (unsigned long long)c);
+            }
+        }
+        at += want;
+        scanned += want;
+    }
+    say("  регистрации: просмотрено %llu МБ за %.1f с",
+        (unsigned long long)(scanned >> 20), now_s() - t_scan);
+}
+
+// Читает null-строку (не более cap-1 байт).
+static size_t read_cstr(uint64_t addr, char* out, size_t cap) {
+    size_t got = 0;
+    while (got + 1 < cap) {
+        const size_t step = (cap - 1 - got < 64) ? (cap - 1 - got) : 64;
+        uint8_t tmp[64];
+        if (!rd_at(addr + got, tmp, step)) break;
+        size_t z = 0;
+        while (z < step && tmp[z]) ++z;
+        memcpy(out + got, tmp, z);
+        got += z;
+        if (z < step) break;
+    }
+    out[got < cap ? got : cap - 1] = 0;
+    return got;
+}
+
+// Основной проход v2.5.
+static void dump_reg_data(const char* out_dir) {
+    const double t0 = now_s();
+    say("v2.5: регистрации и рантайм-таблицы");
+
+    uint64_t mreg = 0, creg = 0;
+    // Регистрация — статический глобал libil2cpp.so (по данным рана 10513
+    // НЕ в видимом rw-сегменте .data — протектор размазывает образ на
+    // фрагменты и снимает «r» у части сегментов, т.е. .bss образа живёт в
+    // hidden-регионах). Поэтому проходы:
+    //   1) ВСЕ сегменты libil2cpp.so (любыми правами, включая hidden);
+    //   2) остальные региона: сначала маленькие (<= 64 МБ — там .bss'ы и
+    //      мелкие арены), потом большие, потолок 4 ГБ / 150 с.
+    // 1-й проход: сегменты образа (путь из /proc/maps содержит libil2cpp).
+    {
+        uint64_t scanned = 0;
+        for (int i = 0; i < g_reg_count && !(mreg && creg)
+                            && now_s() < t0 + 90.0; ++i) {
+            const Reg& r = g_regs[i];
+            if (strstr(r.path, "libil2cpp") == nullptr) continue;
+            scanned += r.end - r.start;
+            uint64_t mr = mreg, cr = creg;
+            find_registrations(r.start, r.end, &mr, &cr, t0 + 90.0);
+            if (mr) mreg = mr;
+            if (cr) creg = cr;
+        }
+        say("  1-й проход (сегменты libil2cpp.so): %llu МБ",
+            (unsigned long long)(scanned >> 20));
+    }
+    // 2-й проход: всё остальное читаемое (hidden тоже — FOLL_FORCE).
+    if (!mreg || !creg) {
+        say("  2-й проход (вся прочая память, мелкие регионы первыми)");
+        uint64_t scanned = 0;
+        for (int pass2 = 0; pass2 < 2 && (scanned < (4ull << 30))
+                                && now_s() < t0 + 150.0; pass2++) {
+            for (int i = 0; i < g_reg_count && (scanned < (4ull << 30))
+                                && now_s() < t0 + 150.0; ++i) {
+                const Reg& r = g_regs[i];
+                if (r.kind == kImage) continue;        // 1-й проход
+                if (strstr(r.path, "libil2cpp")) continue;
+                if (r.perms[0] != 'r' && r.kind != kHidden) continue;
+                const uint64_t sz = r.end - r.start;
+                if (pass2 == 0) { if (sz > (64ull << 20)) continue; }
+                else { if (sz <= (64ull << 20)) continue; }
+                const uint64_t remain = (4ull << 30) - scanned;
+                const uint64_t take = (sz < remain) ? sz : remain;
+                if (take < (1ull << 20)) continue;
+                uint64_t mr = mreg, cr = creg;
+                find_registrations(r.start, r.start + take, &mr, &cr, t0 + 150.0);
+                if (mr != mreg) mreg = mr;
+                if (cr != creg) creg = cr;
+                scanned += take;
+                if (mreg && creg) break;
+            }
+        }
+    }
+    if (!mreg) {
+        say("v2.5: MetadataRegistration не найдена — таблицы не сняты. "
+            "След. шаг: прогнать со вторым запуском (адрес может уехать), "
+            "или снять hidden-регионы целиком (benzhack_hiddenN).");
+        return;
+    }
+
+    // ---- MetadataRegistration: сырьё + раскод ----
+    uint8_t mr[256];
+    rd_at(mreg, mr, sizeof(mr));
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/benzhack_mreg.bin", out_dir);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            uint64_t base = mreg;
+            fwrite(&base, 8, 1, f);
+            fwrite(mr, 1, sizeof(mr), f);
+            fclose(f);
+            say("  benzhack_mreg.bin — 256 Б @0x%llx", (unsigned long long)mreg);
+        }
+    }
+    const uint64_t gc_cnt = le64b(mr + 0x00), gc_ptr = untag(le64b(mr + 0x08));
+    const uint64_t gi_cnt = le64b(mr + 0x10), gi_ptr = untag(le64b(mr + 0x18));
+    const uint64_t gmt_cnt = le64b(mr + 0x20), gmt_ptr = untag(le64b(mr + 0x28));
+    const uint64_t tc = le64b(mr + 0x30), tp = untag(le64b(mr + 0x38));
+    const uint64_t ms_cnt = le64b(mr + 0x40), ms_ptr = untag(le64b(mr + 0x48));
+    const uint64_t fo_cnt = le64b(mr + 0x50), fo_ptr = untag(le64b(mr + 0x58));
+    const uint64_t tds_cnt = le64b(mr + 0x60), tds_ptr = untag(le64b(mr + 0x68));
+    const uint64_t mu_cnt = le64b(mr + 0x70), mu_ptr = untag(le64b(mr + 0x78));
+    say("  MREG: types %llu @0x%llx | genericClasses %llu @0x%llx | "
+        "genericInsts %llu @0x%llx | gmTable %llu @0x%llx",
+        (unsigned long long)tc, (unsigned long long)tp,
+        (unsigned long long)gc_cnt, (unsigned long long)gc_ptr,
+        (unsigned long long)gi_cnt, (unsigned long long)gi_ptr,
+        (unsigned long long)gmt_cnt, (unsigned long long)gmt_ptr);
+    say("  MREG: methodSpecs %llu @0x%llx | fieldOffsets %llu @0x%llx | "
+        "tdSizes %llu @0x%llx | usages %llu @0x%llx",
+        (unsigned long long)ms_cnt, (unsigned long long)ms_ptr,
+        (unsigned long long)fo_cnt, (unsigned long long)fo_ptr,
+        (unsigned long long)tds_cnt, (unsigned long long)tds_ptr,
+        (unsigned long long)mu_cnt, (unsigned long long)mu_ptr);
+
+    // ---- CodeRegistration: сырьё + раскод ----
+    uint64_t inv_cnt = 0, inv_ptr = 0, gmp_cnt = 0, gmp_ptr = 0, cgm_cnt = 0, cgm_ptr = 0;
+    if (creg) {
+        uint8_t cr[256];
+        rd_at(creg, cr, sizeof(cr));
+        char path[256];
+        snprintf(path, sizeof(path), "%s/benzhack_creg.bin", out_dir);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            uint64_t base = creg;
+            fwrite(&base, 8, 1, f);
+            fwrite(cr, 1, sizeof(cr), f);
+            fclose(f);
+            say("  benzhack_creg.bin — 256 Б @0x%llx", (unsigned long long)creg);
+        }
+        gmp_cnt = le64b(cr + 0x10); gmp_ptr = untag(le64b(cr + 0x18));
+        inv_cnt = le64b(cr + 0x28); inv_ptr = untag(le64b(cr + 0x30));
+        cgm_cnt = le64b(cr + 0x78); cgm_ptr = untag(le64b(cr + 0x80));
+        say("  CREG: codeGenModules %llu @0x%llx | invokers %llu @0x%llx | "
+            "genericMethodPtrs %llu @0x%llx",
+            (unsigned long long)cgm_cnt, (unsigned long long)cgm_ptr,
+            (unsigned long long)inv_cnt, (unsigned long long)inv_ptr,
+            (unsigned long long)gmp_cnt, (unsigned long long)gmp_ptr);
+    } else {
+        say("  CREG не найдена (метод-указатели — на втором прогоне)");
+    }
+
+    // ---- Полная таблица types: все слоты {dp, bits} ----
+    // Копия слотов в памяти — для резолва аргументов generic-инстанций.
+    static uint8_t slotmem[(1u << 20) * 12]; // до 1М слотов × 12 Б
+    const uint64_t tc_cap = (tc > (1ull << 20)) ? (1ull << 20) : tc;
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/benzhack_types_full.bin", out_dir);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            uint64_t hdr[4] = {0x35224245, tc, tp, tc_cap};  // magic BZ25
+            fwrite(hdr, 8, 4, f);
+            uint64_t i = 0, bad = 0;
+            uint8_t pbuf[1u << 20];
+            while (i < tc_cap) {
+                const uint64_t chunk = (tc_cap - i < (1ull << 20) / 8)
+                                         ? (tc_cap - i) : ((1ull << 20) / 8);
+                if (!rd_at(tp + i * 8, pbuf, chunk * 8)) {
+                    for (uint64_t j = 0; j < chunk; ++j) {
+                        uint64_t z = 0xFFFFFFFFFFFFFFFFull, zb = 0;
+                        fwrite(&z, 8, 1, f); fwrite(&zb, 4, 1, f);
+                        i++;
+                    }
+                    break;
+                }
+                for (uint64_t j = 0; j < chunk; ++j, ++i) {
+                    uint64_t P = untag(le64b(pbuf + j * 8));
+                    uint8_t rec[16] = {};
+                    uint64_t dp = 0, bits = 0;
+                    if (addr_mapped(P) && rd_at(P, rec, 16)) {
+                        dp = le64b(rec);
+                        bits = le32b(rec + 8);
+                    } else {
+                        dp = 0xFFFFFFFFFFFFFFFFull;
+                        ++bad;
+                    }
+                    // в файл 12 Б: dp + bits; в slotmem то же.
+                    fwrite(&dp, 8, 1, f);
+                    fwrite(&bits, 4, 1, f);
+                    memcpy(slotmem + (i - chunk) * 12, &dp, 8);
+                    memcpy(slotmem + (i - chunk) * 12 + 8, &bits, 4);
+                }
+            }
+            fclose(f);
+            say("  benzhack_types_full.bin — %llu слотов (не чит. %llu)",
+                (unsigned long long)tc_cap, (unsigned long long)bad);
+        }
+    }
+
+    // ---- Generic-инстанции ----
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/benzhack_ginst.bin", out_dir);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            // Дедуп по gc-указателю: open addressing, 2^21.
+            static uint64_t seen_gc[1u << 21];
+            memset(seen_gc, 0, sizeof(seen_gc));
+            auto seen = [&](uint64_t gc) -> bool {
+                size_t h = (size_t)((gc >> 4) % (1u << 21));
+                for (int p = 0; p < 64; ++p) {
+                    size_t s = (h + p) & ((1u << 21) - 1);
+                    if (seen_gc[s] == 0) { seen_gc[s] = gc; return false; }
+                    if (seen_gc[s] == gc) return true;
+                }
+                return true; // таблицу держим: «уже видели»
+            };
+            uint64_t n = 0, nerr = 0;
+            for (uint64_t i = 0; i < tc_cap && now_s() < t0 + 180.0; ++i) {
+                uint64_t dp; memcpy(&dp, slotmem + i * 12, 8);
+                uint32_t bits; memcpy(&bits, slotmem + i * 12 + 8, 4);
+                if (((bits >> 16) & 0xff) != 0x15) continue;         // GENERICINST
+                const uint64_t gc = dp;
+                if (gc < 0x10000 || !addr_mapped(gc) || seen(gc)) continue;
+                uint8_t g[32];
+                if (!rd_at(gc, g, sizeof(g))) { ++nerr; continue; }
+                uint64_t type_p = untag(le64b(g));
+                uint64_t class_inst = untag(le64b(g + 8));
+                uint64_t def_dp = 0; uint32_t def_bits = 0;
+                if (addr_mapped(type_p)) {
+                    uint8_t tr[16];
+                    if (rd_at(type_p, tr, 16)) {
+                        def_dp = le64b(tr);
+                        def_bits = le32b(tr + 8);
+                    }
+                }
+                // аргументы
+                uint32_t nargs = 0;
+                uint64_t argsl[64];
+                bool inline_a[64];
+                uint64_t idp[64]; uint32_t ibits[64];
+                if (class_inst && addr_mapped(class_inst)) {
+                    uint8_t inst[16];
+                    if (rd_at(class_inst, inst, sizeof(inst))) {
+                        nargs = le32b(inst);
+                        if (nargs > 64) nargs = 64;
+                        uint64_t list = untag(le64b(inst + 8));
+                        if (nargs && list && addr_mapped(list) &&
+                            rd_at(list, argsl, nargs * 8)) {
+                            for (uint32_t a = 0; a < nargs; ++a) {
+                                uint64_t A = untag(argsl[a]);
+                                if (A >= tp && A < tp + tc_cap * 8) {
+                                    inline_a[a] = false;
+                                    idp[a] = 0; ibits[a] = 0;
+                                } else if (addr_mapped(A)) {
+                                    uint8_t ar[16];
+                                    inline_a[a] = true;
+                                    if (rd_at(A, ar, 16)) {
+                                        idp[a] = le64b(ar);
+                                        ibits[a] = le32b(ar + 8);
+                                    }
+                                } else {
+                                    inline_a[a] = true;
+                                    idp[a] = 0xFFFFFFFFFFFFFFFFull; ibits[a] = 0;
+                                }
+                            }
+                        } else nargs = 0;
+                    }
+                }
+                // запись: {u32 slot, u32 defIdx, u32 nargs,
+                //          nargs × {i32 slotRefOrNeg, u64 dp, u32 bits}}
+                uint32_t slot = (uint32_t)i;
+                uint32_t ddef = (uint32_t)(def_dp & 0xFFFFFFFFu);
+                fwrite(&slot, 4, 1, f);
+                fwrite(&ddef, 4, 1, f);
+                fwrite(&nargs, 4, 1, f);
+                (void)def_bits;
+                for (uint32_t a = 0; a < nargs; ++a) {
+                    int32_t ref;
+                    uint64_t dp2; uint32_t b2;
+                    uint64_t A = untag(argsl[a]);
+                    if (!inline_a[a]) {
+                        ref = (int32_t)((A - tp) / 8);
+                        memcpy(&dp2, slotmem + (size_t)ref * 12, 8);
+                        memcpy(&b2, slotmem + (size_t)ref * 12 + 8, 4);
+                    } else {
+                        ref = -1;
+                        dp2 = idp[a]; b2 = ibits[a];
+                    }
+                    fwrite(&ref, 4, 1, f);
+                    fwrite(&dp2, 8, 1, f);
+                    fwrite(&b2, 4, 1, f);
+                }
+                ++n;
+            }
+            fclose(f);
+            say("  benzhack_ginst.bin — %llu инстанций (ошибок %llu)",
+                (unsigned long long)n, (unsigned long long)nerr);
+        }
+    }
+
+    // ---- fieldOffsets ----
+    if (fo_ptr && fo_cnt) {
+        // Голова сырьём (на случай не--pointer layout'а).
+        {
+            char path[256];
+            snprintf(path, sizeof(path), "%s/benzhack_fo_head.bin", out_dir);
+            FILE* f = fopen(path, "wb");
+            uint8_t head[4096] = {};
+            if (f && rd_at(fo_ptr, head, sizeof(head))) {
+                uint64_t p = fo_ptr;
+                fwrite(&p, 8, 1, f);
+                fwrite(head, 1, sizeof(head), f);
+                fclose(f);
+            }
+        }
+        char path[256];
+        snprintf(path, sizeof(path), "%s/benzhack_fo.bin", out_dir);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            uint64_t hdr[3] = {0x35224245, fo_cnt, fo_ptr};
+            fwrite(hdr, 8, 3, f);
+            const uint64_t n_cap = (fo_cnt > 200000) ? 200000 : fo_cnt;
+            uint8_t pbuf[1u << 20];
+            uint64_t i = 0;
+            while (i < n_cap && now_s() < t0 + 180.0) {
+                const uint64_t chunk = (n_cap - i < (1ull << 20) / 8)
+                                         ? (n_cap - i) : ((1ull << 20) / 8);
+                if (!rd_at(fo_ptr + i * 8, pbuf, chunk * 8)) break;
+                for (uint64_t j = 0; j < chunk; ++j, ++i) {
+                    uint64_t P = untag(le64b(pbuf + j * 8));
+                    uint32_t idx = (uint32_t)i, len = 0;
+                    if (P > 0x10000 && addr_mapped(P)) {
+                        uint8_t data[512 * 4];
+                        if (rd_at(P, data, sizeof(data))) {
+                            len = 512;
+                            fwrite(&idx, 4, 1, f);
+                            fwrite(&len, 4, 1, f);
+                            fwrite(data, 1, sizeof(data), f);
+                            continue;
+                        }
+                    }
+                    fwrite(&idx, 4, 1, f);
+                    fwrite(&len, 4, 1, f);
+                }
+            }
+            fclose(f);
+            say("  benzhack_fo.bin — %llu типов (по 512 u32 на тип)",
+                (unsigned long long)n_cap);
+        }
+    }
+
+    // ---- method pointers (codeGenModules) ----
+    if (cgm_ptr && cgm_cnt) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/benzhack_mptrs.bin", out_dir);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            uint64_t hdr[3] = {0x35224245, cgm_cnt, cgm_ptr};
+            fwrite(hdr, 8, 3, f);
+            uint8_t pbuf[256 * 8];
+            uint64_t i = 0;
+            while (i < cgm_cnt && now_s() < t0 + 240.0) {
+                const uint64_t chunk = (cgm_cnt - i < 256) ? (cgm_cnt - i) : 256;
+                if (!rd_at(cgm_ptr + i * 8, pbuf, chunk * 8)) break;
+                for (uint64_t j = 0; j < chunk; ++j, ++i) {
+                    uint64_t M = untag(le64b(pbuf + j * 8));
+                    uint32_t mi = (uint32_t)i, nlen = 0, mc = 0;
+                    if (addr_mapped(M)) {
+                        uint8_t md[24];
+                        if (rd_at(M, md, sizeof(md))) {
+                            uint64_t name_p = untag(le64b(md));
+                            char nm[128] = {};
+                            if (name_p > 0x10000 && addr_mapped(name_p))
+                                nlen = (uint32_t)read_cstr(name_p, nm, sizeof(nm));
+                            mc = (uint32_t)le64b(md + 16);
+                            uint64_t mp = untag(le64b(md + 8));
+                            fwrite(&mi, 4, 1, f);
+                            fwrite(&nlen, 4, 1, f);
+                            fwrite(nm, 1, nlen, f);
+                            fwrite(&mc, 4, 1, f);
+                            if (mc && mp > 0x10000 && addr_mapped(mp) && mc <= 1000000) {
+                                uint8_t databuf[1u << 20];
+                                uint64_t done = 0;
+                                while (done < mc &&
+                                       now_s() < t0 + 240.0) {
+                                    const uint64_t take = (mc - done < (1ull << 20) / 8)
+                                                            ? (mc - done)
+                                                            : ((1ull << 20) / 8);
+                                    if (!rd_at(mp + done * 8, databuf, take * 8)) break;
+                                    fwrite(databuf, 1, take * 8, f);
+                                    done += take;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            fclose(f);
+            say("  benzhack_mptrs.bin — %llu модулей", (unsigned long long)cgm_cnt);
+        }
+    }
+
+    // ---- misc: genericClasses, genericInsts, methodSpecs, gmTable, invokers,
+    //      typeDefinitionsSizes, genericMethodPointers ----
+    {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/benzhack_misc.bin", out_dir);
+        FILE* f = fopen(path, "wb");
+        auto section = [&](uint32_t tag, uint64_t ptr, uint64_t count,
+                           uint64_t estride, uint64_t cap) {
+            if (!f || !ptr || count == 0) return;
+            if (count > cap) count = cap;
+            uint32_t t = tag, c = (uint32_t)count;
+            fwrite(&t, 4, 1, f);
+            fwrite(&c, 4, 1, f);
+            uint8_t databuf[1u << 20];
+            uint64_t done = 0;
+            while (done < count * estride) {
+                const uint64_t take = (count * estride - done < sizeof(databuf))
+                                         ? (count * estride - done) : sizeof(databuf);
+                if (!rd_at(ptr + done, databuf, (size_t)take)) break;
+                fwrite(databuf, 1, (size_t)take, f);
+                done += take;
+            }
+        };
+        if (f) {
+            section(1, gc_ptr, gc_cnt, 8, 1000000);
+            section(2, gi_ptr, gi_cnt, 8, 2000000);
+            section(3, ms_ptr, ms_cnt, 16, 2000000);
+            section(4, gmt_ptr, gmt_cnt, 8, 2000000);
+            section(5, inv_ptr, inv_cnt, 8, 2000000);
+            section(6, tds_ptr, tds_cnt, 4, 1000000);
+            section(7, gmp_ptr, gmp_cnt, 8, 2000000);
+            section(8, mu_ptr, mu_cnt, 8, 2000000);
+            fclose(f);
+            say("  benzhack_misc.bin — auxiliary tables");
+        }
+    }
+
+    say("v2.5: готово за %.1f с", now_s() - t0);
+}
+
 // ---- main -------------------------------------------------------------------
 
 int main(int argc, char** argv) {
@@ -1771,8 +2401,11 @@ int main(int argc, char** argv) {
     //     большое mmap-выделение и почти всегда начинается у начала области.
     //     Здесь допустим самый тяжёлый случай (версия XOR-нута вместе с
     //     магией) — полный вывод ключей из контекста на первых килобайтах
-    //     дёшев.
-    for (int i = 0; i < g_reg_count && g_cand_count < 16 && !scan_overdue(); ++i) {
+    //     дёшев. СВОЙ бюджет времени: общий бюджет скана (t0) к этому
+    //     моменту уже исчерпан — bug v2.4 (якорная фаза не запускалась).
+    const double t_anchor = now_s();
+    auto anchor_overdue = [&]() { return now_s() - t_anchor > 90.0; };
+    for (int i = 0; i < g_reg_count && g_cand_count < 16 && !anchor_overdue(); ++i) {
         const Reg& r = g_regs[i];
         const uint64_t size = r.end - r.start;
         if (size < (8ull << 20)) continue;
@@ -1794,7 +2427,10 @@ int main(int argc, char** argv) {
     //     строковой таблицы метадаты) идём назад в поисках заголовка, чьи
     //     таблицы НАКРЫВАЮТ эту строку. Работает даже когда протектор
     //     затёр или зашифровал магию — реальная шапка печатается в лог.
+    //     СВОЙ бюджет времени (bug v2.4: общий t0 скана уже истёк).
     static int s_giveups = 0;
+    const double t_marker = now_s();
+    auto marker_overdue = [&]() { return now_s() - t_marker > 120.0; };
     for (int mh_i = 0; mh_i < marker_count && s_giveups < 64; ++mh_i) {
         const MarkerHit& hit = marker_hits[mh_i];
         bool inside = false;
@@ -1819,7 +2455,7 @@ int main(int argc, char** argv) {
         const uint64_t max_back = room > (32ull << 20) ? (32ull << 20) : room;
         uint64_t back = 0;
         bool found = false;
-        while (back < max_back && !scan_overdue()) {
+        while (back < max_back && !marker_overdue()) {
             const uint64_t win_hi = hit.addr - back;   // кандидаты строго ниже
             uint64_t win_lo = win_hi > kWin ? win_hi - kWin : region.start;
             if (win_lo < region.start) win_lo = region.start;
@@ -2113,6 +2749,11 @@ int main(int argc, char** argv) {
     //     в куче процесса, в .so её нет; подпись — продел записей
     //     {datapoint = i, type = CLASS} на 300+ штук подряд.
     scan_types_table(out_dir);
+
+    // 5d. v2.5: регистрации (MetadataRegistration/CodeRegistration) и
+    //     рантайм-таблицы (types, generic-инстанции, fieldOffsets,
+    //     method-указатели) — для ОФФЛАЙН-сборки полного дампа.
+    dump_reg_data(out_dir);
 
     // 6. Считаем, сколько указателей из каждого региона ведёт в метадату
     //    (всю, не только в окно строк): самый «густой» регион — это пул
