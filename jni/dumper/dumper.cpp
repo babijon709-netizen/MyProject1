@@ -818,6 +818,10 @@ static const TTLayout kLayouts[] = {
     {"S16t",  16, 16, 4, 8, -1, 0},   // {u8 type, 3b, u64 dp, pad}
     {"S16tu", 16, 16, 4, 4, -1, 0},   // {u8 type, 3b, u32 dp, pad}
     {"S16x",  16, 16, 0, 8, -1, 8},   // {u64 dp, u8 type, ...}
+    // Il2CppType (runtime, 2020+): {u64 data, u8 type, u8 attrs, u16 numArgs,
+    // u64 metadata}. Живёт только по указателям (types = массив ptr на
+    // объекты) — inline-гейтом не проверяется, только как цель P-стрима.
+    {"S24",   24, 8,  0, 8, -1, 8},
 };
 static const int kNTL = (int)(sizeof(kLayouts) / sizeof(kLayouts[0]));
 static const uint32_t kDPCap = 65536;
@@ -946,7 +950,154 @@ static uint64_t tt_run_unique(const TypesCand& c, uint64_t from, uint64_t max,
 //   u64 start, u64 run, u64 dpmin, u64 dpmax, u64 n_prefix, u64 n, u64 spare.
 // Тело: n × {u64 dp, u32 bits}. Для CLASS-записей dp — и есть TypeDefIndex;
 // стандартные типы — dp == 0 и type 1..14/16/18/19/1c.
+// S24-дамп: 20Б-записи {u64 data, u32 bits=(type<<16|attrs), u64 metadata}
+// + сайдкар benzhack_types_N_names.txt: "индекс\tтокен\tимя\tпространство"
+// (индекс — позиция в массиве указателей от головы CLASS-продела).
+static void ttable_dump_s24(const char* out_dir, int slot, const TypesCand& c) {
+    char path[256], npath[264];
+    snprintf(path, sizeof(path), "%s/benzhack_types_%d.bin", out_dir, slot);
+    snprintf(npath, sizeof(npath), "%s/benzhack_types_%d_names.txt", out_dir, slot);
+    FILE* f = fopen(path, "wb");
+    FILE* nf = fopen(npath, "w");
+    if (!f) { say("  %s не открылся", path); return; }
+
+    struct Rec { uint64_t data; uint32_t bits; uint64_t meta;
+                 uint32_t token; char name[128]; char ns[64]; };
+    auto rd_target = [&](int64_t idx, Rec* r) -> bool {
+        if (idx < 0 && (uint64_t)(-idx) * 8 > c.start) return false;
+        uint64_t p = 0;
+        if (!rd_at(c.start + (int64_t)idx * 8, &p, 8)) return false;
+        p = untag(p);
+        if (!addr_mapped(p)) return false;
+        uint8_t obj[24];
+        if (!rd_at(p, obj, 24)) return false;
+        memcpy(&r->data, obj, 8);
+        r->bits = ((uint32_t)obj[8] << 16) | (uint32_t)obj[9];
+        memcpy(&r->meta, obj + 16, 8);
+        r->token = 0; r->name[0] = 0; r->ns[0] = 0;
+        if (r->meta && addr_mapped(r->meta)) {
+            uint8_t md[24];
+            if (rd_at(r->meta, md, 24)) {
+                uint64_t np = 0, sp = 0;
+                memcpy(&np, md, 8); memcpy(&sp, md + 8, 8);
+                memcpy(&r->token, md + 16, 4);
+                if (np && addr_mapped(np)) {
+                    uint8_t sb[128];
+                    if (rd_at(np, sb, sizeof(sb) - 1)) {
+                        size_t l = strnlen((char*)sb, sizeof(sb) - 1);
+                        memcpy(r->name, sb, l); r->name[l] = 0;
+                    }
+                }
+                if (sp && addr_mapped(sp)) {
+                    uint8_t sb[64];
+                    if (rd_at(sp, sb, sizeof(sb) - 1)) {
+                        size_t l = strnlen((char*)sb, sizeof(sb) - 1);
+                        memcpy(r->ns, sb, l); r->ns[l] = 0;
+                    }
+                }
+            }
+        }
+        return true;
+    };
+    auto type_ok = [](uint32_t t) {
+        return (t >= 1 && t <= 0x1e) || t == 0x40 || t == 0x41 ||
+               t == 0x45 || t == 0x55;
+    };
+
+    static uint8_t tmp[1024 * 1024];
+    size_t used = 0;
+    auto putrec = [&](const Rec* r) {
+        memcpy(tmp + used, &r->data, 8);
+        memcpy(tmp + used + 8, &r->bits, 4);
+        memcpy(tmp + used + 12, &r->meta, 8);
+        used += 20;
+        if (used >= sizeof(tmp) - 32) { fwrite(tmp, 1, used, f); used = 0; }
+    };
+    auto putname = [&](int64_t idx, const Rec* r) {
+        fprintf(nf, "%lld\t%08x\t%s\t%s\n", (long long)idx,
+                (unsigned)r->token, r->name, r->ns);
+    };
+
+    // pre: до 64 валидных записей до головы
+    Rec pre[64]; uint64_t npre = 0;
+    for (int j = 1; j <= 64 && npre < 64; ++j) {
+        Rec r;
+        if (!rd_target(-(int64_t)j, &r)) break;
+        if (!type_ok((r.bits >> 16) & 0xff)) break;
+        pre[npre++] = r;
+    }
+    for (uint64_t i = 0; i < npre / 2; ++i) {
+        Rec t = pre[i];
+        pre[i] = pre[npre - 1 - i];
+        pre[npre - 1 - i] = t;
+    }
+
+    uint32_t magic = 0x42544154, li = 11, isptr = 1, stride = 24;
+    uint64_t h_start = c.start, h_run = c.run, h0 = 0;
+    uint64_t h_npre = 0, h_n = 0;
+    fwrite(&magic, 4, 1, f);  fwrite(&li, 4, 1, f);
+    fwrite(&isptr, 4, 1, f);   fwrite(&stride, 4, 1, f);
+    fwrite(&h_start, 8, 1, f); fwrite(&h_run, 8, 1, f);
+    fwrite(&h0, 8, 1, f);      fwrite(&h0, 8, 1, f);   // dpmin=dpmax=0
+    fwrite(&h_npre, 8, 1, f);  fwrite(&h_n, 8, 1, f);
+    fwrite(&h0, 8, 1, f);
+
+    for (uint64_t i = 0; i < npre; ++i) {
+        putrec(&pre[i]);
+        putname(-(int64_t)(npre - i), &pre[i]);
+    }
+
+    // run: полный CLASS-продел (до первого не-CLASS)
+    uint64_t nrun = 0;
+    for (;;) {
+        Rec r;
+        if (!rd_target((int64_t)nrun, &r)) break;
+        if (((r.bits >> 16) & 0xff) != 0x12) break;
+        putrec(&r);
+        if (nrun < 64 || (nrun & 4095) == 0 || nrun >= 200000)
+            say("  types24[%llu]: type=%02x data=%llx meta=%llx",
+                (unsigned long long)nrun, (unsigned)((r.bits >> 16) & 0xff),
+                (unsigned long long)r.data, (unsigned long long)r.meta);
+        putname((int64_t)nrun, &r);
+        ++nrun;
+        if (nrun >= 200000) break;
+    }
+    h_run = nrun;
+
+    // tail: до 2048 валидных после продела (первый — записью nrun)
+    uint64_t ntail = 0;
+    for (uint64_t j = 0; j < 2048; ++j) {
+        Rec r;
+        if (!rd_target((int64_t)(nrun + j), &r)) break;
+        if (!type_ok((r.bits >> 16) & 0xff)) break;
+        putrec(&r);
+        if (j < 64)
+            say("  types24 tail[+%llu]: type=%02x data=%llx",
+                (unsigned long long)j,
+                (unsigned)((r.bits >> 16) & 0xff), (unsigned long long)r.data);
+        putname((int64_t)(nrun + j), &r);
+        ++ntail;
+    }
+    if (used) fwrite(tmp, 1, used, f);
+
+    h_npre = npre;
+    h_n = npre + nrun + ntail;
+    fseek(f, 24, SEEK_SET);
+    fwrite(&h_run, 8, 1, f);
+    fseek(f, 48, SEEK_SET);
+    fwrite(&h_npre, 8, 1, f);
+    fwrite(&h_n, 8, 1, f);
+    fclose(f);
+    if (nf) fclose(nf);
+    say("  %s — S24* массив 0x%llx, CLASS-run %llu, префикс %llu, хвост %llu, "
+        "всего %llu (имена: %s)",
+        path, (unsigned long long)c.start, (unsigned long long)nrun,
+        (unsigned long long)npre, (unsigned long long)ntail,
+        (unsigned long long)h_n, npath);
+}
+
 static void ttable_dump(const char* out_dir, int slot, const TypesCand& c) {
+    if (c.li == 11) { ttable_dump_s24(out_dir, slot, c); return; }
     const TTLayout& L = kLayouts[c.li];
     char path[256];
     snprintf(path, sizeof(path), "%s/benzhack_types_%d.bin", out_dir, slot);
@@ -1054,8 +1205,55 @@ static void scan_types_table(const char* out_dir) {
     auto verify_ptr_run = [&](uint64_t start, uint64_t len) {
         (void)len;
         if (g_ttable_count >= 8) return;
+        // S24: стрим указателей на Il2CppType {u64 data, u8 type@8, u8 attrs@9,
+        // u16 numArgs, u64 metadata@16}. Голова таблицы = CLASS-продел
+        // (TypeDef'ы в порядке образов, mscorlib первым). Стрим может
+        // начинаться НЕ с головы (чужие указатели перед таблицей) — ищем
+        // длиннейший CLASS-продел среди первых 4000 целей.
+        {
+            const uint64_t maxj = len < 4000 ? len : 4000;
+            uint8_t obj[24];
+            int best_h = -1, best_run = 0, cur_h = -1, cur_run = 0;
+            for (uint64_t j = 0; j < maxj; ++j) {
+                uint64_t p = 0, meta = 0;
+                bool cls = rd_at(start + j * 8, &p, 8) &&
+                           addr_mapped(untag(p)) &&
+                           rd_at(untag(p), obj, 24) && obj[8] == 0x12;
+                if (cls) {
+                    // metadata обязан быть 0 или картой-указателем: без этого
+                    // 12Б-записи {dp, bits=0x120000} читаются как CLASS-объект
+                    memcpy(&meta, obj + 16, 8);
+                    if (meta && !(untag(meta) % 8 == 0 && addr_mapped(untag(meta))))
+                        cls = false;
+                }
+                if (cls) {
+                    if (cur_run == 0) cur_h = (int)j;
+                    if (++cur_run > best_run) { best_run = cur_run; best_h = cur_h; }
+                } else cur_run = 0;
+            }
+            if (best_h >= 0 && (uint64_t)best_run >= kRunMin) {
+                const uint64_t hs = start + (uint64_t)best_h * 8;
+                bool dup = false;
+                for (int i = 0; i < g_ttable_count && !dup; ++i) {
+                    const TypesCand& k = g_ttables[i];
+                    if (!k.is_ptr) continue;
+                    if (hs >= k.start && hs < k.start + k.run * 8) dup = true;
+                }
+                if (!dup) {
+                    TypesCand c; c.start = hs; c.li = 11; c.is_ptr = true;
+                    c.run = (uint64_t)best_run; c.dpmin = 0; c.dpmax = 0;
+                    g_ttables[g_ttable_count++] = c;
+                    say("  ТАБЛИЦА ТИПОВ v2: S24* (Il2CppType ptrs), 0x%llx, "
+                        "CLASS-run %llu (голова +0x%llx от начала стрима)",
+                        (unsigned long long)hs, (unsigned long long)best_run,
+                        (unsigned long long)(hs - start));
+                    return;
+                }
+            }
+        }
         // Первая цель уже проверялась? — нет: проверяем заново, это 1-2 pread.
         for (int li = 0; li < kNTL; ++li) {
+            if (li == 11) continue;   // S24 — отдельный путь ниже
             TypesCand c; c.start = start; c.li = li; c.is_ptr = true;
             uint64_t dp = 0; uint32_t b = 0;
             if (!tt_raw(c, 0, &dp, &b)) continue;
