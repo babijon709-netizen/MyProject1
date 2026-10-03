@@ -1587,8 +1587,14 @@ int main(int argc, char** argv) {
     uint64_t last_marker_addr = ~0ull;
     static int s_v38_rej = 0, s_scan_rej = 0;
     const double t0 = now_s();
-
-    // Магия найдена по адресу mfound: v38+ — тройки/мозаика сразу, старые
+    // Wall-clock бюджет скана: на живой игре чтение огромных регионов
+    // (page-фолты, конкуренция за память) может занимать минуты без единой
+    // строки в логе — выглядит как зависание (ран pid 31751: скан уткнулся
+    // в гигантский регион после 2436/4721 и «завис»). Бюджет заканчивает
+    // только СКАН, не ран: блоб всё ещё найдут якорный путь (шапка в
+    // начале региона) и маркерный (метки уже собраны), затем 5b выбирает.
+    const double kScanBudget = 120.0;
+    auto scan_overdue = [&]() { return now_s() - t0 > kScanBudget; };
     // версии — в очередь magic_hits (таблицы проверяет parse_blob в 5b).
     auto try_magic = [&](uint64_t mfound, const Reg& r, int ridx) {
         if (cand_inside(mfound)) return;
@@ -1700,10 +1706,11 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < g_reg_count &&
              (hit_count < 16 || marker_count < 64 || g_cand_count < 16) &&
-             scanned < kScanCap; ++i) {
+             scanned < kScanCap && !scan_overdue(); ++i) {
         const Reg& r = g_regs[i];
         int fails = 0;
-        for (uint64_t at = r.start; at + kNeed <= r.end && scanned < kScanCap;) {
+        for (uint64_t at = r.start; at + kNeed <= r.end && scanned < kScanCap &&
+             !scan_overdue();) {
             const uint64_t remain = r.end - at;
             size_t want = (remain > sizeof(buf)) ? sizeof(buf) : (size_t)remain;
             if (!rd_at(at, buf, want)) {
@@ -1752,6 +1759,9 @@ int main(int argc, char** argv) {
             at += want - (kNeed - 1);
         }
     }
+    if (scan_overdue())
+        say("бюджет времени (%.0f с) исчерпан — скан окончен досрочно, блоб "
+            "ищу по якорям/меткам", kScanBudget);
     say("просмотрено %llu МБ за %.1f с, строк: %d, шапок RVM: %d, меток: %d, "
         "кандидатов: %d",
         (unsigned long long)(scanned >> 20), now_s() - t0, hit_count,
@@ -1762,7 +1772,7 @@ int main(int argc, char** argv) {
     //     Здесь допустим самый тяжёлый случай (версия XOR-нута вместе с
     //     магией) — полный вывод ключей из контекста на первых килобайтах
     //     дёшев.
-    for (int i = 0; i < g_reg_count && g_cand_count < 16; ++i) {
+    for (int i = 0; i < g_reg_count && g_cand_count < 16 && !scan_overdue(); ++i) {
         const Reg& r = g_regs[i];
         const uint64_t size = r.end - r.start;
         if (size < (8ull << 20)) continue;
@@ -1803,10 +1813,13 @@ int main(int argc, char** argv) {
         static uint8_t win[(1u << 20) + 0x210];
         const uint64_t kWin = 1u << 20;
         const uint64_t room = hit.addr - region.start;
-        const uint64_t max_back = room > (160ull << 20) ? (160ull << 20) : room;
+        // Канонический блоб — отдельный mmap (<= ~30 МБ) с шапкой в начале
+        // региона: дальше 32 МБ назад от метки шапки нет. Было 160 МБ — на
+        // лже-метках в гигантских аренах это 160 окон по МБ каждая.
+        const uint64_t max_back = room > (32ull << 20) ? (32ull << 20) : room;
         uint64_t back = 0;
         bool found = false;
-        while (back < max_back) {
+        while (back < max_back && !scan_overdue()) {
             const uint64_t win_hi = hit.addr - back;   // кандидаты строго ниже
             uint64_t win_lo = win_hi > kWin ? win_hi - kWin : region.start;
             if (win_lo < region.start) win_lo = region.start;
