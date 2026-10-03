@@ -87,6 +87,11 @@
 //   benzhack_mptrs.bin      — (v2.5) codeGenModules: на модуль запись
 //                             {u32 mi, u32 nlen, name, u32 mc, u32 mdone,
 //                             mdone×u64 адреса} — RVA = адрес − база .so;
+//   (v2.6) ptr1..3 снимаются на ВСЁМ размахе указателей (без 64MB-капа), а
+//   benzhack_heapN.bin — SPARSE-захват остальных крупных анонимных rw-
+//   регионов (u64 офс + 4096 Б на ненулевую страницу; заголовок
+//   magic|base|size|page_count). Метод-пулы классов разбросаны по всему heap:
+//   старые 64MB-окна не доснимали ~70% методов.
 //   benzhack_misc.bin       — (v2.5) genericClasses, genericInsts,
 //                             methodSpecs, genericMethodTable, invokers,
 //                             typeDefinitionsSizes, genericMethodPointers,
@@ -1855,7 +1860,7 @@ static void dump_reg_data(const char* out_dir) {
         snprintf(path, sizeof(path), "%s/benzhack_types_full.bin", out_dir);
         FILE* f = fopen(path, "wb");
         if (f) {
-            uint64_t hdr[4] = {0x35224245, tc, tp, tc_cap};  // magic BZ25
+            uint64_t hdr[4] = {0x36224245, tc, tp, tc_cap};  // magic BZ26
             fwrite(hdr, 8, 4, f);
             uint64_t i = 0, bad = 0;
             uint8_t pbuf[1u << 20];
@@ -2016,7 +2021,7 @@ static void dump_reg_data(const char* out_dir) {
         snprintf(path, sizeof(path), "%s/benzhack_fo.bin", out_dir);
         FILE* f = fopen(path, "wb");
         if (f) {
-            uint64_t hdr[3] = {0x35224245, fo_cnt, fo_ptr};
+            uint64_t hdr[3] = {0x36224245, fo_cnt, fo_ptr};
             fwrite(hdr, 8, 3, f);
             const uint64_t n_cap = (fo_cnt > 200000) ? 200000 : fo_cnt;
             uint8_t pbuf[1u << 20];
@@ -2057,7 +2062,7 @@ static void dump_reg_data(const char* out_dir) {
         snprintf(path, sizeof(path), "%s/benzhack_mptrs.bin", out_dir);
         FILE* f = fopen(path, "wb");
         if (f) {
-            uint64_t hdr[3] = {0x35224245, cgm_cnt, cgm_ptr};
+            uint64_t hdr[3] = {0x36224245, cgm_cnt, cgm_ptr};
             fwrite(hdr, 8, 3, f);
             uint8_t pbuf[256 * 8];
             uint64_t i = 0;
@@ -2907,9 +2912,11 @@ int main(int argc, char** argv) {
                 uint64_t hi = g_regs[best].last_inwin + (128ull << 10);
                 if (hi > g_regs[best].end) hi = g_regs[best].end;
                 const uint64_t span = hi - lo;
-                if (span > (64ull << 20)) say("  ptr%d: размах %llu МБ — снимаю первые 64 МБ",
-                    top + 1, (unsigned long long)(span >> 20));
-                dump_range(out_dir, name, lo, span, 64ull << 20);
+                // v2.6: без 64MB-капа — весь размах. Метод-пулы классов лежат
+                // вдали от самих классов: 64MB оставляли ~70% методов без кода.
+                say("  ptr%d: размах %llu МБ — снимаю целиком", top + 1,
+                    (unsigned long long)(span >> 20));
+                dump_range(out_dir, name, lo, span, 1ull << 30);
             } else {
                 dump_range(out_dir, name, lo, 256ull << 10, 256ull << 10);
             }
@@ -2939,6 +2946,76 @@ int main(int argc, char** argv) {
             say("  пишущиеся сегменты образа 0x%llx..0x%llx (%llu МБ)",
                 (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)((hi - lo) >> 20));
             dump_range(out_dir, "benzhack_imagedata.bin", lo, hi - lo, 2ull << 30);
+        }
+    }
+    // v2.6: SPARSE-захват всех крупных анонимных rw-регионов, не снятых
+    // целиком ptr-окнами. Метод-пулы классов (88B-записи, токен 0x06xxxxxx)
+    // разбросаны по всему heap; старые 64MB-окна не доснимали ~70% методов.
+    // Формат файла:
+    //   u64 magic 0x36224245 | u64 base | u64 region_size | u64 page_count
+    //   затем page_count записей { u64 offset_в_регионе | 4096 байт }
+    {
+        int h = 0;
+        for (int i = 0; i < g_reg_count; ++i) {
+            const Reg& r = g_regs[i];
+            if (r.kind != kAnon || r.perms[0] != 'r' || r.perms[1] != 'w') continue;
+            const uint64_t sz = r.end - r.start;
+            if (sz < (16ull << 20) || sz > (512ull << 20)) continue;
+            // Уже снят целиком ptr-окном (тот же регион, размах >= нашему)?
+            bool covered = false;
+            for (int t = 0; t < 3 && !covered; ++t) {
+                if (g_tops[t] < 0 || g_regs[g_tops[t]].start != r.start) continue;
+                const uint64_t f = g_regs[g_tops[t]].first_inwin;
+                const uint64_t lo2 = (f > (128ull << 10) && f - (128ull << 10) >= g_regs[g_tops[t]].start)
+                    ? (f - (128ull << 10)) : g_regs[g_tops[t]].start;
+                const uint64_t hi2 = g_regs[g_tops[t]].last_inwin + (128ull << 10);
+                if (lo2 <= r.start && hi2 >= r.end - (1ull << 20)) covered = true;
+            }
+            if (covered) continue;
+            // Проба на нулевой регион (3 страницы).
+            uint8_t pr[3 * 4096];
+            uint64_t holes = 0, nz = 0;
+            const uint64_t offs[3] = {0, sz >> 1, sz >> 2};
+            for (int t = 0; t < 3; ++t) {
+                uint64_t off = offs[t];
+                if (off + 4096 > sz) off = sz - 4096;
+                if (rd_at(r.start + off, pr + (size_t)t * 4096, 4096)) {
+                    for (size_t k = 0; k < 4096; ++k)
+                        if (pr[(size_t)t * 4096 + k]) ++nz;
+                } else ++holes;
+            }
+            if (holes || (double)nz / (3.0 * 4096.0) < 0.2) continue;
+            ++h;
+            char name[64];
+            snprintf(name, sizeof(name), "benzhack_heap%d.bin", h);
+            char path[300];
+            snprintf(path, sizeof(path), "%s/%s", out_dir, name);
+            FILE* out = fopen(path, "wb");
+            if (!out) { say("  не открылся %s", path); continue; }
+            uint64_t hdr[4] = {0x36224245ull, r.start, sz, 0};
+            static uint8_t pbuf[4096];
+            uint64_t pcount = 0, done = 0;
+            for (uint64_t po = 0; po + 4096 <= sz; po += 4096) {
+                if (!rd_at(r.start + po, pbuf, 4096)) break;
+                bool any = false;
+                for (int k = 0; k < 4096; ++k) if (pbuf[k]) { any = true; break; }
+                if (!any) continue;
+                const uint64_t rec = po;
+                if (fwrite(&rec, 1, 8, out) != 8 ||
+                    fwrite(pbuf, 1, 4096, out) != 4096) break;
+                ++pcount;
+                done += 4104;
+                if (done > kWriteCap) break;
+            }
+            hdr[3] = pcount;
+            fseek(out, 0, SEEK_SET);
+            fwrite(hdr, 1, 32, out);
+            fclose(out);
+            g_written += done + 32;
+            say("  heap%d: 0x%llx..0x%llx (%llu МБ, страниц %llu, %llu МБ) -> %s",
+                h, (unsigned long long)r.start, (unsigned long long)r.end,
+                (unsigned long long)(sz >> 20), (unsigned long long)pcount,
+                (unsigned long long)(done >> 20), name);
         }
     }
     say("всего записано %llu МБ", (unsigned long long)(g_written >> 20));
