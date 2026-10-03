@@ -84,8 +84,9 @@
 //   benzhack_fo.bin         — (v2.5) fieldOffsets: на каждый тип указатель
 //                             на массив до 512 int32-смещений полей
 //                             (+benzhack_fo_head.bin — 4 КБ сырьём);
-//   benzhack_mptrs.bin      — (v2.5) codeGenModules: имя модуля + массив
-//                             адресов методов (RVA = адрес − база .so);
+//   benzhack_mptrs.bin      — (v2.5) codeGenModules: на модуль запись
+//                             {u32 mi, u32 nlen, name, u32 mc, u32 mdone,
+//                             mdone×u64 адреса} — RVA = адрес − база .so;
 //   benzhack_misc.bin       — (v2.5) genericClasses, genericInsts,
 //                             methodSpecs, genericMethodTable, invokers,
 //                             typeDefinitionsSizes, genericMethodPointers,
@@ -96,8 +97,8 @@
 //
 // Искать регистрации (v2.5) не по адресам, а по ФОРМЕ:
 //   MetadataRegistration — slot typesCount (5..500k) + указатель на массив
-//   указателей на 16-байтовые записи {dp, bits}, где первые 64 записи —
-//   валидные Il2CppType (CLASS-записи с dp=TypeDefIndex без повторов).
+//   указателей на 16-байтовые записи {dp, bits}, где первые 128 записей —
+//   валидные Il2CppType (CLASS/VALUETYPE с dp=TypeDefIndex без повторов).
 //   CodeRegistration — codeGenModulesCount (50..500) + массив модулей, у
 //   каждого читаемое строковое имя и plausible methodPointerCount.
 //
@@ -1601,11 +1602,14 @@ static bool type_bits_ok(uint32_t bits, uint64_t dp) {
 
 // Проверка кандидата на массив types: head -> массив указателей на Il2CppType.
 static bool verify_types_array(uint64_t head, int* ncls_out) {
-    uint8_t pb[64 * 8];
+    // Первые ~50 TypeIndex-слотов — special-типы (void/bool/.../Object/
+    // ValueType/generic-параметры), дальше — классы в TypeDef-порядке.
+    // Окно 128 закрывает оба блока.
+    uint8_t pb[128 * 8];
     if (!rd_at(head, pb, sizeof(pb))) return false;
     int ok = 0, cls = 0, nd = 0;
-    uint64_t seen[32];
-    for (int j = 0; j < 64; ++j) {
+    uint64_t seen[64];
+    for (int j = 0; j < 128; ++j) {
         uint64_t P = untag(le64b(pb + (size_t)j * 8));
         if (!addr_mapped(P)) continue;
         uint8_t rec[16];
@@ -1618,11 +1622,11 @@ static bool verify_types_array(uint64_t head, int* ncls_out) {
             ++cls;
             int dup = 0;
             for (int k = 0; k < nd; ++k) if (seen[k] == dp) { dup = 1; break; }
-            if (!dup && nd < 32) seen[nd++] = dp;
+            if (!dup && nd < 64) seen[nd++] = dp;
         }
     }
     if (ncls_out) *ncls_out = cls;
-    return ok >= 40 && cls >= 25 && nd >= 5;
+    return ok >= 80 && cls >= 30 && nd >= 8;
 }
 
 // Проверка кандидата на codeGenModules-массив.
@@ -1633,11 +1637,13 @@ static bool verify_cgm_array(uint64_t head) {
     for (int j = 0; j < 8; ++j) {
         uint64_t M = untag(le64b(pb + (size_t)j * 8));
         if (!addr_mapped(M)) continue;
+        // Il2CppCodeGenModule (v27+): +0x00 имя(char*), +0x08 кол-во
+        // методов, +0x10 указатель на массив methodPointers.
         uint8_t md[24];
         if (!rd_at(M, md, sizeof(md))) continue;
-        uint64_t name_p = untag(le64b(md));
-        uint64_t mp = untag(le64b(md + 8));
-        uint64_t mc = le64b(md + 16);
+        uint64_t name_p = untag(le64b(md + 0x00));
+        uint64_t mc = le64b(md + 0x08);
+        uint64_t mp = untag(le64b(md + 0x10));
         if (name_p < 0x10000 || !addr_mapped(name_p)) continue;
         if (mp && (!addr_mapped(mp) || mc > 300000)) continue;
         char nm[64] = {};
@@ -1667,7 +1673,7 @@ static void find_registrations(uint64_t lo, uint64_t hi, uint64_t* mreg_out,
             const uint64_t abs = at + i;
             if (abs & 7) continue;
             // MetadataRegistration: types-указатель в abs, typesCount в abs-8.
-            if (!mreg_out || !*mreg_out) {
+            if ((!mreg_out || !*mreg_out) && i >= 8) {
                 const uint64_t cnt = le64b(buf + i - 8);
                 if (cnt < 5000 || cnt > 500000) continue;
                 const uint64_t V = untag(le64b(buf + i));
@@ -1679,7 +1685,7 @@ static void find_registrations(uint64_t lo, uint64_t hi, uint64_t* mreg_out,
                     (unsigned long long)cnt, (unsigned long long)V);
             }
             // CodeRegistration: база 16-выровнена; поля в +0x78/+0x80.
-            if (creg_out && !*creg_out && (abs & 15) == 0) {
+            if (creg_out && !*creg_out && (abs & 15) == 0 && i + 0x88 <= want) {
                 const uint64_t c = le64b(buf + i + 0x78);
                 if (c < 50 || c > 500) continue;
                 const uint64_t M = untag(le64b(buf + i + 0x80));
@@ -1875,11 +1881,12 @@ static void dump_reg_data(const char* out_dir) {
                         dp = 0xFFFFFFFFFFFFFFFFull;
                         ++bad;
                     }
-                    // в файл 12 Б: dp + bits; в slotmem то же.
+                    // в файл 12 Б: dp + bits; в slotmem то же
+                    // (i уже инкрементирован — индекс слота = i-1).
                     fwrite(&dp, 8, 1, f);
                     fwrite(&bits, 4, 1, f);
-                    memcpy(slotmem + (i - chunk) * 12, &dp, 8);
-                    memcpy(slotmem + (i - chunk) * 12 + 8, &bits, 4);
+                    memcpy(slotmem + (i - 1) * 12, &dp, 8);
+                    memcpy(slotmem + (i - 1) * 12 + 8, &bits, 4);
                 }
             }
             fclose(f);
@@ -2021,18 +2028,21 @@ static void dump_reg_data(const char* out_dir) {
                 for (uint64_t j = 0; j < chunk; ++j, ++i) {
                     uint64_t P = untag(le64b(pbuf + j * 8));
                     uint32_t idx = (uint32_t)i, len = 0;
+                    uint8_t data[512 * 4] = {};
                     if (P > 0x10000 && addr_mapped(P)) {
-                        uint8_t data[512 * 4];
-                        if (rd_at(P, data, sizeof(data))) {
-                            len = 512;
-                            fwrite(&idx, 4, 1, f);
-                            fwrite(&len, 4, 1, f);
-                            fwrite(data, 1, sizeof(data), f);
-                            continue;
+                        // Размер уступающим: массив = int32[fieldCount] и
+                        // может уходить в конец маппинга.
+                        for (uint32_t tryn = 512; tryn >= 4; tryn /= 2) {
+                            if (rd_at(P, data, (size_t)tryn * 4)) {
+                                len = tryn;
+                                break;
+                            }
                         }
                     }
                     fwrite(&idx, 4, 1, f);
                     fwrite(&len, 4, 1, f);
+                    if (len)
+                        fwrite(data, 1, (size_t)len * 4, f);
                 }
             }
             fclose(f);
@@ -2056,33 +2066,35 @@ static void dump_reg_data(const char* out_dir) {
                 if (!rd_at(cgm_ptr + i * 8, pbuf, chunk * 8)) break;
                 for (uint64_t j = 0; j < chunk; ++j, ++i) {
                     uint64_t M = untag(le64b(pbuf + j * 8));
-                    uint32_t mi = (uint32_t)i, nlen = 0, mc = 0;
+                    uint32_t mi = (uint32_t)i, nlen = 0, mc = 0, mdone = 0;
                     if (addr_mapped(M)) {
                         uint8_t md[24];
                         if (rd_at(M, md, sizeof(md))) {
-                            uint64_t name_p = untag(le64b(md));
+                            // +0 имя, +8 кол-во, +10.. массив (см. verify_cgm_array).
+                            uint64_t name_p = untag(le64b(md + 0x00));
                             char nm[128] = {};
                             if (name_p > 0x10000 && addr_mapped(name_p))
                                 nlen = (uint32_t)read_cstr(name_p, nm, sizeof(nm));
-                            mc = (uint32_t)le64b(md + 16);
-                            uint64_t mp = untag(le64b(md + 8));
+                            mc = (uint32_t)le64b(md + 0x08);
+                            uint64_t mp = untag(le64b(md + 0x10));
+                            if (mc && mp > 0x10000 && addr_mapped(mp) &&
+                                mc <= 1000000) {
+                                uint8_t databuf[1u << 20];
+                                while (mdone < mc && now_s() < t0 + 240.0) {
+                                    const uint64_t take = (mc - mdone < (1ull << 20) / 8)
+                                                            ? (mc - mdone)
+                                                            : ((1ull << 20) / 8);
+                                    if (!rd_at(mp + mdone * 8, databuf, take * 8))
+                                        break;
+                                    fwrite(databuf, 1, take * 8, f);
+                                    mdone += take;
+                                }
+                            }
                             fwrite(&mi, 4, 1, f);
                             fwrite(&nlen, 4, 1, f);
                             fwrite(nm, 1, nlen, f);
                             fwrite(&mc, 4, 1, f);
-                            if (mc && mp > 0x10000 && addr_mapped(mp) && mc <= 1000000) {
-                                uint8_t databuf[1u << 20];
-                                uint64_t done = 0;
-                                while (done < mc &&
-                                       now_s() < t0 + 240.0) {
-                                    const uint64_t take = (mc - done < (1ull << 20) / 8)
-                                                            ? (mc - done)
-                                                            : ((1ull << 20) / 8);
-                                    if (!rd_at(mp + done * 8, databuf, take * 8)) break;
-                                    fwrite(databuf, 1, take * 8, f);
-                                    done += take;
-                                }
-                            }
+                            fwrite(&mdone, 4, 1, f);
                         }
                     }
                 }
@@ -2116,12 +2128,15 @@ static void dump_reg_data(const char* out_dir) {
             }
         };
         if (f) {
+            // Страйды по roytu/Il2CppDumper (v39):
+            //   methodSpecs = 3×int32 = 12Б; gmTable = int32+{int32,int32} = 12Б;
+            //   typeDefinitionsSizes = size_t[] = 8Б; остальное — массивы u64.
             section(1, gc_ptr, gc_cnt, 8, 1000000);
             section(2, gi_ptr, gi_cnt, 8, 2000000);
-            section(3, ms_ptr, ms_cnt, 16, 2000000);
-            section(4, gmt_ptr, gmt_cnt, 8, 2000000);
+            section(3, ms_ptr, ms_cnt, 12, 2000000);
+            section(4, gmt_ptr, gmt_cnt, 12, 2000000);
             section(5, inv_ptr, inv_cnt, 8, 2000000);
-            section(6, tds_ptr, tds_cnt, 4, 1000000);
+            section(6, tds_ptr, tds_cnt, 8, 1000000);
             section(7, gmp_ptr, gmp_cnt, 8, 2000000);
             section(8, mu_ptr, mu_cnt, 8, 2000000);
             fclose(f);
