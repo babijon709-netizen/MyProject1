@@ -33,9 +33,9 @@ img_names = []
 for line in open('02_assemblies_images.txt'):
     m = re.match(r'^\s{2}(\S.*?)\s+version=', line)
     if m: img_names.append(m.group(1))
-m2code = {int(k): v for k, v in json.load(open('../google_drive/m2code.json')).items()}
+m2code = {int(k): v for k, v in json.load(open('../google_drive/m2code3_mapped.json')).items()}
 loaded = set()
-for fn in ('../google_drive/classes_found.txt',):
+for fn in ('../google_drive/classes_found_7619.txt',):
     for line in open(fn):
         loaded.add(int(line.split('\t')[0]))
 print('loaded:', len(loaded), 'm2code:', len(m2code))
@@ -91,7 +91,7 @@ for line in src:
         if md is not None and md in m2code:
             code, off = m2code[md]
             if off is not None:
-                out.append('            // RVA(file) = 0x' + format(off,'x') + '   run7598 = 0x' + format(code, '012x'))
+                out.append('            // RVA(file) = 0x' + format(off,'x') + '   run7619 = 0x' + format(code, '012x'))
                 n_rvas += 1
                 rva_by_type[cur_td] += 1
 print('methods:', n_methods_seen, 'name-fail:', n_namefail, 'RVA:', n_rvas, 'loaded:', loaded_marked)
@@ -117,7 +117,7 @@ for md in sorted(m2code):
     full = (ns + '.' if ns else '') + nm
     imgn = img_names[img_of[ti]] if img_of[ti] < len(img_names) else 'image' + str(img_of[ti])
     out8[str(md)] = {'name': md_names[md], 'type': imgn + '/' + full,
-                     'runtime_7598': hex(code) if code else None,
+                     'runtime_7619': hex(code) if code else None,
                      'file_off': hex(off) if off is not None else None}
 json.dump(out8, open('08_methods.json','w'), indent=1)
 print('08_methods.json:', len(out8))
@@ -129,37 +129,46 @@ for ti, t in enumerate(types):
     if have == t[15]: full_t += 1
 print('типов частично:', cov, 'полностью:', full_t)
 open('09_dump_summary.txt','w').write(
-'Полный дамп global-metadata.dat (v39) + runtime-информация (ран 7598)\n'
-'==========================================================================\n\n'
+'Полный дамп global-metadata.dat (v39) + runtime-информация (ран 7619, dumper v2.6)\n'
+'====================================================================================\n\n'
 'Ассембли:             201\n'
 'Типов (TypeDef):      31 704\n'
-'Загруженных классов:  28 057 (88%; остальные — generic-инстанциации, в захвате нет)\n'
+'Загруженных классов:  31 704 (100% — в ране 7598 было 28 057, 88%)\n'
 'Методов (метаданные): 284 191\n'
-'Методов с кодом:       81 692 (28.7%; у 81 672 — RVA, 20 — null/абстрактные)\n'
-'Полей:                140 070 (имена/типы — в 06; offsets — нет)\n\n'
+'Методов с pool-структурой: 130 991 (46.1%; в ране 7598 — 81 692, 28.7%)\n'
+'  из них с RVA в .so:   130 532 (45.9%); без кода (null, не вызывались): 459\n'
+'Полей:                140 070 (имена/типы — в 06; offsets — нет, см. ОГРАНИЧЕНИЯ)\n\n'
 'ФАЙЛЫ\n-----\n'
 '06_full_dump.cs  C#-дамп ВСЕХ типов.\n'
-'                 [LOADED]     — класс загружен в ране 7598 (28 057 шт).\n'
-'                 // RVA(file) — сдвиг тела метода в libil2cpp.so (== ELF RVA:\n'
-'                 //              RX-сегмент, off == vaddr); 81 672 метки.\n'
-'                 // run7598    — абсолютный адрес метода в ран-тайме рана 7598.\n'
+'                 [LOADED]     — класс загружен в ране 7619 (31 704 шт = все).\n'
+'                 // RVA(file) — сдвиг точки входа метода в libil2cpp.so\n'
+'                 //              (== ELF RVA); 130 532 метки.\n'
+'                 // run7619    — абсолютный адрес метода в ран-тайме рана 7619.\n'
 '07_script.json   формат Il2CppDumper: "0x<file_off>" -> "Assembly/Type::Method"\n'
-'                 (81 479 записей) — для il2cpp-tamper / дизассемблеров.\n'
-'08_methods.json  md-index -> {name, type, runtime_7598, file_off}, 81 692 записи.\n'
+'                 (126 246 уникальных RVA) — для il2cpp-tamper / дизассемблеров.\n'
+'08_methods.json  md-index -> {name, type, runtime_7619, file_off}, 130 991 запись.\n'
 '01..05           первичные артефакты парсера (.dat: шапка, ассембли, типы).\n\n'
-'ВЕРИФИКАЦИЯ\n-----------\n'
+'ВЕРИФИКАЦИЯ (ран 7619)\n-----------\n'
 '* Каждая запись RAM-пула проверена дважды: токен 0x06<MD-index> на +0x20 и\n'
-'  имя метода (указатель на строку .dat) на +0x48 — 81 692/81 692.\n'
-'* Все 81 672 RVA лежат в RX-сегменте .so; выборка 300/300 декодируется в\n'
-'  чистый ARM64 (capstone).\n'
-'* Блок PlayerManager (784 метода): имена 1:1 с метаданными, RVA у 783/784.\n'
+'  имя метода (указатель на строку .dat) на +0x48 — 130 991/130 991.\n'
+'* VA->RVA маппинг: 81 671/81 672 метода, найденных и в ране 7598 (где RVA\n'
+'  сверены с .so, 300/300 ARM64-декод), лежат ровно на a_new = a_old + 0x74b000\n'
+'  (однородный сдвиг ASLR) -> chunk-константы перенесены без потерь.\n'
+'* Все 130 532 RVA лежат в RX-сегменте .so [0x50c2dd0, 0xd24f560); 0 вне.\n'
+'* Блок PlayerManager (784 метода): имена 1:1 с метаданными.\n'
 '* Особенность .so (протектор): тела методов склеены в крупные функции;\n'
-'  метод-указатель = точка входа ВНУТРИ функции (stub b #.. / прямой вход).\n'
-'  Для дизассемблера точка входа корректна (туда прыгает runtime).\n\n'
-'ОГРАНИЧЕНИЯ (зачем нужен re-run v2.6)\n-------------------------------------\n'
-'1. RVAs у ~71% методов: их пулы лежали вне 64MB-окон ptr1/ptr3. В v2.6 окна\n'
-'   снимаются на весь размах + sparse-захват остальных heap-регионов\n'
-'   (benzhack_heapN.bin) -> после re-run ожидается ~100%.\n'
-'2. Field offsets: нужны benzhack_fo.bin из того же re-run (v2.5+).\n'
-'3. Generic-инстанциации (3 647 типов) не загружены в ране 7598.\n')
+'  метод-указатель = точка входа ВНУТРИ функции (stub b #.. / прямой вход).\n\n'
+'ОГРАНИЧЕНИЯ\n-----------\n'
+'1. Остальные ~153 200 методов (53.9%): pool-структуры в ране 7619 не\n'
+'   материализованы (lazy — рантайм создаёт их по первому обращению). Все\n'
+'   вероятные места пулов сняты целиком: ptr1 на весь размах (183 из 192 МБ\n'
+'   региона 0x6dd0000000, дальше 192 МБ — пусто), ptr3 (61 МБ), все 15\n'
+'   heapN-регионов g_tops (~730 МБ, sparse). Пулы методов сконцентрированы в\n'
+'   первых ~135 МБ ptr1. Дальше — только другой/длинный игровой сценарий\n'
+'   (каждый новый run добавляет материализованные методы; маппинг VA->RVA\n'
+'   переносится по пересечению с этим раном).\n'
+'2. Field offsets: MetadataRegistration не найдена ни в ране 7598, ни в 7619\n'
+'   (скан ~2.9 ГБ, 0 кандидатов) -> benzhack_fo.bin нет, offsets полей нет.\n'
+'3. Generic-инстанциации теперь загружены (100% типов), но их методы входят\n'
+'   в общий процент из п.1.\n')
 print('09 готов')
