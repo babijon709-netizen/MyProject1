@@ -69,9 +69,26 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // own methods and following  adrp/ldr -> R_AARCH64_RELATIVE addend -> slot,
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xD9A8C68;  // было 0xD9C5310; через слот читаются activePlayerList(+0x8, 14 методов) и clientPlayerList(+0x10, 19 методов) — раскладка статиков ровно наша
+//
+// МЕХАНИЗМ (важно, ошибка 9e26509 была ровно здесь): код игры читает класс
+// ДВУМЯ шагами — adrp/ldr берёт из .data ВНЕШНЮЮ GOT-запись (outer), чьё
+// содержимое лоадер восстанавливает релокацией R_AARCH64_RELATIVE: значение
+// outer = base + addend = адрес ВНУТРЕННЕГО слота; klass = [внутренний слот].
+// Наш читер делает ОНО разыменование: rd_ptr(base + RVA) -> klass. Значит RVA
+// обязан быть ВНУТРЕННИМ слотом (addend), а не внешней записью! Проверка
+// этого билда (дизассемблер + .rela.dyn): PM OnStartClient@0x69184f0:
+//   ldr x20,[0xd9a8c68]  ; outer -> reloc addend 0xddb1ad8
+//   ldr x0,[x20]         ; klass = [0xddb1ad8]
+//   ldr x8,[x0,#0xB8]    ; static_fields -> [x8,#0x10] clientPlayerList
+// NC get_connection@0xbfd8b04: outer 0xd9a71a0 -> addend 0x59daa78,
+//   klass=[0x59daa78], statics[+0x38]=connection (все 6 статиков NC идут
+//   через этот же слот: handlers+0x28, spawned+0x30, connection+0x38,
+//   ready+0x40, localPlayer+0x48, prefabs+0x78).
+// GC (iu@0x68922d8 и 12 методов): outer 0xd9a72f8 -> addend 0x59d921c,
+//   klass=[0x59d921c], statics — все 13 полей GameControllerBase.
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDDB1AD8;  // ВНУТРЕННИЙ слот (addend outer 0xd9a8c68); в 9e26509 ошибочно стоял внешний 0xD9A8C68 — одно разыменование давало адрес слота вместо класса, из-за этого не работал ВЕСЬ софт; через слот читаются activePlayerList(+0x8, 14 методов) и clientPlayerList(+0x10, 19 методов)
 // Cysharp.Threading.Tasks.PlayerLoopHelper; re-derived from this release ELF.
-inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA    = 0xD9A7AB8;  // было 0xD9C52E0; runners(+0x30)
+inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA    = 0xDDB1AA8;  // кандидат = PM-0x30 (в прошлом билде PLH тоже лежал ровно на PM-0x30: 0xD9C52E0 vs 0xD9C5310); прямой код доступа зашифрован протектором (геттер ссылается на заглушку в .dynamic — DT_VERNEED 0x101d0, патчится в рантайме), но внешний слот 0xda41040 имеет релоку R_AARCH64_RELATIVE ровно на 0xddb1aa8, и код @0xc7f576c передаёт klass с этого слота в вызов. Имя класса всё равно сверяется (loot_memory: class_state "PlayerLoopHelper"/"Cysharp.Threading.Tasks")
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
 
@@ -110,7 +127,7 @@ inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = 0x18;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xD9A72F8; // GameControllerBase; было 0xD9C0690; статик <zxC>PlayerManager(+0x10) из 13 собственных методов
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0x59D921C; // ВНУТРЕННИЙ слот (addend outer 0xd9a72f8; в 9e26509 ошибочно 0xD9A72F8); GameControllerBase, все 13 статиков
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -412,7 +429,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xD9A71A0;  // было 0xD9C4570; единственный слот, через который читаются ВСЕ шесть статиков NetworkClient: handlers(+0x28), spawned(+0x30), connection(+0x38), ready(+0x40), localPlayer(+0x48), prefabs(+0x78)
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0x59DAA78;  // ВНУТРЕННИЙ слот (addend outer 0xd9a71a0; в 9e26509 ошибочно 0xD9A71A0); единственный слот со ВСЕМИ шестью статиками NetworkClient: handlers(+0x28), spawned(+0x30), connection(+0x38), ready(+0x40), localPlayer(+0x48), prefabs(+0x78); сам слот лежит в RX-области 0x59dxxxx (протектор прячет данные среди кода) и заполняется его рантайм-инициализацией
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x30;  // было 0x28; перед spawned вставлен handlers(+0x28)
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -461,8 +478,15 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 // снова переименован (IY -> UV -> ak); структура цела: единственный
 // не-literal статик (List<Self>, offset 0x0) + TOD_CycleParameters Cycle
 // на 0x40. Прошлые окна: 0xD7A0000..0xD840000, затем 0xD9B0000..0xDA50000.
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xD990000;  // было 0xD9B0000; слоты найдены в 0xd9a3af0..0xda0f960
-inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDA30000; // BEGIN + 0xA0000
+// Окно = весь слотовый регион .bss этого билда: рантайм-таблица слотов типов
+// (данные benzhack: 31696 записей на RVA 0xdd9d380..0xdddb180) плюс соседние
+// слоты (0xdd00550, 0xdd45258, 0xdd5xxxx, 0xdd6xxxx, PM 0xddb1ad8). В 9e26509
+// окно ошибочно накрывало .data.rel.ro (внешние записи: в них лежат АДРЕСА
+// слотов, а не классы). 768 КБ = 768 шагов сканера по 1 КБ (~13 с @60fps),
+// сканер крутится циклично и валидирует кандидатов по полной структуре
+// (статик List<Self> + Cycle + sane-дата), так что ложных срабатываний нет.
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDD00000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDDC0000; // BEGIN + 0xC0000
 inline constexpr std::uint64_t TOD_SKY_CYCLE      = 0x40; // TOD_Sky.Cycle
 inline constexpr std::uint64_t TOD_CYCLE_HOUR     = 0x10; // TOD_CycleParameters.Hour
 inline constexpr std::uint64_t TOD_CYCLE_DAY      = 0x14;
