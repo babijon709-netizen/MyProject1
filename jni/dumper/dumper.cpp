@@ -2158,6 +2158,55 @@ int main(int argc, char** argv) {
         dump_blob_full(out_dir, blob_at, blob_extent, blob_version,
                        blob_v38 != 0, blob_sorted, blob_key, blob_body_xor != 0);
     }
+    // СЛЕПЫЙ съём: в новых ран-билдах (pid 31751/10513) шапка не найдена ни
+    // одним путём (якорь, мозаика, метки) — похоже, в памяти зашифрован
+    // ЦЕЛИКОМ блоб, а не только шапка. Снимаем сырьём все /dev/zero (и
+    // hidden) регионы правдоподобного размера: ключ вскрывается оффлайн
+    // (offset первой секции 0x17C..0x18C известен -> мозаика перебором
+    // ключа t[j]^(0x17C+g), 465 кандидатов). Фильтр «заполненность»:
+    // метадата (чистая или XOR-нутая) почти не содержит нулей, свежая
+    // арена — почти вся нули.
+    {
+        int zeros_done = 0;
+        uint64_t zeros_bytes = 0;
+        for (int i = 0; i < g_reg_count && zeros_done < 4 &&
+             zeros_bytes < (128ull << 20); ++i) {
+            const Reg& r = g_regs[i];
+            const uint64_t sz = r.end - r.start;
+            if (sz < (16ull << 20) || sz > (96ull << 20)) continue;
+            const bool is_zero_file = strstr(r.path, "/dev/zero") != nullptr;
+            if (!is_zero_file && r.kind != kHidden) continue;
+            uint8_t pr[3 * 4096];
+            uint64_t holes = 0, nz = 0;
+            const uint64_t offs[3] = {0, sz >> 1, sz >> 2};
+            for (int t = 0; t < 3; ++t) {
+                uint64_t off = offs[t];
+                if (off + 4096 > sz) off = sz - 4096;
+                if (rd_at(r.start + off, pr + (size_t)t * 4096, 4096)) {
+                    for (size_t k = 0; k < 4096; ++k)
+                        if (pr[(size_t)t * 4096 + k]) ++nz;
+                } else ++holes;
+            }
+            if (holes >= 3) continue;
+            const double frac = (double)nz / (3.0 * 4096.0);
+            if (frac < 0.5) {
+                say("  %s 0x%llx..0x%llx (%llu МБ) — нулей %.0f%%, пропускаю",
+                    is_zero_file ? "/dev/zero" : "hidden",
+                    (unsigned long long)r.start, (unsigned long long)r.end,
+                    (unsigned long long)(sz >> 20), (100.0 - frac * 100.0));
+                continue;
+            }
+            char name[64];
+            snprintf(name, sizeof(name), "benzhack_zero%d.bin", zeros_done + 1);
+            say("  %s 0x%llx..0x%llx (%llu МБ, заполнено %.0f%%) -> %s",
+                is_zero_file ? "/dev/zero" : "hidden",
+                (unsigned long long)r.start, (unsigned long long)r.end,
+                (unsigned long long)(sz >> 20), frac * 100.0, name);
+            dump_range(out_dir, name, r.start, sz, sz);
+            ++zeros_done;
+            zeros_bytes += sz;
+        }
+    }
     if (hit_count) {
         dump_range(out_dir, "benzhack_meta.bin", win_lo, win_hi - win_lo, 16ull << 20);
     }
