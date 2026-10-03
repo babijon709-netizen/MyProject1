@@ -782,24 +782,46 @@ static void dump_blob_full(const char* out_dir, uint64_t addr, uint64_t size,
     }
 }
 
-// ---- Рантайм-таблица типов ---------------------------------------------------
+// ---- Рантайм-таблица типов (v2) --------------------------------------------
 //
-// В рантайм-таблице Il2CppMetadataRegistration.types TypeDef занимают начало:
-// запись i = {datapoint = i (klassIndex), type = CLASS (0x12)}. За TypeDef-ами
-// идут СТАНДАРТНЫЕ типы (datapoint = 0, type = 1..0x1c: void, bool, char, ...)
-// и прочие особые (массивы, инстансы дженериков). Индексы этих записей в
-// таблице — и есть те самые TypeIndex, на которые ссылаются поля
-// global-metadata.dat (returnType/parentIndex/typeIdx). Таблица строится
-// рантаймом в куче — в .so её нет, только в памяти процесса.
+// Таблица Il2CppMetadataRegistration.types: записи TypeDef =
+//   {datapoint = TypeDefIndex (0..N-1), type = CLASS (0x12)};
+// рядом (в начале или в конце) — стандартные типы {datapoint = 0,
+// type = 1..0x1c: void..object}. Индексы этих записей — те самые
+// TypeIndex полей global-metadata.dat. Таблица — в куче процесса.
 //
-// Подпись: run из 300+ записей {dp = i, CLASS} подряд. Варианты расположения:
-//   1 = S8   записи {u32 dp, u32 bits} прямо в массиве, штрих 8
-//   2 = S12  записи {u64 dp, u32 bits} в массиве, штрих 12
-//   3 = S16  записи {u64 dp, u32 bits, pad} в массиве, штрих 16
-//   4 = P8   массив u64-указателей -> записи {u32 dp, u32 bits}
-//   5 = P12  массив u64-указателей -> записи {u64 dp, u32 bits}
-// Цель указателя — в маппированной памяти, цели стоят плотно (штрих 8/12/16) —
-// по этому фильтруем, прежде чем читать.
+// v1 (dp строго i, i+1, ...) таблицу не нашёл — подпись расслаблена:
+//   продел из 300+ СМЕЖНЫХ записей {type == CLASS, dp < 65536},
+//   dp — все различны (битмап). Это покрывает таблицу, где TypeDef-ы
+//   не в порядке метаданных (dp — перестановка), и различный порядок
+//   полей в записи. Плюс: массив у64-указателей, чьи цели — записи
+//   Il2CppType в одном из layout'ов (цели могут быть разбросаны).
+
+struct TTLayout {
+    const char* name;
+    uint32_t stride;    // штрих записи
+    uint32_t align;     // выравнивание начала записи (4/8/16)
+    uint32_t dp_off;    // смещение dp
+    uint32_t dp_len;    // 4 или 8
+    int32_t bits_off;   // >=0: смещение u32-слова bits (type = bits>>16)
+    uint32_t type_off;  // <0 bits_off: смещение байта type
+};
+static const TTLayout kLayouts[] = {
+    {"S8",    8,  8,  0, 4,  4, 0},
+    {"S8r",   8,  8,  4, 4,  0, 0},
+    {"S8x",   8,  8,  0, 4, -1, 4},   // {u32 dp, u8 type, ...}
+    {"S12",   12, 4,  0, 8,  8, 0},
+    {"S12r",  12, 4,  4, 8,  0, 0},
+    {"S12t",  12, 4,  4, 8, -1, 0},   // {u8 type, 3b, u64 dp}
+    {"S16",   16, 16, 0, 8,  8, 0},
+    {"S16r",  16, 16, 8, 8,  0, 0},
+    {"S16t",  16, 16, 4, 8, -1, 0},   // {u8 type, 3b, u64 dp, pad}
+    {"S16tu", 16, 16, 4, 4, -1, 0},   // {u8 type, 3b, u32 dp, pad}
+    {"S16x",  16, 16, 0, 8, -1, 8},   // {u64 dp, u8 type, ...}
+};
+static const int kNTL = (int)(sizeof(kLayouts) / sizeof(kLayouts[0]));
+static const uint32_t kDPCap = 65536;
+static const uint32_t kRunMin = 300;
 
 static bool addr_mapped(uint64_t v) {
     if (v < 0x1000) return false;
@@ -815,96 +837,132 @@ static bool addr_mapped(uint64_t v) {
 }
 
 struct TypesCand {
-    uint64_t start = 0;      // голова массива (после докатки назад)
-    uint64_t dp0 = 0;        // dp первой записи головы
-    int variant = 0;         // 1..5
-    uint64_t run = 0;        // длина продела {dp=i, CLASS} от головы
+    uint64_t start = 0;      // голова (после докатки назад)
+    int li = 0;              // индекс layout'а
+    bool is_ptr = false;     // 1 = массив u64-указателей
+    uint64_t run = 0;        // длина CLASS-продела
+    uint64_t dpmin = 0, dpmax = 0;
 };
 static TypesCand g_ttables[8];
 static int g_ttable_count = 0;
 
-static uint32_t tbits32(size_t off, size_t len, const uint8_t* buf) {
-    if (off + 4 > len) return ~0u;
-    uint32_t v; memcpy(&v, buf + off, 4); return v;
-}
-static uint64_t tbits64(size_t off, size_t len, const uint8_t* buf) {
+static uint64_t ttbits64(size_t off, size_t len, const uint8_t* buf) {
     if (off + 8 > len) return ~0ull;
     uint64_t v; memcpy(&v, buf + off, 8); return v;
 }
 
-// Чтение записи с логическим индексом i (может быть отрицательным — до
-// головы) БЕЗ валидации. true — байты прочитаны.
-static bool ttable_raw(const TypesCand& c, int64_t i, uint64_t* dp, uint32_t* bits) {
-    uint64_t a;
-    if (c.variant == 1)      a = c.start + (uint64_t)i * 8;
-    else if (c.variant == 3) a = c.start + (uint64_t)i * 16;
-    else if (c.variant == 2) a = c.start + (uint64_t)i * 12;
-    else {                                   // P8/P12: u64-указатель на запись
-        const uint64_t pa = c.start + (uint64_t)i * 8;
-        uint64_t p = 0;
-        if (!rd_at(pa, &p, 8)) return false;
-        p = untag(p);
-        if (!addr_mapped(p)) return false;
-        a = p;
+// Затвор по буферу: запись в buf[off..off+stride) выглядит как
+// {CLASS, dp < cap}? Возвращает dp.
+static bool tt_gate_buf(const TTLayout& L, size_t off, size_t len,
+                        const uint8_t* buf, uint64_t* dp) {
+    if (off + L.stride > len) return false;
+    const uint8_t* p = buf + off;
+    uint32_t type;
+    if (L.bits_off >= 0) {
+        uint32_t b; memcpy(&b, p + L.bits_off, 4);
+        type = (b >> 16) & 0xff;
+    } else {
+        type = p[L.type_off];
     }
-    if (c.variant == 1 || c.variant == 4) {  // {u32 dp, u32 bits}
-        uint32_t d = 0, b = 0;
-        if (!rd_at(a, &d, 4) || !rd_at(a + 4, &b, 4)) return false;
-        *dp = d; *bits = b;
-    } else {                                 // S12/S16/P12: {u64 dp, u32 bits}
-        uint64_t d = 0; uint32_t b = 0;
-        if (!rd_at(a, &d, 8) || !rd_at(a + 8, &b, 4)) return false;
-        *dp = d; *bits = b;
-    }
+    if (type != 0x12) return false;
+    uint64_t d = 0;
+    if (L.dp_len == 4) { uint32_t v; memcpy(&v, p + L.dp_off, 4); d = v; }
+    else memcpy(&d, p + L.dp_off, 8);
+    if (d >= kDPCap) return false;
+    *dp = d;
     return true;
 }
 
-// Валидная TypeDef-запись продела: dp = dp0 + i и type = CLASS.
-static bool ttable_rec(const TypesCand& c, uint64_t i, uint64_t* dp, uint32_t* bits) {
-    if (!ttable_raw(c, (int64_t)i, dp, bits)) return false;
-    if (*dp != c.dp0 + i) return false;
-    return ((((uint32_t)(*bits)) >> 16 & 0xff) == 0x12);
+// Чтение записи с логическим индексом i (отрицательный — до головы)
+// напрямую из памяти. Возвращает dp и «bits» (для byte-type layout'ов —
+// type << 16).
+static bool tt_raw(const TypesCand& c, int64_t i, uint64_t* dp, uint32_t* bits) {
+    const TTLayout& L = kLayouts[c.li];
+    uint8_t rec[16];
+    uint64_t a;
+    if (c.is_ptr) {
+        uint64_t p = 0;
+        if (!rd_at(c.start + (uint64_t)i * 8, &p, 8)) return false;
+        p = untag(p);
+        if (!addr_mapped(p)) return false;
+        if (!rd_at(p, rec, L.stride)) return false;
+        a = p; (void)a;
+    } else {
+        a = c.start + (uint64_t)i * L.stride;
+        if (!rd_at(a, rec, L.stride)) return false;
+    }
+    uint32_t type;
+    if (L.bits_off >= 0) {
+        uint32_t b; memcpy(&b, rec + L.bits_off, 4);
+        *bits = b;
+        type = (b >> 16) & 0xff;
+    } else {
+        type = rec[L.type_off];
+        *bits = type << 16;
+    }
+    if (L.dp_len == 4) {
+        uint32_t v; memcpy(&v, rec + L.dp_off, 4);
+        *dp = v;
+    } else {
+        memcpy(dp, rec + L.dp_off, 8);
+    }
+    (void)a;
+    return true;
 }
 
-// Похоже на Il2CppType-запись (любой тип) — для пре/постфикса таблицы.
-static bool ttable_plausible(uint64_t dp, uint32_t bits) {
-    const uint32_t t = (bits >> 16) & 0xff;
-    const bool type_ok = (t >= 1 && t <= 0x1e) || t == 0x40 || t == 0x41 ||
-                         t == 0x45 || t == 0x55;
-    return type_ok && (bits & 0xffff) < 0x8000 && dp < 1000000;
+// Правдоподобная запись (для пре/постфикса): любой валидный type,
+// dp = 0 или < cap.
+static bool tt_plausible(const TypesCand& c, int64_t i, uint64_t* dp,
+                         uint32_t* type) {
+    uint32_t b = 0;
+    if (!tt_raw(c, i, dp, &b)) return false;
+    *type = (b >> 16) & 0xff;
+    const bool type_ok = (*type >= 1 && *type <= 0x1e) || *type == 0x40 ||
+                         *type == 0x41 || *type == 0x45 || *type == 0x55;
+    return type_ok && (*dp == 0 || *dp < kDPCap);
 }
 
-// Длина продела {dp=i, CLASS} от (start, dp0, variant), максимум max.
-static uint64_t ttable_run(const TypesCand& c, uint64_t max) {
+// Длина CLASS-продела от from: все записи {CLASS, dp<cap}, dp без повторов.
+static uint64_t tt_run_unique(const TypesCand& c, uint64_t from, uint64_t max,
+                              uint8_t* seen, uint64_t* dpmin, uint64_t* dpmax) {
     uint64_t n = 0;
     while (n < max) {
-        uint64_t dp = 0; uint32_t b = 0;
-        if (!ttable_rec(c, n, &dp, &b)) break;
+        uint64_t dp = 0; uint32_t t = 0;
+        uint32_t b = 0;
+        if (!tt_raw(c, (int64_t)(from + n), &dp, &b)) break;
+        t = (b >> 16) & 0xff;
+        if (t != 0x12 || dp >= kDPCap) break;
+        if (seen[dp >> 3] & (1u << (dp & 7))) break;
+        seen[dp >> 3] |= (1u << (dp & 7));
+        if (dp < *dpmin) *dpmin = dp;
+        if (dp > *dpmax) *dpmax = dp;
         ++n;
     }
     return n;
 }
 
-// Дамп таблицы: префикс (до продела — там МОГУТ быть стандартные типы),
-// сам продел, хвост (стандартные типы МОГУТ быть здесь).
-// Шапка (64 Б): u32 magic 0x42544154, u32 variant, u64 start, u64 run,
-//   u64 dp0, u64 n_prefix, u64 n, u64, u64 — потом n × {u64 dp, u32 bits}.
-// Абсолютный индекс j-й записи в таблице = j - n_prefix, для TypeDef
-// dp = dp0 + (j - n_prefix).
+// Дамп: префикс + продел + хвост.
+// Шапка (64 Б): u32 magic 0x42544154, u32 layout, u32 is_ptr, u32 stride,
+//   u64 start, u64 run, u64 dpmin, u64 dpmax, u64 n_prefix, u64 n, u64 spare.
+// Тело: n × {u64 dp, u32 bits}. Для CLASS-записей dp — и есть TypeDefIndex;
+// стандартные типы — dp == 0 и type 1..14/16/18/19/1c.
 static void ttable_dump(const char* out_dir, int slot, const TypesCand& c) {
+    const TTLayout& L = kLayouts[c.li];
     char path[256];
     snprintf(path, sizeof(path), "%s/benzhack_types_%d.bin", out_dir, slot);
     FILE* f = fopen(path, "wb");
     if (!f) { say("  %s не открылся", path); return; }
 
-    uint32_t magic = 0x42544154, variant = (uint32_t)c.variant;
-    uint64_t h_start = c.start, h_run = c.run, h_dp0 = c.dp0,
-             h_npre = 0, h_n = 0, h0 = 0, h1 = 0;
-    fwrite(&magic, 4, 1, f);  fwrite(&variant, 4, 1, f);
+    uint32_t magic = 0x42544154, li = (uint32_t)c.li,
+             isptr = (uint32_t)(c.is_ptr ? 1 : 0), stride = c.is_ptr ? 8 : L.stride;
+    uint64_t h_start = c.start, h_run = c.run, h_dpmin = c.dpmin,
+             h_dpmax = c.dpmax, h_npre = 0, h_n = 0, h0 = 0;
+    fwrite(&magic, 4, 1, f);  fwrite(&li, 4, 1, f);
+    fwrite(&isptr, 4, 1, f);  fwrite(&stride, 4, 1, f);
     fwrite(&h_start, 8, 1, f); fwrite(&h_run, 8, 1, f);
-    fwrite(&h_dp0, 8, 1, f);
-    fwrite(&h_npre, 8, 1, f); fwrite(&h_n, 8, 1, f);
-    fwrite(&h0, 8, 1, f);     fwrite(&h1, 8, 1, f);
+    fwrite(&h_dpmin, 8, 1, f); fwrite(&h_dpmax, 8, 1, f);
+    fwrite(&h_npre, 8, 1, f);  fwrite(&h_n, 8, 1, f);
+    fwrite(&h0, 8, 1, f);
 
     static uint8_t tmp[1024 * 1024];
     size_t used = 0;
@@ -915,24 +973,20 @@ static void ttable_dump(const char* out_dir, int slot, const TypesCand& c) {
         if (used >= sizeof(tmp) - 16) { fwrite(tmp, 1, used, f); used = 0; }
     };
 
-    // Префикс: назад от головы, пока правдоподобно (кап 2048).
     const int64_t PREF_CAP = 2048, TAIL_CAP = 2048;
     uint8_t pre[2048 * 12];
     size_t npre = 0;
     for (int64_t j = -1; j >= PREF_CAP * -1 && npre < (size_t)PREF_CAP; --j) {
-        uint64_t dp = 0; uint32_t b = 0;
-        if (!ttable_raw(c, j, &dp, &b)) break;
-        if (!ttable_plausible(dp, b)) break;
+        uint64_t dp = 0; uint32_t t = 0;
+        if (!tt_plausible(c, j, &dp, &t)) break;
+        const uint32_t tb = t << 16;
         memcpy(pre + npre * 12, &dp, 8);
-        memcpy(pre + npre * 12 + 8, &b, 4);
+        memcpy(pre + npre * 12 + 8, &tb, 4);
         ++npre;
         if (npre <= 64)
-            say("  types pref[-%llu]: type=%02x dp=%llu attrs=%04x",
-                (unsigned long long)(-j), (unsigned)((b >> 16) & 0xff),
-                (unsigned long long)dp, (unsigned)(b & 0xffff));
+            say("  types pref[-%llu]: type=%02x dp=%llu",
+                (unsigned long long)(-j), (unsigned)t, (unsigned long long)dp);
     }
-    // Собрано в порядке j = -1, -2, ... — разворачиваем в табличный
-    // (по возрастанию индекса в таблице).
     for (size_t i = 0; i < npre / 2; ++i)
         for (int k = 0; k < 12; ++k) {
             uint8_t t = pre[i * 12 + k];
@@ -942,168 +996,279 @@ static void ttable_dump(const char* out_dir, int slot, const TypesCand& c) {
     if (npre) fwrite(pre, 1, npre * 12, f);
     h_npre = (uint64_t)npre;
 
-    // Продел (валидированный — значения те же, что в ttable_rec).
     uint64_t nrun = 0;
     for (uint64_t i = 0; i < c.run; ++i) {
         uint64_t dp = 0; uint32_t b = 0;
-        if (!ttable_raw(c, (int64_t)i, &dp, &b)) break;
+        if (!tt_raw(c, (int64_t)i, &dp, &b)) break;
         putrec(dp, b);
         ++nrun;
     }
 
-    // Хвост: после продела, пока правдоподобно.
     uint64_t ntail = 0;
     for (uint64_t j = 0; j < (uint64_t)TAIL_CAP; ++j) {
-        uint64_t dp = 0; uint32_t b = 0;
-        if (!ttable_raw(c, (int64_t)(c.run + j), &dp, &b)) break;
-        if (!ttable_plausible(dp, b)) break;
-        putrec(dp, b);
+        uint64_t dp = 0; uint32_t t = 0;
+        if (!tt_plausible(c, (int64_t)(c.run + j), &dp, &t)) break;
+        putrec(dp, t << 16);
         ++ntail;
         if (j < 64)
-            say("  types tail[+%llu]: type=%02x dp=%llu attrs=%04x",
-                (unsigned long long)j, (unsigned)((b >> 16) & 0xff),
-                (unsigned long long)dp, (unsigned)(b & 0xffff));
+            say("  types tail[+%llu]: type=%02x dp=%llu",
+                (unsigned long long)j, (unsigned)t, (unsigned long long)dp);
     }
     if (used) fwrite(tmp, 1, used, f);
 
     h_n = h_npre + nrun + ntail;
-    // h_npre (офс 32) и h_n (офс 40) стояли 0 в шапке — перепишем.
-    fseek(f, 32, SEEK_SET);
+    fseek(f, 48, SEEK_SET);
     fwrite(&h_npre, 8, 1, f);
     fwrite(&h_n, 8, 1, f);
     fclose(f);
 
-    // Границы продела — проверка dp-последовательности оффлайн.
-    uint64_t d0 = 0, dN = 0; uint32_t b0 = 0, bN = 0;
-    if (c.run && ttable_raw(c, 0, &d0, &b0) &&
-                 ttable_raw(c, (int64_t)(c.run - 1), &dN, &bN))
-        say("  %s — вариант %d, массив 0x%llx, run %llu, dp0=%llu, "
-            "префикс %llu, хвост %llu, всего %llu; run: dp %llu..%llu",
-            path, c.variant, (unsigned long long)c.start,
-            (unsigned long long)c.run, (unsigned long long)c.dp0,
-            (unsigned long long)h_npre, (unsigned long long)ntail,
-            (unsigned long long)h_n, (unsigned long long)d0,
-            (unsigned long long)dN);
+    say("  %s — layout %s%s, массив 0x%llx, run %llu, dp %llu..%llu, "
+        "префикс %llu, хвост %llu, всего %llu",
+        path, L.name, c.is_ptr ? "*" : "", (unsigned long long)c.start,
+        (unsigned long long)c.run, (unsigned long long)c.dpmin,
+        (unsigned long long)c.dpmax, (unsigned long long)h_npre,
+        (unsigned long long)ntail, (unsigned long long)h_n);
 }
 
-// Сканируем всю читаемую память в поисках таблицы типов. Проход по чанкам
-// (1 МБ, overlap 8 Б): 8-выровненные позиции (S8/S16/P8/P12) и
-// 12-выровненные (S12).
+// Сканируем всю читаемую память. Чанк 1 МБ (overlap 8 Б); если чанк не
+// читается — по 16 КБ кускам (внутри «плохого» региона могут жить
+// хорошие страницы).
 static void scan_types_table(const char* out_dir) {
     const double t0 = now_s();
     uint64_t scanned = 0;
     static uint8_t buf[1024 * 1024];
 
-    auto consider = [&](uint64_t start, uint64_t dp0, int variant) {
+    // Диапазон «кучных» адресов для затвора указательных массивов.
+    uint64_t heap_lo = ~0ull, heap_hi = 0;
+    for (int i = 0; i < g_reg_count; ++i) {
+        if (g_regs[i].start < heap_lo) heap_lo = g_regs[i].start;
+        if (g_regs[i].end > heap_hi) heap_hi = g_regs[i].end;
+    }
+
+    static uint8_t seen[kDPCap / 8];
+
+    // Состояние потокового поиска указательных проделов.
+    bool ptr_active = false;
+    uint64_t ptr_start = 0, ptr_len = 0;
+
+    auto verify_ptr_run = [&](uint64_t start, uint64_t len) {
+        (void)len;
         if (g_ttable_count >= 8) return;
-        const uint64_t stride = (variant == 2) ? 12 : (variant == 3) ? 16 : 8;
-        // Уже знаем эту таблицу (попадание в её пределах)?
+        // Первая цель уже проверялась? — нет: проверяем заново, это 1-2 pread.
+        for (int li = 0; li < kNTL; ++li) {
+            TypesCand c; c.start = start; c.li = li; c.is_ptr = true;
+            uint64_t dp = 0; uint32_t b = 0;
+            if (!tt_raw(c, 0, &dp, &b)) continue;
+            const uint32_t t = (b >> 16) & 0xff;
+            if (t != 0x12 || dp >= kDPCap) continue;
+            memset(seen, 0, sizeof(seen));
+            uint64_t dpmin = ~0ull, dpmax = 0;
+            uint64_t n = tt_run_unique(c, 0, 50000, seen, &dpmin, &dpmax);
+            if (n < kRunMin) continue;
+            // дедуп
+            bool dup = false;
+            for (int i = 0; i < g_ttable_count && !dup; ++i) {
+                const TypesCand& k = g_ttables[i];
+                if (k.li != li || !k.is_ptr) continue;
+                if (start >= k.start && start < k.start + k.run * 8) dup = true;
+            }
+            if (dup) continue;
+            // назад
+            uint64_t back = 0;
+            while (back < 75000) {
+                uint64_t d2 = 0; uint32_t b2 = 0;
+                if (!tt_raw(c, -(int64_t)(back + 1), &d2, &b2)) break;
+                if (((b2 >> 16) & 0xff) != 0x12 || d2 >= kDPCap) break;
+                if (seen[d2 >> 3] & (1u << (d2 & 7))) break;
+                seen[d2 >> 3] |= (1u << (d2 & 7));
+                if (d2 < dpmin) dpmin = d2;
+                if (d2 > dpmax) dpmax = d2;
+                ++back;
+            }
+            if (back) c.start -= back * 8;
+            c.run = n + back;
+            c.dpmin = dpmin; c.dpmax = dpmax;
+            g_ttables[g_ttable_count++] = c;
+            say("  ТАБЛИЦА ТИПОВ v2: layout %s* (указатели), 0x%llx, run %llu, "
+                "dp %llu..%llu (вперёд %llu + назад %llu)",
+                kLayouts[li].name, (unsigned long long)c.start,
+                (unsigned long long)c.run, (unsigned long long)dpmin,
+                (unsigned long long)dpmax, (unsigned long long)n,
+                (unsigned long long)back);
+            return;
+        }
+    };
+
+    // Проверки на кикандида: алиас поверх найденной базы + дубль по
+    // началу + перекрытие диапазона того же layout.
+    auto consider2_checked = [&](uint64_t start, int li) -> bool {
+        const int base_li = (li == 1 || li == 4 || li == 7) ? li - 1 : -1;
+        if (base_li >= 0) {
+            const uint64_t d0 = (li == 1) ? 4 : 8;
+            const uint64_t stride = kLayouts[base_li].stride;
+            TypesCand cB; cB.start = start; cB.li = li; cB.is_ptr = false;
+            for (int i = 0; i < g_ttable_count; ++i) {
+                const TypesCand& A = g_ttables[i];
+                if (A.li != base_li || A.is_ptr || A.start >= start) continue;
+                const uint64_t delta = start - A.start;
+                if (delta < d0 || (delta - d0) % stride != 0) continue;
+                const uint64_t m = (delta - d0) / stride;
+                bool alias = true;
+                for (int k = 0; k < 10 && alias; ++k) {
+                    uint64_t dA0 = 0, dA1 = 0, dB = 0;
+                    uint32_t bA0 = 0, bA1 = 0, bB = 0;
+                    if (!tt_raw(A, (uint64_t)(k + m), &dA0, &bA0)) alias = false;
+                    else if (!tt_raw(A, (uint64_t)(k + m + 1), &dA1, &bA1)) alias = false;
+                    else if (!tt_raw(cB, k, &dB, &bB)) alias = false;
+                    else if (bB != bA0 || dB != dA1) alias = false;
+                }
+                if (alias) {
+                    if (m == 0)
+                        say("  алиас %s поверх %s@0x%llx — серия отброшена",
+                            kLayouts[li].name, kLayouts[base_li].name,
+                            (unsigned long long)A.start);
+                    return false;
+                }
+            }
+        }
+        // Позиция ВНУТРИ уже найденной таблицы (любой layout): это суффикс
+        // или чужое прочтение тех же байтов — таблица уже захвачена.
+        // Без этого каждый 16Б внутри S16t-таблицы стоил полного прохода
+        // ~30К записей (проверка только после прохода — миллиарды чтений).
         for (int i = 0; i < g_ttable_count; ++i) {
             const TypesCand& k = g_ttables[i];
-            if (k.variant != variant) continue;
-            const uint64_t kstride = (k.variant == 2) ? 12u : (k.variant == 3) ? 16u : 8u;
-            if (start >= k.start && start < k.start + k.run * kstride) return;
+            if (k.is_ptr) continue;
+            if (start >= k.start &&
+                start < k.start + k.run * kLayouts[k.li].stride) return false;
         }
-        TypesCand c; c.start = start; c.dp0 = dp0; c.variant = variant;
-        const uint64_t run_fwd = ttable_run(c, 500000);
-        if (run_fwd < 300) return;
-        // Назад — до настоящей головы, по одной записи (кап 600 КБ).
+        return true;
+    };
+    auto consider2 = [&](uint64_t start, int li) {
+        if (g_ttable_count >= 8) return;
+        if (!consider2_checked(start, li)) return;
+        TypesCand c; c.start = start; c.li = li; c.is_ptr = false;
+        memset(seen, 0, sizeof(seen));
+        uint64_t dpmin = ~0ull, dpmax = 0;
+        uint64_t n = tt_run_unique(c, 0, 50000, seen, &dpmin, &dpmax);
+        if (n < kRunMin) return;
+        const uint64_t stride = kLayouts[li].stride;
         uint64_t back = 0;
         while (back * stride < 600000) {
-            TypesCand cb;
-            cb.start = c.start - stride;
-            cb.dp0 = c.dp0 - 1;
-            cb.variant = variant;
-            if (ttable_run(cb, 1) < 1) break;
-            c.start = cb.start;
-            c.dp0 = cb.dp0;
+            uint64_t d2 = 0; uint32_t b2 = 0;
+            if (!tt_raw(c, -(int64_t)(back + 1), &d2, &b2)) break;
+            if (((b2 >> 16) & 0xff) != 0x12 || d2 >= kDPCap) break;
+            if (seen[d2 >> 3] & (1u << (d2 & 7))) break;
+            seen[d2 >> 3] |= (1u << (d2 & 7));
+            if (d2 < dpmin) dpmin = d2;
+            if (d2 > dpmax) dpmax = d2;
             ++back;
         }
-        c.run = run_fwd + back;
+        if (back) c.start -= back * stride;
+        c.run = n + back;
+        c.dpmin = dpmin; c.dpmax = dpmax;
+        // докатка могла подвинуть голову под чужой диапазон — перепроверяем
+        if (!consider2_checked(c.start, li)) return;
         g_ttables[g_ttable_count++] = c;
-        say("  ТАБЛИЦА ТИПОВ: вариант %d, массив 0x%llx, run %llu, dp0=%llu "
+        say("  ТАБЛИЦА ТИПОВ v2: layout %s, 0x%llx, run %llu, dp %llu..%llu "
             "(вперёд %llu + назад %llu)",
-            variant, (unsigned long long)c.start, (unsigned long long)c.run,
-            (unsigned long long)c.dp0, (unsigned long long)run_fwd,
+            kLayouts[li].name, (unsigned long long)c.start,
+            (unsigned long long)c.run, (unsigned long long)dpmin,
+            (unsigned long long)dpmax, (unsigned long long)n,
             (unsigned long long)back);
+    };
+
+    // Проходы по куску памяти [at, at+len).
+    auto scan_piece = [&](uint64_t at, const uint8_t* p, size_t len) {
+        // A: 8-выровненные (S8/S8r/S8x + 16-выровн. S16*)
+        for (size_t off = 0; off + 16 <= len; off += 8) {
+            if (g_ttable_count >= 8) return;
+            const uint64_t abs = at + off;
+            uint64_t d;
+            if (tt_gate_buf(kLayouts[0], off, len, p, &d)) consider2(abs, 0);
+            if (tt_gate_buf(kLayouts[1], off, len, p, &d)) consider2(abs, 1);
+            if (tt_gate_buf(kLayouts[2], off, len, p, &d)) consider2(abs, 2);
+            if ((abs & 15) == 0) {
+                if (tt_gate_buf(kLayouts[6], off, len, p, &d)) consider2(abs, 6);
+                if (tt_gate_buf(kLayouts[7], off, len, p, &d)) consider2(abs, 7);
+                if (tt_gate_buf(kLayouts[8], off, len, p, &d)) consider2(abs, 8);
+                if (tt_gate_buf(kLayouts[9], off, len, p, &d)) consider2(abs, 9);
+                if (tt_gate_buf(kLayouts[10], off, len, p, &d)) consider2(abs, 10);
+            }
+            // P: потоковый поиск 300+ смежных «кучных» указателей.
+            const uint64_t v = ttbits64(off, len, p);
+            const uint64_t u = untag(v);
+            const bool pptr = (u >= heap_lo && u < heap_hi) && (u & 7) == 0;
+            if (pptr) {
+                if (ptr_active && abs == ptr_start + ptr_len * 8) {
+                    ++ptr_len;
+                } else {
+                    if (ptr_active && ptr_len >= kRunMin)
+                        verify_ptr_run(ptr_start, ptr_len);
+                    ptr_active = true;
+                    ptr_start = abs;
+                    ptr_len = 1;
+                }
+            } else if (ptr_active) {
+                if (ptr_len >= kRunMin) verify_ptr_run(ptr_start, ptr_len);
+                ptr_active = false;
+            }
+        }
+        // B: 4-выровненные (S12/S12r/S12t)
+        const size_t first4 = (4 - (at % 4)) % 4;
+        for (size_t off = first4; off + 16 <= len; off += 4) {
+            if (g_ttable_count >= 8) return;
+            const uint64_t abs = at + off;
+            uint64_t d;
+            if (tt_gate_buf(kLayouts[3], off, len, p, &d)) consider2(abs, 3);
+            if (tt_gate_buf(kLayouts[4], off, len, p, &d)) consider2(abs, 4);
+            if (tt_gate_buf(kLayouts[5], off, len, p, &d)) consider2(abs, 5);
+        }
     };
 
     for (int i = 0; i < g_reg_count && g_ttable_count < 8; ++i) {
         const Reg& r = g_regs[i];
-        int fails = 0;
-        for (uint64_t at = r.start; at + 24 < r.end; at += sizeof(buf) - 8) {
+        int bad = 0;
+        for (uint64_t at = r.start; at + 24 < r.end; at += sizeof(buf)) {
             const uint64_t remain = r.end - at;
             const size_t want = (remain > sizeof(buf)) ? sizeof(buf) : (size_t)remain;
             if (want < 64) break;
-            if (!rd_at(at, buf, want)) {
-                if (++fails > 4096) break;
-                at += 4096; at -= (sizeof(buf) - 8); continue;
-            }
-            fails = 0;
-            scanned += want;
-            // --- 8-выровненные позиции: S8, S16, P8, P12 ---
-            for (size_t off = 0; off + 16 <= want; off += 8) {
-                const uint64_t abs = at + off;
-                const uint32_t d8 = tbits32(off, want, buf);
-                const uint32_t b8 = tbits32(off + 4, want, buf);
-                if (((b8 >> 16) & 0xff) == 0x12 && d8 < 1000000)
-                    consider(abs, d8, 1);               // S8
-                if (((at + off) & 15) == 0) {   // 16-выравнивание АБСОЛЮТНОЕ
-                    const uint64_t d16 = tbits64(off, want, buf);
-                    const uint32_t b16 = tbits32(off + 8, want, buf);
-                    if (((b16 >> 16) & 0xff) == 0x12 && (uint32_t)d16 < 1000000)
-                        consider(abs, (uint32_t)d16, 3); // S16
-                }
-                // P8/P12: дешёвый фильтр — цели указателей стоят плотным
-                // рядом (объекты в массиве, штрих 8/12/16); лишь у прошедших
-                // проверяем маппинг и читаем записи.
-                const uint64_t pa = tbits64(off, want, buf);
-                const uint64_t pb = tbits64(off + 8, want, buf);
-                const uint64_t pc = tbits64(off + 16, want, buf);
-                const uint64_t a = untag(pa), b = untag(pb), cc = untag(pc);
-                const uint64_t s1 = b - a, s2 = cc - b;
-                if ((s1 == 8 || s1 == 12 || s1 == 16) && s1 == s2 &&
-                    addr_mapped(a)) {
-                    uint64_t d = 0; uint32_t bb = 0;
-                    if (s1 == 8) {
-                        if (rd_at(a, &d, 4) && rd_at(a + 4, &bb, 4))
-                            if (((bb >> 16) & 0xff) == 0x12 && d < 1000000)
-                                consider(abs, d, 4);   // P8
-                    } else {
-                        if (rd_at(a, &d, 8) && rd_at(a + 8, &bb, 4))
-                            if (((bb >> 16) & 0xff) == 0x12 && (uint32_t)d < 1000000)
-                                consider(abs, (uint32_t)d, 5); // P12
-                    }
-                }
-            }
-            // --- S12: {u64 dp, u32 bits} в массиве, штрих 12. Голову
-            //      выравнивает аллокатор (>=4 Б) — фаза записи mod 12 лежит в
-            //      {0,4,8}; сканируем 4-выровненные позиции, это покрывает
-            //      любую допустимую голову.
-            const size_t first4 = (4 - (at % 4)) % 4;
-            for (size_t off = first4; off + 12 <= want; off += 4) {
+            if (rd_at(at, buf, want)) {
+                scanned += want;
+                scan_piece(at, buf, want);
                 if (g_ttable_count >= 8) break;
-                const uint64_t d = tbits64(off, want, buf);
-                const uint32_t b = tbits32(off + 8, want, buf);
-                if (((b >> 16) & 0xff) == 0x12 && (uint32_t)d < 1000000)
-                    consider(at + off, (uint32_t)d, 2);   // S12
+                continue;
             }
-            if (g_ttable_count >= 8) break;
+            // Чанк не читается целиком — по 16 КБ (хорошие страницы
+            // внутри плохого региона всё равно сканируем).
+            bool any = false;
+            for (uint64_t s = at; s + 16384 <= at + want; s += 16384) {
+                uint8_t pbuf[16384];
+                if (!rd_at(s, pbuf, 16384)) continue;
+                any = true;
+                scanned += 16384;
+                scan_piece(s, pbuf, 16384);
+                if (g_ttable_count >= 8) break;
+            }
+            if (!any) {
+                if (++bad > 4096) {
+                    say("  types-scan: регион 0x%llx..0x%llx не читается — мимо",
+                        (unsigned long long)r.start, (unsigned long long)r.end);
+                    break;
+                }
+            }
+            ptr_active = false;
         }
     }
-    say("таблица типов: просмотрено %llu МБ за %.1f с, найдено %d",
+    if (ptr_active && ptr_len >= kRunMin) verify_ptr_run(ptr_start, ptr_len);
+
+    say("таблица типов v2: просмотрено %llu МБ за %.1f с, найдено %d",
         (unsigned long long)(scanned >> 20), now_s() - t0, g_ttable_count);
     if (!g_ttable_count) {
-        say("  таблица типов не найдена (run {dp=i, CLASS} >= 300 отсутствует)");
+        say("  таблица типов не найдена (run {CLASS, dp<%u} без повторов "
+            ">= %u отсутствует во всех layout'ах)",
+            kDPCap, kRunMin);
         return;
     }
-    // Сортируем по убыванию run (k <= 8) — лучшая под индексом 0.
-    for (int i = 1; i < g_ttable_count; ++i)
-        for (int j = i; j > 0 && g_ttables[j].run > g_ttables[j - 1].run; --j) {
-            TypesCand t = g_ttables[j];
-            g_ttables[j] = g_ttables[j - 1];
-            g_ttables[j - 1] = t;
-        }
     for (int i = 0; i < g_ttable_count; ++i)
         ttable_dump(out_dir, i, g_ttables[i]);
 }
