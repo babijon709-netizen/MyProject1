@@ -157,4 +157,49 @@ inline int lookup_library_bases(const std::string& text, const char* lib,
     return written;
 }
 
+// Путь к файлу библиотеки, отображённой по адресу base.
+//
+// Нужен, чтобы прочитать САМ ФАЙЛ (заголовки ELF, исходное содержимое .data):
+// скан libunity под неизвестную версию движка идёт по файлу, а не по памяти
+// игры. Имя сверяется так же, как в lookup_library_base; « (deleted)» в хвосте
+// отбрасывается — такой путь открыть уже нельзя, и это правильный отказ.
+inline bool lookup_library_path(const std::string& text, const char* lib,
+                                uint64_t base, std::string& out) {
+    out.clear();
+    if (text.empty() || !lib || !lib[0] || !base) return false;
+    const size_t lib_len = strlen(lib);
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t eol = text.find('\n', pos);
+        const size_t line_end = (eol == std::string::npos) ? text.size() : eol;
+        const char* line = text.c_str() + pos;
+        const size_t line_len = line_end - pos;
+        pos = line_end + 1;
+
+        unsigned long long start = 0, end = 0, file_offset = 0;
+        char perms[5] = {};
+        if (sscanf(line, "%llx-%llx %4s %llx", &start, &end, perms, &file_offset) != 4)
+            continue;
+        if ((uint64_t)start - (uint64_t)file_offset != base && (uint64_t)start != base) continue;
+        const char* slash = strchr(line, '/');
+        if (!slash) continue;
+        const size_t path_off = (size_t)(slash - line);
+        if (path_off >= line_len) continue;
+        size_t name_len = line_len - path_off;
+        while (name_len > 0 && (slash[name_len - 1] == '\r' || slash[name_len - 1] == ' '))
+            --name_len;
+        static const char kDeleted[] = " (deleted)";
+        const size_t deleted_len = sizeof(kDeleted) - 1;
+        if (name_len > deleted_len &&
+            strncmp(slash + name_len - deleted_len, kDeleted, deleted_len) == 0)
+            continue;   // файла уже нет на диске
+        if (name_len < lib_len) continue;
+        if (strncmp(slash + name_len - lib_len, lib, lib_len) != 0) continue;
+        if (name_len > lib_len && slash[name_len - lib_len - 1] != '/') continue;
+        out.assign(slash, name_len);
+        return true;
+    }
+    return false;
+}
+
 }  // namespace maps

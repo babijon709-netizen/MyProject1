@@ -2727,9 +2727,39 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
     return discover_layout_from_native_transforms(native_transforms, best_position_count, candidate_count);
 }
 
+// Позиция игрока по ОТРИСОВЫВАЕМОМУ трансформу, приведённая к тому же
+// пространству, в котором работает текущий режим (прямые поля — пятки, обход
+// иерархии — уровень глаз). Определена ниже, рядом с player_rendered_position.
+static bool player_transform_position(uint64_t player, Vec3& out);
+
+// Сколько игроков в этом кадре получили позицию не из поля, а из трансформа.
+// Это ровно те, у кого поле позиции ещё не дописано (только что заспавнились);
+// счётчик уходит в журнал, чтобы случай был виден без устройства.
+static int g_frame_transform_fallbacks = 0;
+
 static bool read_entity_position(uint64_t source, Vec3& position) {
     if (!source) return false;
-    if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
+    if (g_use_direct_player_position && g_player_position_offset != 0) {
+        const Vec3 direct = rd_v3(source + g_player_position_offset);
+        if (vec3_is_finite(direct) && position_looks_like_world_space(direct)) {
+            position = direct;
+            return true;
+        }
+        // Поле позиции (lastSavedPosition / lastTickPosition) пишет сетевой
+        // тик движения. У игрока, который ТОЛЬКО ЧТО заспавнился и ещё не
+        // сделал ни шага, тика не было: в поле либо нули, либо остаток от
+        // прошлого владельца объекта из пула. Раньше такой отсчёт просто не
+        // проходил проверку мировой позиции — и на игроке не рисовалось
+        // НИЧЕГО (а когда остаток проверку проходил, бокс мерцал на чужом
+        // месте, обычно под землёй). Рендер при этом берёт позицию из
+        // трансформа, и он уже правильный — с него и читаем.
+        if (player_transform_position(source, position)) {
+            ++g_frame_transform_fallbacks;
+            return true;
+        }
+        position = direct;
+        return vec3_is_finite(position);
+    }
     uint64_t native = resolve_player_native_transform(source);
     if (!native) return false;
     return read_transform_hierarchy_position(native, position);
@@ -5321,6 +5351,28 @@ static float vec3_horiz2(const Vec3& a, const Vec3& b) {
     return dx * dx + dz * dz;
 }
 
+// Дешёвый признак «эта копия объекта игрока мёртвая»: собственный флаг игры
+// (respawning) и флаг обработчика смерти. Читается только для дублей по
+// userID, поэтому три лишних чтения на кадр погоды не делают.
+//
+// Зачем: после смерти/респауна в списке какое-то время лежат ДВА объекта
+// одного аккаунта. Прежний выбор «кто меньше стоит на месте» отдавал победу
+// как раз остатку — его позиция дёргается мусором каждый кадр, а живой,
+// только что заспавненный игрок стоит смирно. Бокс в итоге мигал на трупе
+// (обычно под землёй), а не на игроке.
+static bool player_copy_looks_dead(uint64_t player) {
+    if (!player) return true;
+    uint8_t respawning = 0;
+    if (rd_exact(player + PLAYER_MANAGER_RESPAWNING, respawning) && respawning) return true;
+    const uint64_t ref = rd_ptr(player + game_offsets::PLAYER_DEATH_HANDLER);
+    if (ref >= 0x10000) {
+        const uint64_t handler = rd_ptr(ref + game_offsets::DEATH_HANDLER_REF_TARGET);
+        if (handler >= 0x10000 &&
+            rd<uint8_t>(handler + game_offsets::DEATH_HANDLER_DEATH) == 1) return true;
+    }
+    return false;
+}
+
 static bool player_is_mounted(uint64_t player) {
     if (!player) return false;
     uint32_t vehicle = rd<uint32_t>(player + PLAYER_VEHICLE_ID);
@@ -5362,6 +5414,25 @@ static bool player_model_position(uint64_t player, Vec3& out) {
 
 // worldCameraRoot sits at eye level, the box is built from the feet.
 static constexpr float kCameraRootHeight = 1.60F;
+// Корень модели персонажа — таз: до уровня глаз от него примерно 0.90 м
+// (тот же пересчёт, что в apply_mounted_position).
+static constexpr float kModelRootToEye = 0.90F;
+
+// Позиция по отрисовываемому трансформу в пространстве текущего режима.
+// Прямые поля строят бокс от пяток, обход иерархии — от уровня глаз, поэтому
+// пересчёт зависит от режима: иначе бокс уезжает ровно на рост игрока вниз.
+static bool player_transform_position(uint64_t player, Vec3& out) {
+    Vec3 eye{};
+    if (!player_rendered_position(player, eye)) {
+        Vec3 model{};
+        if (!player_model_position(player, model)) return false;
+        eye = model;
+        eye.y += kModelRootToEye;
+    }
+    out = eye;
+    if (g_use_direct_player_position) out.y -= kCameraRootHeight;
+    return vec3_is_finite(out) && position_looks_like_world_space(out);
+}
 
 // Mounted-state latch. lastSavedPosition freezes at the boarding point while
 // the rendered transform (and/or the character model) rides with the vehicle.
@@ -5376,6 +5447,13 @@ struct MountLatch {
     bool last_ok = false;
     Vec3 prev_saved{};
     bool have_saved = false;
+    // Подряд идущие проверки, в которых «живой» отсчёт уверенно стоит в
+    // стороне от замороженного lastSaved. Один такой отсчёт не значит ничего:
+    // у только что заспавненного игрока риг ещё не на месте, и его трансформ
+    // читается нулями или остатком от прошлого владельца объекта из пула.
+    int  far_streak = 0;
+    Vec3 prev_live{};
+    bool have_prev_live = false;
 };
 static std::unordered_map<uint64_t, MountLatch> g_mount_latch;
 
@@ -5437,7 +5515,11 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
         // the authoritative moving sample; use the model only on foot or when
         // the rendered transform is unavailable.
         Vec3 p = model;
-        if (!ground) p.y += 0.90F; // hips -> roughly eye, matches hierarchy boxes
+        // hips -> roughly eye, matches hierarchy boxes; в режиме прямых полей
+        // тот же корень модели надо, наоборот, опустить до пяток, иначе бокс
+        // всплывает на эти же 0.70 м над землёй.
+        if (!ground) p.y += kModelRootToEye;
+        else p.y -= (kCameraRootHeight - kModelRootToEye);
         float h2 = vec3_horiz2(p, saved);
         if (!have_live || h2 > live_h2 + 0.25F) {
             live = p;
@@ -5446,7 +5528,8 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
         }
     } else if (!have_live && have_model) {
         Vec3 p = model;
-        if (!ground) p.y += 0.90F;
+        if (!ground) p.y += kModelRootToEye;
+        else p.y -= (kCameraRootHeight - kModelRootToEye);
         live = p;
         have_live = true;
         live_h2 = vec3_horiz2(p, saved);
@@ -5457,7 +5540,40 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
         live_h2 = vec3_horiz2(feet, saved);
     }
 
-    bool pos_mounted = latch.saved_still >= 8 && have_live && live_h2 > 1.6F * 1.6F;
+    // Насколько можно верить «живому» отсчёту, когда транспорт ничем себя не
+    // выдал (коптер часто оставляет vehicleID нулём). Верим, только если
+    // ОБА визуальных источника — worldCameraRoot и корень модели — сошлись
+    // между собой: у только что заспавненного игрока риг ещё не собран, и
+    // один из них читается нулями или остатком от прошлого владельца объекта
+    // из пула. Именно такой одиночный отсчёт и утаскивал бокс под землю.
+    bool live_agrees = false;
+    if (have_cam && have_model) {
+        Vec3 c = cam;
+        Vec3 m = model;
+        if (ground) { c.y -= kCameraRootHeight; m.y -= (kCameraRootHeight - kModelRootToEye); }
+        else { m.y += kModelRootToEye; }
+        live_agrees = position_looks_like_world_space(c) &&
+                      position_looks_like_world_space(m) &&
+                      vec3_horiz2(c, m) < 2.0F * 2.0F;
+    }
+    // Серия: отсчёт должен держаться в стороне от lastSaved несколько проверок
+    // подряд И двигаться связно (транспорт едет плавно, мусор прыгает).
+    // Второй допуск к посадке — сам отсчёт ЕДЕТ: коптер между проверками
+    // пролетает заметно больше полуметра, а застрявший трансформ только что
+    // заспавненного игрока стоит на месте, сколько его ни читай.
+    const bool far_now = have_live && live_h2 > 1.6F * 1.6F &&
+                         position_looks_like_world_space(live);
+    const float live_step2 = latch.have_prev_live ? vec3_horiz2(live, latch.prev_live) : 0.0F;
+    const bool live_coherent = !latch.have_prev_live || live_step2 < 6.0F * 6.0F;
+    const bool live_moving = latch.have_prev_live && live_step2 > 0.5F * 0.5F;
+    if (far_now && live_coherent && (id_mounted || live_agrees || live_moving))
+        ++latch.far_streak;
+    else
+        latch.far_streak = 0;
+    latch.prev_live = live;
+    latch.have_prev_live = have_live;
+
+    bool pos_mounted = latch.saved_still >= 8 && far_now && latch.far_streak >= 4;
     bool keep_mounted = latch.engaged && have_live && live_h2 > 1.6F * 1.6F;
     if (id_mounted || pos_mounted || keep_mounted) {
         latch.engaged = true;
@@ -5467,6 +5583,7 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
             latch.engaged = false;
             latch.last_ok = false;
             latch.unmounted_streak = 0;
+            latch.far_streak = 0;
         }
     }
     if (!latch.engaged) return;
@@ -7719,6 +7836,19 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
         }
     }
 
+    // Позиции, взятые с трансформа: поле позиции у этих игроков пустое
+    // (только что заспавнились и ещё не двигались). Раньше таких игроков
+    // визуал терял целиком, поэтому случай стоит видеть в журнале.
+    if (g_frame_transform_fallbacks > 0) {
+        static double next_at = 0.0;
+        const double now = mono_seconds();
+        if (now >= next_at) {
+            next_at = now + 5.0;
+            LogLine("визуал: позиция с трансформа у %d игрок(ов): поле позиции ещё пустое",
+                    g_frame_transform_fallbacks);
+        }
+    }
+
     // Ранний выход: боксов нет вообще.
     if (tag != 0) {
         bool had = false;
@@ -7737,6 +7867,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
+    g_frame_transform_fallbacks = 0;
     std::vector<EspBox> result;
     auto transient_return = [&](int tag) {
         watch_boxes(result, (size_t)-1, nullptr, tag);
@@ -8211,10 +8342,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (index == local_entity_index)      take_mine = true;
             else if (rival == local_entity_index) take_mine = false;
             else if (mine_ride != their_ride)     take_mine = mine_ride;
-            else if (mine != theirs)              take_mine = mine < theirs;
             else {
-                auto sticky = g_player_track_pick.find(uid);
-                take_mine = sticky != g_player_track_pick.end() && sticky->second == s_transforms[index];
+                // Живая копия важнее «той, что недавно двигалась»: только что
+                // заспавненный игрок стоит на месте, а остаток-труп дёргается
+                // мусором — по одному still_frames выигрывал именно труп.
+                const bool mine_dead = player_copy_looks_dead(s_transforms[index]);
+                const bool their_dead = player_copy_looks_dead(s_transforms[rival]);
+                if (mine_dead != their_dead)      take_mine = !mine_dead;
+                else if (mine != theirs)          take_mine = mine < theirs;
+                else {
+                    auto sticky = g_player_track_pick.find(uid);
+                    take_mine = sticky != g_player_track_pick.end() &&
+                                sticky->second == s_transforms[index];
+                }
             }
             suppressed[take_mine ? rival : index] = 1;
             if (take_mine) found->second = index;

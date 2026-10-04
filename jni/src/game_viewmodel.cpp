@@ -248,6 +248,75 @@ viewmodel::Status fps_last_log = viewmodel::Status::Off;
 // добавляется в fps_memory.h без доступа к устройству.
 uint64_t fps_unknown_build_id = 0;
 
+// Поиск раскладки targetFrameRate для движка, которого нет в таблице.
+//
+// Скан идёт по ФАЙЛУ libunity.so (заголовки ELF + исходное содержимое .data),
+// а отбор кандидатов добивается чтением живого процесса: инструкции геттера
+// должны стоять на месте, а в поле должен лежать правдоподобный предел кадров.
+// Принимаем только единственного кандидата — писать в случайную глобальную
+// переменную движка нельзя. Один скан на build id: повторять его каждую
+// секунду незачем.
+uint64_t fps_scan_done_for = 0;   // build id, для которого скан уже делали
+
+bool discover_fps_layout(const std::string& maps_text, uint64_t base, uint64_t build_id) {
+    viewmodel::FpsLayout& out = viewmodel::discovered_fps_layout();
+    if (out.build_id == build_id) return out.getter != 0;
+    if (fps_scan_done_for == build_id) return false;
+    fps_scan_done_for = build_id;
+
+    std::string path;
+    if (!maps::lookup_library_path(maps_text, "libunity.so", base, path)) {
+        LogLine("fps: путь к libunity.so не найден в карте процесса — скан невозможен");
+        return false;
+    }
+    const viewmodel::UnityFpsScan scan = viewmodel::scan_unity_fps(path.c_str());
+    if (!scan.file_ok) {
+        LogLine("fps: libunity.so (%s) не читается как ELF arm64 — скан невозможен", path.c_str());
+        return false;
+    }
+
+    // Живой отбор: инструкции на месте + правдоподобное значение в поле.
+    const viewmodel::UnityFpsCandidate* best = nullptr;
+    int accepted = 0, set_by_game = 0;
+    const viewmodel::UnityFpsCandidate* set_candidate = nullptr;
+    for (const viewmodel::UnityFpsCandidate& candidate : scan.candidates) {
+        std::array<uint32_t, 3> code{};
+        if (!memory.read(base + candidate.getter_rva, code)) continue;
+        if (code[1] != candidate.load_instruction) continue;
+        uint64_t target = 0;
+        if (!viewmodel::decode_int32_getter(candidate.getter_rva, code.data(), target)) continue;
+        if (target != candidate.target_rva) continue;
+        int32_t value = 0;
+        if (!memory.read(base + candidate.target_rva, value)) continue;
+        if (!viewmodel::looks_like_frame_rate(value)) continue;
+        ++accepted;
+        best = &candidate;
+        // Поле, которое игра уже выставила (не -1), — куда более сильный
+        // признак, чем просто «значение похоже на предел кадров».
+        if (value != -1) { ++set_by_game; set_candidate = &candidate; }
+    }
+    if (set_by_game == 1) { best = set_candidate; accepted = 1; }
+    if (accepted != 1 || !best) {
+        LogLine("fps: скан libunity (%d троек, %zu кандидатов, подошло %d) не дал "
+                "однозначного targetFrameRate — патч не применяется",
+                scan.triples, scan.candidates.size(), accepted);
+        return false;
+    }
+
+    out = {};
+    out.build_id = build_id;
+    out.getter = best->getter_rva;
+    out.target = best->target_rva;
+    out.load_instruction = best->load_instruction;
+    out.pacing_update = 0;   // поле frame pacing для этой версии неизвестно
+    out.pacing_type = 0;
+    LogLine("fps: targetFrameRate найден сканом: build id %016llx, геттер +0x%llx, "
+            "поле +0x%llx (frame pacing не трогаем)",
+            (unsigned long long)build_id, (unsigned long long)out.getter,
+            (unsigned long long)out.target);
+    return true;
+}
+
 uint64_t find_unity() {
     std::string text;
     if (!read_proc_maps(g_pid, text)) return 0;
@@ -255,20 +324,30 @@ uint64_t find_unity() {
     int count = maps::lookup_library_bases(text, "libunity.so", candidates, 8);
     for (int i = 0; i < count; ++i) {
         if (!viewmodel::fps_layout(memory, candidates[i])) continue;
-        if (found) return 0; // ambiguous live/stale mappings: do not guess
+        // Несколько подходящих отображений — это почти всегда живой образ и
+        // остаток прошлого запуска («(deleted)»). Раньше здесь был отказ, и
+        // разблокировка FPS в такой карте не включалась ВООБЩЕ, молча.
+        // Список отсортирован: сначала живые образы с нулевым смещением в
+        // файле, поэтому первый подошедший — и есть нужный.
         found = candidates[i];
+        break;
     }
-    // Неопознанная версия движка (игра обновилась): запоминаем build ID
-    // первого образа для меню и журнала. Не прочитался — 0, тогда в меню
-    // останется просто «ожидание».
+    // Неопознанная версия движка (обновился Unity): запоминаем build ID для
+    // меню и журнала и пробуем найти раскладку сканом самого файла.
     fps_unknown_build_id = 0;
     if (!found && count > 0) {
         uint64_t id = 0;
         if (memory.read(candidates[0] + 0x318, id) && id)
             fps_unknown_build_id = id;
-        if (fps_unknown_build_id)
+        if (fps_unknown_build_id) {
             LogLine("fps: libunity не опознан, build id %016llx (игра обновилась?)",
                     (unsigned long long)fps_unknown_build_id);
+            if (discover_fps_layout(text, candidates[0], fps_unknown_build_id) &&
+                viewmodel::fps_layout(memory, candidates[0])) {
+                fps_unknown_build_id = 0;
+                found = candidates[0];
+            }
+        }
     }
     return found;
 }
