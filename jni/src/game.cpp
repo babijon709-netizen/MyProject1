@@ -7925,10 +7925,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // мировая позиция, и именно он утаскивал бокс «в другую сторону».
             bool read_ok = read_entity_position(s_transforms[index], candidate) &&
                            position_looks_like_world_space(candidate);
+            bool direct_was_junk = false;
             if (read_ok && position_near_world_origin(candidate)) {
                 // (0.1, 0.0, 0.0)-мусор пула: считаем чтение неудачным, дальше
-                // отработают KCC/модель или холд фильтра.
+                // отработают KCC/модель или холд фильтра. Если ниже KCC/модель
+                // подтвердит ту же точку у нуля — это живой спавн, и отказ
+                // в счётчике откатим.
                 read_ok = false;
+                direct_was_junk = true;
                 ++g_position_origin_rejected;
             }
             if (!read_ok) {
@@ -7951,8 +7955,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     have_alt = true;
                 }
                 if (have_alt && position_looks_like_world_space(alt) && position_near_world_origin(alt)) {
-                    have_alt = false;
-                    ++g_position_origin_rejected;
+                    // Согласие источников: прямое поле И KCC/модель ВМЕСТЕ
+                    // указывают «у нуля мира» — это живой спавн на плоской
+                    // арене (PvP-сервера сажают точку спауна в (x, 0.0, 0.0)),
+                    // а не пуловый мусор: у мусора KCC держит настоящее тело
+                    // в стороне, и точки не совпадают. 04.10: на PvP-сервере
+                    // игрок появился на спавне рядом и остался без ESP — обе
+                    // его линии чтения честно давали (x, 0.0, 0.0).
+                    const bool direct_near_zero =
+                        position_looks_like_world_space(candidate) && position_near_world_origin(candidate);
+                    const bool direct_agrees =
+                        direct_near_zero && vec3_horiz2(alt, candidate) <= 1.5F * 1.5F &&
+                        fabsf(alt.y - candidate.y) <= 1.5F;
+                    const bool direct_unread = !position_looks_like_world_space(candidate);
+                    if (direct_agrees || direct_unread) {
+                        candidate = alt;   // обе линии сходятся — это живая точка
+                        read_ok = true;
+                        if (direct_was_junk) --g_position_origin_rejected;  // тик прямого чтения был ложным
+                    } else {
+                        have_alt = false;
+                        ++g_position_origin_rejected;
+                    }
                 }
                 if (have_alt && position_looks_like_world_space(alt)) {
                     // Фолбэк нужен игроку БЕЗ позиции (свежий спавн). У KCC/
