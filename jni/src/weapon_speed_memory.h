@@ -51,8 +51,13 @@ struct Identity {
 struct Context {
     Identity player,fp,weapon,config,burst_wait;
     bool operator==(const Context& other) const {
+        // WaitForSeconds is a lazily-created cache: it can be null before the
+        // first shot and appear afterwards. It is not weapon identity. Including
+        // it here made the controller tear down and rebuild every time the
+        // burst coroutine created/replaced the wait object, which caused the
+        // intermittent fast-fire/reload behaviour.
         return player==other.player && fp==other.fp && weapon==other.weapon &&
-            config==other.config && burst_wait==other.burst_wait;
+            config==other.config;
     }
 };
 
@@ -156,7 +161,10 @@ template<class IO> class Controller {
         shot_period_={}; effective_full_={}; effective_loop_={}; burst_seconds_={};
     }
     bool normalize_inherited_caches(const Context& next) {
-        if (!(context_.config==next.config) || context_.weapon==next.weapon) return true;
+        // Only migrate cached values when the config is shared but the live
+        // weapon instance changed. The old condition used `weapon == next`
+        // here, so it skipped the exact equip transition that needs migration.
+        if (!(context_.config==next.config) || !(context_.weapon==next.weapon)) return true;
         const bool a=shot_period_.normalize_copy(
             io_,next.weapon.object+go_active::FPWEAPON_SHOT_PERIOD);
         const bool b=effective_full_.normalize_copy(

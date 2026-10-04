@@ -128,6 +128,12 @@ struct MarkerEntity {
     uint64_t transform = 0;     // native Transform of the GameObject
     Vec3     position{};
     bool     position_valid = false;
+    // Transform reads can briefly fail while Unity swaps/pools an object. Keep
+    // the last confirmed position for a short, time-based grace period so a
+    // single bad tick cannot make every marker label jump to the ground or
+    // disappear for one frame.
+    double   position_last_ok = 0.0;
+    int      position_fail_frames = 0;
     int      pos_cooldown = 0;  // frames until the next position re-read (far animals)
     int      kind = ESP_MARKER_ORE;
     // Fixed labels point into static strings; ground pickups build their own
@@ -1282,7 +1288,18 @@ static bool rebuild_marker_entities() {
             entity.transform = native_component_transform(managed_object_native(component));
             if (!entity.transform) // component without its own renderer: use the identity
                 entity.transform = native_component_transform(managed_object_native(identity));
-            entity.position_valid = marker_world_position(entity.transform, entity.position);
+            Vec3 sampled{};
+            if (marker_world_position(entity.transform, sampled)) {
+                entity.position = sampled;
+                entity.position_valid = true;
+                entity.position_last_ok = mono_seconds();
+                entity.position_fail_frames = 0;
+            } else if (entity.position_valid &&
+                       mono_seconds() - entity.position_last_ok <= 0.35) {
+                ++entity.position_fail_frames;
+            } else {
+                entity.position_valid = false;
+            }
             if (entity.transform) g_marker_scan_pending.push_back(entity);
             if (g_marker_scan_pending.size() >= kMarkerEntityLimit) break;
         }
@@ -1341,8 +1358,28 @@ static void marker_track_position(MarkerEntity& entity) {
                                 : (d2 < 150.0F * 150.0F) ? 6 : 15;
         }
     }
-    if (want_read)
-        entity.position_valid = marker_world_position(entity.transform, entity.position);
+    if (want_read) {
+        Vec3 sampled{};
+        if (marker_world_position(entity.transform, sampled) &&
+            // A pooled Unity transform can briefly report its default/ground
+            // pose while the networked object is being reparented. Do not let
+            // that one sample move a label under the terrain; accept it only
+            // after the normal time filter gets another coherent read.
+            !(entity.position_valid && sampled.y < entity.position.y - 1.25F &&
+              vec3_horiz2(sampled, entity.position) < 4.0F)) {
+            entity.position = sampled;
+            entity.position_valid = true;
+            entity.position_last_ok = mono_seconds();
+            entity.position_fail_frames = 0;
+        } else if (entity.position_valid &&
+                   mono_seconds() - entity.position_last_ok <= 0.35) {
+            // Keep the last coherent sample. The object is often between two
+            // Unity transform states for less than a frame during replication.
+            ++entity.position_fail_frames;
+        } else {
+            entity.position_valid = false;
+        }
+    }
 }
 
 std::vector<EspMarker> esp_get_markers() {
@@ -1417,8 +1454,18 @@ std::vector<EspMarker> esp_get_markers() {
             if (!learned && layout_scan_in_progress()) s_solo_learn_cooldown = 1;
             if (learned) {
                 // Re-read every cached position with the fresh layout.
-                for (MarkerEntity& e : g_marker_entities)
-                    e.position_valid = marker_world_position(e.transform, e.position);
+                for (MarkerEntity& e : g_marker_entities) {
+                    Vec3 sampled{};
+                    if (marker_world_position(e.transform, sampled)) {
+                        e.position = sampled;
+                        e.position_valid = true;
+                        e.position_last_ok = mono_seconds();
+                        e.position_fail_frames = 0;
+                    } else if (e.position_valid &&
+                               mono_seconds() - e.position_last_ok > 0.35) {
+                        e.position_valid = false;
+                    }
+                }
             }
         }
     }
