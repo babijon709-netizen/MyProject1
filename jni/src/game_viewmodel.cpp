@@ -280,10 +280,23 @@ void tick_fps(uint64_t session, int requested_limit) {
     if (limit == fps_last_limit && now - fps_last_tick < std::chrono::milliseconds(100)) return;
     const bool changed = limit != fps_last_limit;
     fps_last_tick = now; fps_last_limit = limit;
-    if (!unity_base && enabled && now - fps_last_resolve >= std::chrono::seconds(1)) {
-        fps_last_resolve = now; unity_base = find_unity();
+    // A libunity mapping can be replaced during a scene reload. Keeping the
+    // old base after one failed validation leaves the FPS control permanently
+    // stuck in "waiting/failed", because the resolver was only retried while
+    // unity_base was zero. Re-resolve periodically both before the first
+    // success and after a failed controller tick.
+    const bool need_resolve = !unity_base || fps_controller.status == viewmodel::Status::Failed;
+    if (enabled && need_resolve && now - fps_last_resolve >= std::chrono::seconds(1)) {
+        fps_last_resolve = now;
+        unity_base = find_unity();
     }
     fps_controller.tick(session, unity_base, limit);
+    if (enabled && fps_controller.status == viewmodel::Status::Failed &&
+        now - fps_last_resolve >= std::chrono::seconds(1)) {
+        fps_last_resolve = now;
+        unity_base = find_unity();
+        fps_controller.tick(session, unity_base, limit);
+    }
     if (changed || fps_last_log != fps_controller.status) {
         fps_last_log = fps_controller.status;
         LogLine("fps: requested=%d target limit status=%d (0 off,1 waiting,2 set,4 memory error); actual FPS is device/pacing dependent",
