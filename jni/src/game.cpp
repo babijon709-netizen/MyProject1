@@ -8,6 +8,7 @@
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // compile-time offsets текущего релиза
+#include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -2742,6 +2743,21 @@ static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
     return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
 }
 
+// Сентинел пулового мусора: свежий объект (игра пересоздаёт PlayerManager
+// каждые ~10 с, см. лог «сменили победителя») пока недоинициализирован отдаёт
+// в поле позиции вектор ВИДА (x_любой, 0.0, 0.0) — в логе x принимал 0.1,
+// 0.8, 3.1, 4.8, 9.5, 11.8, а y и z всегда ровный ноль. Такая точка проходит
+// world-space-гейт и рисует бокс под картой (нырок y 10.4 -> 0.0 за кадр).
+// Когда хотя бы ДВЕ координаты почти ровные нули — это не живая позиция
+// (настоящий игрок не стоит одновременно на нулевом меридиане и в нуле высоты).
+static bool position_near_world_origin(const Vec3& v) {
+    int zeros = 0;
+    if (fabsf(v.x) < 0.25F) ++zeros;
+    if (fabsf(v.y) < 0.25F) ++zeros;
+    if (fabsf(v.z) < 0.25F) ++zeros;
+    return zeros >= 2;
+}
+
 // A world position we would believe from a single sample: inside the map
 // bounds and not a pile of denormals. Used when we are the only player on the
 // server, where the "several players spread out" test below cannot run.
@@ -5288,15 +5304,9 @@ struct PlayerTrack {
     Vec3   vel_ref{};       // position the current estimate was measured from
     double vel_ref_t = 0.0; // and when
     bool   have_vel_ref = false;
-    // Последняя ПРИНЯТАЯ позиция и счётчики временного фильтра (см.
+    // Последняя ПРИНЯТАЯ позиция и состояние временного фильтра (см.
     // filter_player_position): бокс рисуется по ним, а не по сырому чтению.
-    Vec3   drawn{};
-    bool   has_drawn = false;
-    double drawn_t = 0.0;
-    int    hold_frames = 0;  // сколько кадров живём без успешного чтения
-    Vec3   jump{};           // подозрительный отсчёт, ждущий подтверждения
-    bool   has_jump = false;
-    int    jump_frames = 0;
+    posfilter::State filt{};
 };
 
 double mono_seconds() {
@@ -5304,6 +5314,16 @@ double mono_seconds() {
     return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
 }
 static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
+// Сколько игроков в кадре получили позицию из запасного источника (KCC/
+// characterModel), потому что синхронизируемое поле ещё не записано игрой —
+// наблюдение за жалобой «нет боксов на свежеспавнившихся».
+static int g_position_fallback_this_frame = 0;
+static int g_position_fallback_rejected = 0;  // отклонённые как далёкие (чужая база)
+static int g_position_origin_rejected = 0;   // отсчёты вида (≈0, 0, ≈0) из недоинициализированного пула
+static int g_position_origin_rejected_logged = 0;
+static double g_position_fallback_log_at = 0.0;
+static int g_position_fallback_logged = 0;
+static int g_position_fallback_rejected_logged = 0;
 // uid -> the object we drew last time, so a tie does not flip between copies.
 static std::unordered_map<std::string, uint64_t> g_player_track_pick;
 
@@ -5333,7 +5353,8 @@ static bool player_is_mounted(uint64_t player) {
 static bool player_saved_position(uint64_t player, Vec3& out) {
     uint64_t off = g_player_position_offset ? g_player_position_offset : (uint64_t)PLAYER_POSITION;
     out = rd_v3(player + off);
-    return vec3_is_finite(out) && position_looks_like_world_space(out);
+    return vec3_is_finite(out) && position_looks_like_world_space(out) &&
+           !position_near_world_origin(out);
 }
 
 // World position of the player's own transform (worldCameraRoot). While he is
@@ -5575,19 +5596,11 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
 // чужих игроков приходят пачкой раз в ~0.1 с, так что законный «прыжок» между
 // кадрами может быть в несколько метров. Всё, что больше, почти всегда мусор —
 // и даже если это настоящий телепорт, мы отстанем от него на пару кадров.
-static constexpr double kPosHoldSeconds      = 0.35;  // ~старые 3 кадра, но независимо от FPS
-static constexpr int   kPosJumpConfirmFrames = 2;     // скачок должен повториться
-static constexpr float kPosJumpMeters        = 1.5F;  // базовый допуск, метры
-static constexpr float kPosJumpSpeed         = 28.0F; // плюс м/с на каждый кадр
-static constexpr float kPosExtrapolateLimit  = 1.5F;  // насколько дорисовываем по скорости
-static constexpr float kPosJumpSameSpot      = 1.5F;  // «тот же» подозрительный отсчёт
-
-// Возвращает false, когда бокс в этом кадре рисовать не надо. pos — вход
+// Пассажиры коптера — отдельный случай «настоящего» скачка: подтверждение по
+// форме ломаной, а не по той же точке (см. position_filter.h, покрыт тестом).
 // (сырое чтение, при read_ok) и выход (то, что рисуем).
 static double s_filt_sec = -1e9;
-static int s_filt_susp = 0, s_filt_conf = 0;
-static uint64_t s_filt_last = 0;
-static float s_filt_last_d = 0.0F;
+static posfilter::Obs s_filt_obs;
 
 static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, uint64_t player) {
     const double now = mono_seconds();
@@ -5596,79 +5609,18 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, 
     // в секунду и только когда было что считать.
     if (now - s_filt_sec >= 1.0) {
         s_filt_sec = now;
-        if (s_filt_susp + s_filt_conf > 0) {
+        if (s_filt_obs.susp + s_filt_obs.conf > 0) {
             LogLine("визуал: фильтр позиций за секунду: подозрений %d, подтверждений %d (последний 0x%llx на %.1fм)",
-                    s_filt_susp, s_filt_conf, (unsigned long long)s_filt_last, (double)s_filt_last_d);
-            s_filt_susp = 0; s_filt_conf = 0;
+                    s_filt_obs.susp, s_filt_obs.conf,
+                    (unsigned long long)s_filt_obs.last, (double)s_filt_obs.last_d);
+            s_filt_obs.susp = 0; s_filt_obs.conf = 0;
         }
     }
 
-    if (!track.has_drawn) {
-        if (!read_ok) return false;
-        track.drawn = pos; track.drawn_t = now; track.has_drawn = true;
-        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
-        return true;
-    }
-
-    double dt = now - track.drawn_t;
-    if (!(dt > 0.0)) dt = 0.0;
-    if (dt > 0.25) dt = 0.25;
-    const float fdt = (float)dt;
-
-    // Последняя принятая позиция, продвинутая по измеренной скорости; дальше
-    // метра-полутора не продлеваем, чтобы не унести бокс самим фильтром.
-    Vec3 predicted = track.drawn;
-    {
-        const float mx = track.vel.x * fdt, my = track.vel.y * fdt, mz = track.vel.z * fdt;
-        const float step2 = mx * mx + my * my + mz * mz;
-        const float limit2 = kPosExtrapolateLimit * kPosExtrapolateLimit;
-        const float scale = (step2 > limit2 && step2 > 0.0F) ? sqrtf(limit2 / step2) : 1.0F;
-        predicted.x += mx * scale; predicted.y += my * scale; predicted.z += mz * scale;
-    }
-
-    if (!read_ok) {
-        ++track.hold_frames;
-        // Frame-count holds become shorter on high-refresh devices.  Use
-        // monotonic time so the observed 1-2 s death/respawn gap is covered at
-        // 60, 120 and 144 FPS alike.
-        if (now - track.drawn_t > kPosHoldSeconds) return false;
-        pos = predicted;
-        return true;
-    }
-
-    const float dx = pos.x - predicted.x, dy = pos.y - predicted.y, dz = pos.z - predicted.z;
-    const float dev = sqrtf(dx * dx + dy * dy + dz * dz);
-    const float limit = kPosJumpMeters + kPosJumpSpeed * fdt;
-    if (std::isfinite(dev) && dev <= limit) {
-        track.drawn = pos; track.drawn_t = now;
-        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
-        return true;
-    }
-
-    ++s_filt_susp;   // рваный отсчёт (подтвердится ли — см. ниже)
-    // Скачок за пределы правдоподобия. Один и тот же отсчёт подряд — похоже на
-    // настоящий телепорт, принимаем; каждый кадр разный — это мусор, остаёмся
-    // на последней хорошей позиции.
-    bool same = false;
-    if (track.has_jump) {
-        const float jx = pos.x - track.jump.x, jy = pos.y - track.jump.y, jz = pos.z - track.jump.z;
-        same = std::isfinite(jx) && (jx * jx + jy * jy + jz * jz) < kPosJumpSameSpot * kPosJumpSameSpot;
-    }
-    if (same) ++track.jump_frames;
-    else { track.jump = pos; track.jump_frames = 1; }
-    track.has_jump = true;
-
-    if (track.jump_frames >= kPosJumpConfirmFrames) {
-        track.drawn = pos; track.drawn_t = now;
-        track.has_jump = false; track.jump_frames = 0; track.hold_frames = 0;
-        // Скорость через телепорт не измеряется — сбрасываем, иначе упреждение
-        // будет на пару кадров смотреть в старую сторону.
-        track.vel = {}; track.have_vel_ref = false;
-        ++s_filt_conf; s_filt_last = player; s_filt_last_d = dev;   // скачок подтверждён
-        return true;
-    }
-    pos = predicted;
-    return true;
+    const bool ok = posfilter::filter(track.filt, read_ok, pos, track.vel, now, s_filt_obs);
+    if (s_filt_obs.vel_reset) { track.vel = {}; track.have_vel_ref = false; s_filt_obs.vel_reset = false; }
+    if (ok && s_filt_obs.conf) s_filt_obs.last = player;
+    return ok;
 }
 
 // ===================== Remote (third-person) held weapon =====================
@@ -6141,6 +6093,14 @@ static float head_lift_for_range(const Vec3& world) {
 static float g_aim_lead_seconds = 0.0F;
 static Vec3 g_aim_lead{};
 
+// Растяг экрана (Aspect Ratio), множитель к aspect камеры игры; 1.0 = выкл.
+// Поставляется из меню через esp_set_screen_stretch (см. esp_draw.cpp).
+static float g_screen_stretch_x = 1.0F;
+void esp_set_screen_stretch(float factor) {
+    // Кламп к допустимому диапазону слайдера (1.00–2.00; верх поднят по заказу 04.10).
+    if (!(factor >= 0.75F && factor <= 2.0F)) factor = 1.0F;
+    g_screen_stretch_x = factor;
+}
 void esp_set_aim_lead(float seconds) {
     // Без isfinite (-ffast-math): значение приходит со слайдера 0..150 мс
     // и проверяется при загрузке конфига, сюда мусор не попадает — обычный
@@ -7943,6 +7903,32 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view))
                 return transient_return(7);
         }
+        // Растяг экрана (Aspect Ratio, меню «Визуалы → Ещё настройки»):
+        // горизонтальный масштаб проекции — это cot(fov/2) / aspect, поэтому
+        // aspect ДЕЛИМ на коэффициент: горизонтальный FOV растёт, края
+        // уходят за кадр, а модели врагов становятся шире/жирнее (круги-
+        // прицелы овальные — норма для фичи). Через умножение эффект был
+        // обратный — картинка сплющивалась (наблюдение с устройства 04.10).
+        // Пишем КАЖДЫЙ кадр тем же g_mem, что и аим: движок может возвращать
+        // aspect на место при смене вида; наш же w2s берёт матрицу из того
+        // поля, так что проекция ESP растягивается вместе с игрой. Базу
+        // берём из геометрии экрана (sw/sh), а не из памяти — там уже может
+        // лежать наша же запись. При возврате слайдера в 1.00 аспект один
+        // раз восстанавливается в ровный sw/sh.
+        {
+            const float stretch = g_screen_stretch_x;
+            static float s_stretch_last = 1.0F;
+            if (sh > 1.0F) {
+                const float base = sw / sh;
+                if (stretch > 1.005F) {
+                    const float want = base / stretch;
+                    wr_buf(native_cam + CAMERA_ASPECT, &want, sizeof(want));
+                } else if (s_stretch_last > 1.005F) {
+                    wr_buf(native_cam + CAMERA_ASPECT, &base, sizeof(base));
+                }
+            }
+            s_stretch_last = stretch;
+        }
         // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
         vp = mat_mul(projection, view);
     }
@@ -7971,8 +7957,86 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Мусорный отсчёт (нули после респауна, денормали, координаты чужого
             // объекта из пула) отбрасываем сразу: это finite-вектор, но не
             // мировая позиция, и именно он утаскивал бокс «в другую сторону».
-            const bool read_ok = read_entity_position(s_transforms[index], candidate) &&
-                                 position_looks_like_world_space(candidate);
+            bool read_ok = read_entity_position(s_transforms[index], candidate) &&
+                           position_looks_like_world_space(candidate);
+            bool direct_was_junk = false;
+            if (read_ok && position_near_world_origin(candidate)) {
+                // (0.1, 0.0, 0.0)-мусор пула: считаем чтение неудачным, дальше
+                // отработают KCC/модель или холд фильтра. Если ниже KCC/модель
+                // подтвердит ту же точку у нуля — это живой спавн, и отказ
+                // в счётчике откатим.
+                read_ok = false;
+                direct_was_junk = true;
+                ++g_position_origin_rejected;
+            }
+            if (!read_ok) {
+                // Только что заспавнившийся неподвижный игрок: синхронизируемые
+                // поля PlayerManager ещё не получили ни одной записи (писатель
+                // позиции шлёт дельты движения), поэтому прямое чтение даёт
+                // нули/мусор — бокс либо отсутствовал, либо мерцал в (0,0,0)
+                // «под картой». Живые источники той же позиции доступны сразу:
+                // KCC.Move.Position = низ капсулы (те же «ноги», что и прямое
+                // поле), дальше — characterModel (бёдра: 0.9 м выше ног).
+                // Бэклинки обоих цепочек подтверждены резолверами, а фильтр ниже
+                // примет значение как первую нормальную точку трека.
+                Vec3 alt{};
+                const PlayerAux& fallback_aux = player_aux(s_transforms[index]);
+                bool have_alt = player_kcc_position(fallback_aux, alt);
+                if (have_alt) {
+                    if (!g_use_direct_player_position) alt.y += 1.60F;  // ноги -> глаза
+                } else if (player_model_position(s_transforms[index], alt)) {
+                    alt.y += g_use_direct_player_position ? -0.90F : 0.90F;  // бёдра -> ноги / глаза
+                    have_alt = true;
+                }
+                if (have_alt && position_looks_like_world_space(alt) && position_near_world_origin(alt)) {
+                    // Согласие источников: прямое поле И KCC/модель ВМЕСТЕ
+                    // указывают «у нуля мира» — это живой спавн на плоской
+                    // арене (PvP-сервера сажают точку спауна в (x, 0.0, 0.0)),
+                    // а не пуловый мусор: у мусора KCC держит настоящее тело
+                    // в стороне, и точки не совпадают. 04.10: на PvP-сервере
+                    // игрок появился на спавне рядом и остался без ESP — обе
+                    // его линии чтения честно давали (x, 0.0, 0.0).
+                    const bool direct_near_zero =
+                        position_looks_like_world_space(candidate) && position_near_world_origin(candidate);
+                    const bool direct_agrees =
+                        direct_near_zero && vec3_horiz2(alt, candidate) <= 1.5F * 1.5F &&
+                        fabsf(alt.y - candidate.y) <= 1.5F;
+                    const bool direct_unread = !position_looks_like_world_space(candidate);
+                    if (direct_agrees || direct_unread) {
+                        candidate = alt;   // обе линии сходятся — это живая точка
+                        read_ok = true;
+                        if (direct_was_junk) --g_position_origin_rejected;  // тик прямого чтения был ложным
+                    } else {
+                        have_alt = false;
+                        ++g_position_origin_rejected;
+                    }
+                }
+                if (have_alt && position_looks_like_world_space(alt)) {
+                    // Фолбэк нужен игроку БЕЗ позиции (свежий спавн). У KCC/
+                    // characterModel другая база по высоте и свои паузы: сел в
+                    // кресло/лёг/плывёт/в лодке — их точка может стоять на
+                    // несколько метров ниже сетевой, и чередование источников
+                    // раскачивало бокс «под землю» циклами (жалоба после первого
+                    // фикса). Уже рисуемого игрока аварийный источник принимаем
+                    // только рядом с нарисованной точкой; дальше — обычный
+                    // холд фильтра, который за секунду сам перезапустит трек.
+                    bool accept = true;
+                    auto prev = g_player_track.find(s_transforms[index]);
+                    if (prev != g_player_track.end() && prev->second.filt.has_drawn) {
+                        const Vec3& d = prev->second.filt.drawn;
+                        const float ddx = alt.x - d.x, ddz = alt.z - d.z;
+                        accept = (ddx * ddx + ddz * ddz) <= 3.0F * 3.0F &&
+                                 fabsf(alt.y - d.y) <= 3.0F;
+                    }
+                    if (accept) {
+                        candidate = alt;
+                        read_ok = true;
+                        ++g_position_fallback_this_frame;
+                    } else {
+                        ++g_position_fallback_rejected;
+                    }
+                }
+            }
             if (read_ok) ++live_player_positions;
             // Один сбой чтения или один мусорный кадр больше не гасят и не
             // дёргают бокс — см. filter_player_position.
@@ -7989,6 +8053,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
                 nearest_distance_squared = distance_squared; nearest_index = index;
             }
+        }
+        {
+            // Раз в секунду — сколько позиций пришло из запасного источника.
+            const double now = mono_seconds();
+            if (now - g_position_fallback_log_at >= 1.0) {
+                if (g_position_fallback_logged > 0 || g_position_fallback_rejected_logged > 0 ||
+                    g_position_origin_rejected_logged > 0)
+                    LogLine("визуал: позиция из KCC/модели для %d игроков за секунду (свежий спавн, далёких отвергнуто %d, нулей-пула %d)",
+                            g_position_fallback_logged, g_position_fallback_rejected_logged,
+                            g_position_origin_rejected_logged);
+                g_position_fallback_log_at = now;
+                g_position_fallback_logged = 0;
+                g_position_fallback_rejected_logged = 0;
+                g_position_origin_rejected_logged = 0;
+            }
+            g_position_fallback_logged += g_position_fallback_this_frame;
+            g_position_fallback_rejected_logged += g_position_fallback_rejected;
+            g_position_origin_rejected_logged += g_position_origin_rejected;
+            g_position_fallback_this_frame = 0;
+            g_position_fallback_rejected = 0;
+            g_position_origin_rejected = 0;
         }
         // Prefer the resolver's exact local PlayerManager whenever it is in
         // the population.  Nearest-to-camera is only a startup fallback when

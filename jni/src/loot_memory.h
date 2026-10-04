@@ -89,10 +89,16 @@ template <class IO> class Controller {
     std::uint64_t begin_runner_ = 0, item_phase_ = 0;
     std::uint32_t neutralized_ = 0;     // сколько ожиданий ускорено всего
     std::uint32_t anchor_misses_ = 0;   // self-heal after a world/PlayerLoop rebuild
+    // Watchdog (заказ 04.10: «бывает перестаёт работать в один момент»).
+    // Тишина по ускорениям дольше ~15 с при включённом тумблере — почти наверняка
+    // что-то протухло (якорь, класс, негативный кэш, окно вращения): полный
+    // сброс собирает цепочку заново, причина при этом даже не важна.
+    std::uint32_t ticks_since_write_ = 0;
+    std::uint32_t write_fail_streak_ = 0;
     void forget_addresses() {
         // Сессия сменилась: ни один старый адрес не обязан быть валиден.
         helper_class_ = 0; promise_class_ = 0; scaled_class_ = 0;
-        begin_runner_ = item_phase_ = 0; anchor_misses_ = 0;
+        begin_runner_ = item_phase_ = 0; anchor_misses_ = 0; write_fail_streak_ = 0;
         runner_classes_.clear(); item_classes_.clear();
     }
     bool pointer(std::uint64_t address, std::uint64_t& value) {
@@ -215,7 +221,7 @@ public:
         // каждом новом ожидании, так что возвращать «оригиналы» не нужно —
         // просто всё забываем.
         forget_addresses();
-        session_ = 0; neutralized_ = 0;
+        session_ = 0; neutralized_ = 0; ticks_since_write_ = 0;
         status = viewmodel::Status::Off;
     }
     void tick(std::uint64_t session, std::uint64_t base, bool enabled) {
@@ -354,6 +360,22 @@ public:
             budget -= n;
         }
         neutralized_ += writes;
+        if (writes) {
+            ticks_since_write_ = 0;
+            write_fail_streak_ = 0;
+        } else if (++ticks_since_write_ >= 900) {
+            // ~15 с без единого ускоренного ожидания при включённом тумблере:
+            // сбрасываем всё (окно вращения в т.ч.) — пересборка стоит копейки,
+            // а лечит любую протухшую опору, включая неугаданную.
+            forget_addresses();
+            ticks_since_write_ = 0;
+        }
+        if (write_failed && ++write_fail_streak_ >= 4) {
+            // Записи отбиваются подряд — страница/карта кучи могла смениться;
+            // полный сброс, чтобы следующий тик пошёл по свежей цепочке.
+            forget_addresses();
+            write_fail_streak_ = 0;
+        }
         status = write_failed ? Status::Failed : Status::Active;
     }
 };
