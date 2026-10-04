@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - arena/01a1067f-myproject1
+  workflow_dispatch: # <--- ДОБАВЛЕНО: эта строчка включает кнопку ручного запуска
 
 permissions:
   contents: write
@@ -66,3 +67,4 @@ jobs:
           git add ci-diag.log
           git commit -m "CI diag: ndk-build log (run ${GITHUB_RUN_NUMBER})" || echo "nothing to commit"
           git push origin "HEAD:${GITHUB_REF_NAME}"
+          
