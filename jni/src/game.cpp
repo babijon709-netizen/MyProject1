@@ -2743,17 +2743,19 @@ static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
     return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
 }
 
-// Сентинел «(≈0, ≈0, ≈0)»: свежий объект из пула (игра в этой сборке
-// пересоздаёт PlayerManager каждые ~10 с, см. лог «сменили победителя»)
-// пока недоинициализирован отдаёт в поле позиции почти нули — (0.1, 0, 0),
-// (3.1, 0, 0) и т.п. Такая точка проходит world-space-гейт и рисует бокс
-// под картой (нырок y 10.4 -> 0.0, гор 3.3 м — 04.10, xvcen.log). Живых
-// игроков с y ≈ 0 в паре метров от нуля по обеим горизонталям не бывает.
+// Сентинел пулового мусора: свежий объект (игра пересоздаёт PlayerManager
+// каждые ~10 с, см. лог «сменили победителя») пока недоинициализирован отдаёт
+// в поле позиции вектор ВИДА (x_любой, 0.0, 0.0) — в логе x принимал 0.1,
+// 0.8, 3.1, 4.8, 9.5, 11.8, а y и z всегда ровный ноль. Такая точка проходит
+// world-space-гейт и рисует бокс под картой (нырок y 10.4 -> 0.0 за кадр).
+// Когда хотя бы ДВЕ координаты почти ровные нули — это не живая позиция
+// (настоящий игрок не стоит одновременно на нулевом меридиане и в нуле высоты).
 static bool position_near_world_origin(const Vec3& v) {
-    if (fabsf(v.y) >= 1.5F) return false;
-    const float ax = fabsf(v.x), az = fabsf(v.z);
-    if (ax < 3.0F && az < 3.0F) return true;
-    return (ax < 4.0F && az < 0.25F) || (az < 4.0F && ax < 0.25F);
+    int zeros = 0;
+    if (fabsf(v.x) < 0.25F) ++zeros;
+    if (fabsf(v.y) < 0.25F) ++zeros;
+    if (fabsf(v.z) < 0.25F) ++zeros;
+    return zeros >= 2;
 }
 
 // A world position we would believe from a single sample: inside the map
@@ -8311,11 +8313,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         int still = -1;
                         if (fft != g_player_track.end()) { snprintf(uid_txt, sizeof(uid_txt), "%s", fft->second.uid); still = fft->second.still_frames; }
                         auto lat = g_mount_latch.find(s_transforms[i]);
-                        LogLine("визуал: %s 0x%llx (uid %s, still %d): y %.1f->%.1f (dy %.1f, гор %.1fм) src=%c",
+                        LogLine("визуал: %s 0x%llx (uid %s, still %d): (%.1f,%.2f,%.1f) -> (%.1f,%.2f,%.1f) (dy %.1f, гор %.1fм) src=%c",
                                 dy < 0.0F ? "НЫРОК" : "ВСПЛЫТИЕ", (unsigned long long)s_transforms[i],
                                 uid_txt, still,
-                                (double)prev->second.y, (double)feet.y, (double)dy, (double)horiz,
-                                (int)pos_source[i]);
+                                (double)prev->second.x, (double)prev->second.y, (double)prev->second.z,
+                                (double)feet.x, (double)feet.y, (double)feet.z,
+                                (double)dy, (double)horiz, (int)pos_source[i]);
                         if (lat != g_mount_latch.end())
                             LogLine("визуал:     latch engaged=%d saved_still=%d prev_saved=(%.1f,%.1f,%.1f) have=%d last=(%.1f,%.1f,%.1f) last_ok=%d",
                                     (int)lat->second.engaged, lat->second.saved_still,
