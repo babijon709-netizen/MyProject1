@@ -5,13 +5,10 @@
 // visual-only: all aim points are removed before they are republished.
 #include "game.h"
 #include <vector>
-#include <unordered_map>
 
 class EspContinuity {
     std::vector<EspBox> players_;
     double remembered_at_ = 0.0;
-    std::unordered_map<uint64_t, double> last_seen_;
-    static constexpr double kMissingPlayerBridgeSeconds = 0.20;
 
     static bool has_player(const std::vector<EspBox>& frame) {
         for (const EspBox& box : frame) if (!box.is_bot) return true;
@@ -38,7 +35,6 @@ public:
 
     void clear() {
         players_.clear();
-        last_seen_.clear();
         remembered_at_ = 0.0;
     }
 
@@ -51,34 +47,8 @@ public:
     // only a completely empty player publication is bridged.
     std::vector<EspBox> publish(std::vector<EspBox> frame, bool healthy, double now) {
         if (healthy) {
-            // A healthy camera/local frame can still contain one bad remote
-            // position read or a one-frame projection miss. Keep the last box
-            // for a very short bridge instead of making that player blink out.
-            // Live entries always win; cached entries are visual-only.
-            if (!players_.empty()) {
-                for (const EspBox& old : players_) {
-                    bool present = false;
-                    for (const EspBox& current : frame)
-                        if (!current.is_bot && current.id == old.id) { present = true; break; }
-                    if (present) {
-                        last_seen_[old.id] = now;
-                    } else {
-                        auto seen = last_seen_.find(old.id);
-                        if (seen != last_seen_.end() && now >= seen->second &&
-                            now - seen->second <= kMissingPlayerBridgeSeconds) {
-                            EspBox cached = old;
-                            disable_aim(cached);
-                            frame.push_back(cached);
-                        }
-                    }
-                }
-            }
             players_.clear();
-            for (const EspBox& box : frame) {
-                if (box.is_bot) continue;
-                players_.push_back(box);
-                last_seen_[box.id] = now;
-            }
+            for (const EspBox& box : frame) if (!box.is_bot) players_.push_back(box);
             remembered_at_ = now;
             return frame;
         }
