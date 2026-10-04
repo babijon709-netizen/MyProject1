@@ -10,6 +10,7 @@
 #include "overlay_geometry.h"
 #include <cfloat>
 #include <cmath>
+#include <time.h>
 
 // Radius (px) of the aim FOV circle. Original logic: cfg::aim::fov is an
 // angle against a fixed 60° reference (not the live camera FOV), so the circle
@@ -235,7 +236,31 @@ void DrawEspOverlay() {
         }
 
         if (g_state.esp_box) {
-            CornerBox(bx1, by1, bx2, by2, ColU32(ally ? cfg::esp::ally_col : cfg::esp::box_col));
+            // Микро-вспышка при захвате цели аимом (см. aim.h): четыре уголка
+            // «отпрыгивают» от центра рамки каждый по своей диагонали — рамка
+            // пружинно растёт на ~15 px за 0.12 с, затем резинкой возвращается
+            // 0.33 с со скольжением к концу (ease-out кубик). За пределами
+            // 0.45 с (или когда аим выключен) рамка рисуется как обычно.
+            float poff = 0.f;
+            if (g_state.aim_touch && box.id != 0 &&
+                box.id == g_aim_pulse_target.load(std::memory_order_relaxed)) {
+                timespec pts{}; clock_gettime(CLOCK_MONOTONIC, &pts);
+                const double now = (double)pts.tv_sec + (double)pts.tv_nsec * 1e-9;
+                const double age = now - g_aim_pulse_at.load(std::memory_order_relaxed);
+                constexpr double kOut = 0.12, kBack = 0.33;
+                constexpr float kMax = 15.f;
+                if (age >= 0.0 && age <= kOut + kBack) {
+                    if (age <= kOut) {
+                        const float u = (float)(age / kOut);
+                        poff = kMax * (1.f - (1.f - u) * (1.f - u));
+                    } else {
+                        const float u = (float)((age - kOut) / kBack);
+                        poff = kMax * (1.f - u) * (1.f - u) * (1.f - u);
+                    }
+                }
+            }
+            CornerBox(bx1 - poff, by1 - poff, bx2 + poff, by2 + poff,
+                      ColU32(ally ? cfg::esp::ally_col : cfg::esp::box_col));
         }
 
         if (g_state.esp_skeleton && box.has_skeleton) {
