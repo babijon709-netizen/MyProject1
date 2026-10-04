@@ -2743,6 +2743,19 @@ static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
     return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
 }
 
+// Сентинел «(≈0, ≈0, ≈0)»: свежий объект из пула (игра в этой сборке
+// пересоздаёт PlayerManager каждые ~10 с, см. лог «сменили победителя»)
+// пока недоинициализирован отдаёт в поле позиции почти нули — (0.1, 0, 0),
+// (3.1, 0, 0) и т.п. Такая точка проходит world-space-гейт и рисует бокс
+// под картой (нырок y 10.4 -> 0.0, гор 3.3 м — 04.10, xvcen.log). Живых
+// игроков с y ≈ 0 в паре метров от нуля по обеим горизонталям не бывает.
+static bool position_near_world_origin(const Vec3& v) {
+    if (fabsf(v.y) >= 1.5F) return false;
+    const float ax = fabsf(v.x), az = fabsf(v.z);
+    if (ax < 3.0F && az < 3.0F) return true;
+    return (ax < 4.0F && az < 0.25F) || (az < 4.0F && ax < 0.25F);
+}
+
 // A world position we would believe from a single sample: inside the map
 // bounds and not a pile of denormals. Used when we are the only player on the
 // server, where the "several players spread out" test below cannot run.
@@ -5304,6 +5317,8 @@ static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
 // наблюдение за жалобой «нет боксов на свежеспавнившихся».
 static int g_position_fallback_this_frame = 0;
 static int g_position_fallback_rejected = 0;  // отклонённые как далёкие (чужая база)
+static int g_position_origin_rejected = 0;   // отсчёты вида (≈0, 0, ≈0) из недоинициализированного пула
+static int g_position_origin_rejected_logged = 0;
 static double g_position_fallback_log_at = 0.0;
 static int g_position_fallback_logged = 0;
 static int g_position_fallback_rejected_logged = 0;
@@ -5340,7 +5355,8 @@ static bool player_is_mounted(uint64_t player) {
 static bool player_saved_position(uint64_t player, Vec3& out) {
     uint64_t off = g_player_position_offset ? g_player_position_offset : (uint64_t)PLAYER_POSITION;
     out = rd_v3(player + off);
-    return vec3_is_finite(out) && position_looks_like_world_space(out);
+    return vec3_is_finite(out) && position_looks_like_world_space(out) &&
+           !position_near_world_origin(out);
 }
 
 // World position of the player's own transform (worldCameraRoot). While he is
@@ -7914,6 +7930,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // мировая позиция, и именно он утаскивал бокс «в другую сторону».
             bool read_ok = read_entity_position(s_transforms[index], candidate) &&
                            position_looks_like_world_space(candidate);
+            if (read_ok && position_near_world_origin(candidate)) {
+                // (0.1, 0.0, 0.0)-мусор пула: считаем чтение неудачным, дальше
+                // отработают KCC/модель или холд фильтра.
+                read_ok = false;
+                ++g_position_origin_rejected;
+            }
             char src_tag = 'D';
             if (!read_ok) {
                 // Только что заспавнившийся неподвижный игрок: синхронизируемые
@@ -7934,6 +7956,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 } else if (player_model_position(s_transforms[index], alt)) {
                     alt.y += g_use_direct_player_position ? -0.90F : 0.90F;  // бёдра -> ноги / глаза
                     have_alt = true;
+                }
+                if (have_alt && position_looks_like_world_space(alt) && position_near_world_origin(alt)) {
+                    have_alt = false;
+                    ++g_position_origin_rejected;
                 }
                 if (have_alt && position_looks_like_world_space(alt)) {
                     // Фолбэк нужен игроку БЕЗ позиции (свежий спавн). У KCC/
@@ -7990,17 +8016,22 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Раз в секунду — сколько позиций пришло из запасного источника.
             const double now = mono_seconds();
             if (now - g_position_fallback_log_at >= 1.0) {
-                if (g_position_fallback_logged > 0 || g_position_fallback_rejected_logged > 0)
-                    LogLine("визуал: позиция из KCC/модели для %d игроков за секунду (свежий спавн, далёких отвергнуто %d)",
-                            g_position_fallback_logged, g_position_fallback_rejected_logged);
+                if (g_position_fallback_logged > 0 || g_position_fallback_rejected_logged > 0 ||
+                    g_position_origin_rejected_logged > 0)
+                    LogLine("визуал: позиция из KCC/модели для %d игроков за секунду (свежий спавн, далёких отвергнуто %d, нулей-пула %d)",
+                            g_position_fallback_logged, g_position_fallback_rejected_logged,
+                            g_position_origin_rejected_logged);
                 g_position_fallback_log_at = now;
                 g_position_fallback_logged = 0;
                 g_position_fallback_rejected_logged = 0;
+                g_position_origin_rejected_logged = 0;
             }
             g_position_fallback_logged += g_position_fallback_this_frame;
             g_position_fallback_rejected_logged += g_position_fallback_rejected;
+            g_position_origin_rejected_logged += g_position_origin_rejected;
             g_position_fallback_this_frame = 0;
             g_position_fallback_rejected = 0;
+            g_position_origin_rejected = 0;
         }
         // Prefer the resolver's exact local PlayerManager whenever it is in
         // the population.  Nearest-to-camera is only a startup fallback when
