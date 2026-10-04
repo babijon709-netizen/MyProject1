@@ -5304,6 +5304,12 @@ double mono_seconds() {
     return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
 }
 static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
+// Сколько игроков в кадре получили позицию из запасного источника (KCC/
+// characterModel), потому что синхронизируемое поле ещё не записано игрой —
+// наблюдение за жалобой «нет боксов на свежеспавнившихся».
+static int g_position_fallback_this_frame = 0;
+static double g_position_fallback_log_at = 0.0;
+static int g_position_fallback_logged = 0;
 // uid -> the object we drew last time, so a tie does not flip between copies.
 static std::unordered_map<std::string, uint64_t> g_player_track_pick;
 
@@ -7971,8 +7977,33 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Мусорный отсчёт (нули после респауна, денормали, координаты чужого
             // объекта из пула) отбрасываем сразу: это finite-вектор, но не
             // мировая позиция, и именно он утаскивал бокс «в другую сторону».
-            const bool read_ok = read_entity_position(s_transforms[index], candidate) &&
-                                 position_looks_like_world_space(candidate);
+            bool read_ok = read_entity_position(s_transforms[index], candidate) &&
+                           position_looks_like_world_space(candidate);
+            if (!read_ok) {
+                // Только что заспавнившийся неподвижный игрок: синхронизируемые
+                // поля PlayerManager ещё не получили ни одной записи (писатель
+                // позиции шлёт дельты движения), поэтому прямое чтение даёт
+                // нули/мусор — бокс либо отсутствовал, либо мерцал в (0,0,0)
+                // «под картой». Живые источники той же позиции доступны сразу:
+                // KCC.Move.Position = низ капсулы (те же «ноги», что и прямое
+                // поле), дальше — characterModel (бёдра: 0.9 м выше ног).
+                // Бэклинки обоих цепочек подтверждены резолверами, а фильтр ниже
+                // примет значение как первую нормальную точку трека.
+                Vec3 alt{};
+                const PlayerAux& fallback_aux = player_aux(s_transforms[index]);
+                bool have_alt = player_kcc_position(fallback_aux, alt);
+                if (have_alt) {
+                    if (!g_use_direct_player_position) alt.y += 1.60F;  // ноги -> глаза
+                } else if (player_model_position(s_transforms[index], alt)) {
+                    alt.y += g_use_direct_player_position ? -0.90F : 0.90F;  // бёдра -> ноги / глаза
+                    have_alt = true;
+                }
+                if (have_alt && position_looks_like_world_space(alt)) {
+                    candidate = alt;
+                    read_ok = true;
+                    ++g_position_fallback_this_frame;
+                }
+            }
             if (read_ok) ++live_player_positions;
             // Один сбой чтения или один мусорный кадр больше не гасят и не
             // дёргают бокс — см. filter_player_position.
@@ -7989,6 +8020,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
                 nearest_distance_squared = distance_squared; nearest_index = index;
             }
+        }
+        {
+            // Раз в секунду — сколько позиций пришло из запасного источника.
+            const double now = mono_seconds();
+            if (now - g_position_fallback_log_at >= 1.0) {
+                if (g_position_fallback_logged > 0)
+                    LogLine("визуал: позиция из KCC/модели для %d игроков за секунду (свежий спавн)",
+                            g_position_fallback_logged);
+                g_position_fallback_log_at = now;
+                g_position_fallback_logged = 0;
+            }
+            g_position_fallback_logged += g_position_fallback_this_frame;
+            g_position_fallback_this_frame = 0;
         }
         // Prefer the resolver's exact local PlayerManager whenever it is in
         // the population.  Nearest-to-camera is only a startup fallback when
