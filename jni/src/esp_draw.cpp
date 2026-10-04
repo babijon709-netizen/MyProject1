@@ -54,7 +54,14 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_always_day(g_state.always_day);
         esp_set_marker_max_distance(g_state.marker_dist);
         // Упреждение аима (слайдер на вкладке аима): в игру уходит в секундах.
-        esp_set_aim_lead(g_state.aim_lead_ms * 0.001f);
+        // Упреждение: слайдер, но для мемори-аима — автоматически не меньше
+        // задержки контура (1-2 кадра игры + запись в середине кадра ≈ 50 мс).
+        // Скорость берётся из трекера игроков в game.cpp (world-space, уже
+        // сглаженная) — в отличие от углового предикта по разности кадров,
+        // который шумел и дёргал прицел (жалоба 05.10).
+        const float leadAuto = (g_state.aim_mode == AIM_MODE_MEMORY) ? 0.05f : 0.0f;
+        const float leadUser = g_state.aim_lead_ms * 0.001f;
+        esp_set_aim_lead(leadUser > leadAuto ? leadUser : leadAuto);
         esp_set_screen_stretch(g_state.screen_stretch_x);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);

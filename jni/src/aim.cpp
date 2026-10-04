@@ -518,21 +518,16 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                     // движение проходит целиком. Множитель больше 1.1 только
                     // мерил: при 2.0 цель идёт с остатком 0.98° против 0.70°,
                     // то есть прицел уезжает вперёд, а не отстаёт.
-                    // Угловое упреждение включено ТОЛЬКО для мемори-аима
-                    // (заказ 05.10: «сделай, чтобы упреждение работало с
-                    // мемори-аимом»). Жёсткая привязка гасит весь остаток
-                    // одной записью, но целится в положение цели с задержкой
-                    // контура (чтение -> запись -> применение игрой, 1-2
-                    // кадра), и бегущая цель без упреждения уползала из
-                    // прицела. Берём мереные 1.1 кадра, кламп 1.5 — как до
-                    // отключения 19.09. Тач и сайлент остаются без углового
-                    // упреждения (у тача своя поправка — обучение
-                    // коэффициента, у сайлента своя задержка выстрела).
-                    // Позиционное упреждение слайдером «Упреждение» (мс)
-                    // действует поверх — оно входит в саму точку прицела в
-                    // game.cpp для всех режимов.
-                    const float leadFrames =
-                        (g_state.aim_mode == AIM_MODE_MEMORY) ? 1.1f : 0.0f;
+                    // Угловое упреждение ВЫКЛЮЧЕНО и для мемори тоже (правка
+                    // 05.10 #2): оценщик скорости по разности целевых углов
+                    // между кадрами шумит на любых движениях камеры, а
+                    // множитель до 1.5 кадра этот шум усиливал — прицел
+                    // мотало боками сразу после наведения («мерно дёргает,
+                    // хоть и меньше»). Рабочее упреждение для мемори теперь
+                    // по world-скорости цели из трекера игроков
+                    // (esp_set_aim_lead с авто-полом 50 мс в esp_draw.cpp):
+                    // оно входит в саму точку прицела и оценщика не требует.
+                    const float leadFrames = 0.0f;
                     float k = leadFrames * (1.f - leadMin / vMag);
                     if (k > 1.5f) k = 1.5f;
                     best.yaw   += pick.velYaw   * k;
@@ -1104,6 +1099,9 @@ const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
 static void UpdateAimMemory(float dt) {
     static AimPick pick;
+    // Прошлый заказанный шаг — только для ограничителя рывка (ниже).
+    static float s_prevStepYaw = 0.f, s_prevStepPitch = 0.f;
+    auto drop_steps = [&]() { s_prevStepYaw = 0.f; s_prevStepPitch = 0.f; };
 
     float sw = 0.f, sh = 0.f;
     int why = 0;
@@ -1111,7 +1109,7 @@ static void UpdateAimMemory(float dt) {
         s_memDiag = AimMemDiag{};
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
-        pick.reset();
+        pick.reset(); drop_steps();
         return;
     }
     s_memDiag.inactive = 0;
@@ -1136,7 +1134,7 @@ static void UpdateAimMemory(float dt) {
     LogStage(kStageAimRead);
     if (!esp_mem_aim_read_angles(accX, accY)) {
         ++s_memDiag.read_fail;
-        pick.reset();
+        pick.reset(); drop_steps();
         return;
     }
 
@@ -1145,27 +1143,34 @@ static void UpdateAimMemory(float dt) {
     int noTgtWhy = 0;
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
-        pick.reset();
+        pick.reset(); drop_steps();
         return;
     }
     s_memDiag.no_target = 0;
+    // Другая цель: ограничитель рывка отсчитываем с нуля (свой первый шаг к
+    // новой кости законно большой — ограничитель пропорционален остатку).
+    if (pick.switched) drop_steps();
 
-    // ПРИВЯЗКА к кости. Никакого окна «в полёте» и вычитания заказанного:
-    // задержка «запись -> применение игрой» снаружи НЕ наблюдаема, а вычесть
-    // шаг, который камера уже отработала в том же кадре, — значит заказать
-    // его обратно. Именно так аим и «отдёргивался в сторону от игрока сразу
-    // после наведения» (жалоба 05.10): захват -> остаток заказан -> камера
-    // уже на кости -> из почти нулевого остатка вычли прошлый шаг -> запись
-    // увела камеру назад. Без вычитания знак шага ВСЕГДА совпадает со знаком
-    // остатка, камера может только приближаться к кости.
-    // Доля 0.75 вместо 1.0 — гаситель от запаздывания в 1-2 кадра: при любом
-    // лаге примерно до 3 кадров остаток затухает без нарастания, при
-    // однокадровом применении сходится за ~3 такта (~50 мс) — субъективно тот
-    // же мгновенный магнит, но без риска маятника. Мёртвой зоны по-прежнему
-    // нет: она и была «отлипанием на шаг».
-    const float stepYaw   = best.yaw   * 0.75f;
-    const float stepPitch = best.pitch * 0.75f;
-    if (!std::isfinite(stepYaw) || !std::isfinite(stepPitch)) return;
+    // ПРИВЯЗКА к кости (правка 05.10 #2, разбор остаточного дёрганья).
+    // Доля 0.55 вместо 0.75: при двухкадровой задержке применения записи
+    // комплексные полюса петли дают видимое биение; 0.55 его режет почти
+    // вдвое, сходимость остаётся ~4 такта (~65 мс) — субъективно тот же
+    // магнит. ОГРАНИЧИТЕЛЬ РЫВКА: шаг за такт меняется не больше чем на
+    // 0.2° + 60% текущего остатка. Большой остаток (перенацеливание) — лимит
+    // широкий, доводка быстрая; у самой кости — лимит 0.2°, даже сорвавшийся
+    // расчёт не может пнуть камеру заметно. Вычитания «в полёте» по-прежнему
+    // нет: знак шага всегда в сторону кости, обратного заказа не бывает.
+    float stepYaw   = best.yaw   * 0.55f;
+    float stepPitch = best.pitch * 0.55f;
+    {
+        const float maxDYaw   = 0.2f + fabsf(best.yaw)   * 0.6f;
+        const float maxDPitch = 0.2f + fabsf(best.pitch) * 0.6f;
+        if (stepYaw   > s_prevStepYaw   + maxDYaw)   stepYaw   = s_prevStepYaw   + maxDYaw;
+        if (stepYaw   < s_prevStepYaw   - maxDYaw)   stepYaw   = s_prevStepYaw   - maxDYaw;
+        if (stepPitch > s_prevStepPitch + maxDPitch) stepPitch = s_prevStepPitch + maxDPitch;
+        if (stepPitch < s_prevStepPitch - maxDPitch) stepPitch = s_prevStepPitch - maxDPitch;
+    }
+    if (!std::isfinite(stepYaw) || !std::isfinite(stepPitch)) { drop_steps(); return; }
     if (fabsf(stepYaw) < 0.01f && fabsf(stepPitch) < 0.01f) { ++s_memDiag.on_target; return; }
 
     // Градусы -> накопитель игры: X — «наклон вниз» (вверх — меньше),
@@ -1173,9 +1178,11 @@ static void UpdateAimMemory(float dt) {
     LogStage(kStageAimWrite);
     if (!esp_mem_aim_write_angles(accX - stepPitch, accY + stepYaw)) {
         ++s_memDiag.fails;
+        drop_steps();
         return;
     }
     ++s_memDiag.writes;
+    s_prevStepYaw = stepYaw; s_prevStepPitch = stepPitch;
 }
 
 // ====================== Сайлент (guarded worker) ===========================
