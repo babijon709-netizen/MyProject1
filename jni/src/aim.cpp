@@ -76,6 +76,7 @@ bool s_fingerDown = false;
 bool g_aimActive = false;
 std::atomic<unsigned long long> g_aim_pulse_target{0};
 std::atomic<double>             g_aim_pulse_at{0.0};
+std::atomic<double>             g_aim_hold_at{0.0};
 
 // Запасной град/px — из чувствительности, выставленной в настройках клиента.
 //
@@ -556,12 +557,14 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                 (int)best.respawning, (int)best.death_flag, (double)best.world_dist,
                 (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
     pick.switched = (best.id != pick.lastId);
-    // Микро-вспышка уголков ESP на момент захвата (aim.h): отдельно от звука
-    // и прочих реакций, чтобы оверлей рисовал её в любом режиме аима.
+    // Дыхание уголков ESP (aim.h): на захвате перезапускаем фазу цикла, а пока
+    // выбор жив — отмечаем удержание, по нему оверлей понимает «анимация
+    // идёт» и крутит её в любой из трёх режимах аима.
     if (pick.switched && best.id != 0) {
         g_aim_pulse_target.store((unsigned long long)best.id, std::memory_order_relaxed);
         g_aim_pulse_at.store(MonoNow(), std::memory_order_relaxed);
     }
+    g_aim_hold_at.store(MonoNow(), std::memory_order_relaxed);
     pick.lastId = best.id; pick.lastBone = best.bone;
     return true;
 }

@@ -236,25 +236,29 @@ void DrawEspOverlay() {
         }
 
         if (g_state.esp_box) {
-            // Микро-вспышка при захвате цели аимом (см. aim.h): четыре уголка
-            // «отпрыгивают» от центра рамки каждый по своей диагонали — рамка
-            // пружинно растёт на ~15 px за 0.12 с, затем резинкой возвращается
-            // 0.33 с со скольжением к концу (ease-out кубик). За пределами
-            // 0.45 с (или когда аим выключен) рамка рисуется как обычно.
+            // Дыхание рамки захваченной цели (см. aim.h): пока аим ДЕРЖИТ эту
+            // цель (hold свежий — без цели выбор не тикает и затухает за
+            // 0.2 с), уголки крутят непрерывный цикл «вдох»: пружинный разлёт
+            // на ~15 px за 0.12 с и возврат резинкой 0.33 с (скольжение к
+            // концу, ease-out кубик), период 0.45 с. Форма одна и та же, что
+            // была у микро-вспышки, — момент захвата есть нулевая фаза цикла.
             float poff = 0.f;
             if (g_state.aim_touch && box.id != 0 &&
                 box.id == g_aim_pulse_target.load(std::memory_order_relaxed)) {
                 timespec pts{}; clock_gettime(CLOCK_MONOTONIC, &pts);
                 const double now = (double)pts.tv_sec + (double)pts.tv_nsec * 1e-9;
-                const double age = now - g_aim_pulse_at.load(std::memory_order_relaxed);
-                constexpr double kOut = 0.12, kBack = 0.33;
-                constexpr float kMax = 15.f;
-                if (age >= 0.0 && age <= kOut + kBack) {
-                    if (age <= kOut) {
-                        const float u = (float)(age / kOut);
+                const double hold_age = now - g_aim_hold_at.load(std::memory_order_relaxed);
+                if (hold_age >= 0.0 && hold_age <= 0.20) {
+                    constexpr double kPeriod = 0.45, kOut = 0.12;
+                    constexpr float kMax = 15.f;
+                    double t = now - g_aim_pulse_at.load(std::memory_order_relaxed);
+                    if (t < 0.0) t = 0.0;
+                    double ph = t / kPeriod; ph = (ph - floor(ph)) * kPeriod;
+                    if (ph <= kOut) {
+                        const float u = (float)(ph / kOut);
                         poff = kMax * (1.f - (1.f - u) * (1.f - u));
                     } else {
-                        const float u = (float)((age - kOut) / kBack);
+                        const float u = (float)((ph - kOut) / (kPeriod - kOut));
                         poff = kMax * (1.f - u) * (1.f - u) * (1.f - u);
                     }
                 }
