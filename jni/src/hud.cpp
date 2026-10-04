@@ -214,16 +214,19 @@ void DrawWatermark(float dt) {
             enemies = esp_nearby_player_count();
         }
 
-        const float fs = 40.f, pad = 22.f, bR = 46.f;
-        const char* lbl = XS("Противники");
-        char cntBuf[16]; snprintf(cntBuf, sizeof(cntBuf), "%d", enemies);
-        auto lSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, lbl);
-        auto cSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, cntBuf);
+        const float fs = 40.f, pad = 18.f, bR = 46.f;
+        const int bots = g_esp_attached ? esp_nearby_bot_count() : 0;
+        char enemyBuf[16], botBuf[16];
+        snprintf(enemyBuf, sizeof(enemyBuf), "%d", enemies);
+        snprintf(botBuf, sizeof(botBuf), "%d", bots);
+        auto eSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, enemyBuf);
+        auto bSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, botBuf);
 
-        // Точка-индикатор + подпись + число.
-        const float dotR = 7.f;
-        float bW = pad + dotR * 2.f + 12.f + lSz.x + 14.f + cSz.x + pad;
-        float bH = cSz.y + pad;
+        // Две компактные пиктограммы и числа. Текстовые подписи и точка
+        // намеренно убраны: порядок слева направо — игроки, боты.
+        const float iconW = 28.f, gap = 10.f, groupGap = 24.f;
+        float bW = pad + iconW + gap + eSz.x + groupGap + iconW + gap + bSz.x + pad;
+        float bH = ImMax(eSz.y, bSz.y) + pad;
         // Пользовательская позиция: доли экрана = ЦЕНТР пилюли. Кламп
         // держит её внутри экрана целиком.
         float bX, bY;
@@ -253,13 +256,30 @@ void DrawWatermark(float dt) {
         fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol, bR);
         fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, bR, 0, 1.5f);
 
-        float dcy = bY + bH * 0.5f;
-        fg->AddCircleFilled({bX + pad + dotR, dcy}, dotR, C::U(acc), 24);
-
-        float tY = bY + (bH - cSz.y) * 0.5f;
-        float lX = bX + pad + dotR * 2.f + 12.f;
-        fg->AddText(fn, fs, {lX, tY}, C::UA(C::Txt(), 0.85f), lbl);
-        fg->AddText(fn, fs, {lX + lSz.x + 14.f, tY}, C::UA(C::Txt(), 0.85f), cntBuf);
+        const float dcy = bY + bH * 0.5f;
+        const ImU32 enemyCol = C::U(acc);
+        const ImU32 botCol = IM_COL32(190, 120, 255, 255);
+        auto drawPersonIcon = [&](float x, ImU32 col, bool bot) {
+            // Small vector glyph: head plus shoulders. Bots use a square
+            // visor so the two counters remain distinguishable without text.
+            fg->AddCircleFilled({x + 14.f, dcy - 7.f}, 5.f, col, 16);
+            if (bot) {
+                fg->AddRectFilled({x + 6.f, dcy - 1.f}, {x + 22.f, dcy + 9.f}, col, 3.f);
+                fg->AddRectFilled({x + 10.f, dcy + 2.f}, {x + 12.f, dcy + 5.f}, bgCol);
+                fg->AddRectFilled({x + 16.f, dcy + 2.f}, {x + 18.f, dcy + 5.f}, bgCol);
+            } else {
+                fg->AddCircleFilled({x + 14.f, dcy + 8.f}, 10.f, col, 20);
+            }
+        };
+        const float tY = bY + (bH - ImMax(eSz.y, bSz.y)) * 0.5f;
+        const float enemyX = bX + pad;
+        const float enemyNumX = enemyX + iconW + gap;
+        const float botX = enemyNumX + eSz.x + groupGap;
+        const float botNumX = botX + iconW + gap;
+        drawPersonIcon(enemyX, enemyCol, false);
+        drawPersonIcon(botX, botCol, true);
+        fg->AddText(fn, fs, {enemyNumX, tY}, C::UA(C::Txt(), 0.9f), enemyBuf);
+        fg->AddText(fn, fs, {botNumX, tY}, C::UA(C::Txt(), 0.9f), botBuf);
     }
 
     // ---- Кнопка фрикама: квадрат со скруглениями и глазом ----------------

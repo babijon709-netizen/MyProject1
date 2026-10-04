@@ -171,6 +171,8 @@ std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 // directions (360 degrees) — NOT limited to the ones visible on screen.
 // Feeds the enemy-counter pill in the overlay.
 int         esp_nearby_player_count();
+// Number of recognised bots in the current ESP snapshot.
+int         esp_nearby_bot_count();
 
 // True while the local player is aiming down sights (ADS) with the current
 // weapon. Returns false when the state cannot be read (not attached, no

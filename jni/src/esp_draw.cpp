@@ -48,7 +48,8 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
                                 g_state.esp_house_boxes);
         // Аим по ботам — тем же условием, что кости для аима: работает и
         // когда маркеры ботов выключены.
-        esp_set_bot_aim_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
+        esp_set_bot_aim_enabled(g_state.esp_bots || g_state.aim_touch ||
+                                g_state.aim_mode == AIM_MODE_MEMORY);
         esp_set_always_day(g_state.always_day);
         esp_set_marker_max_distance(g_state.marker_dist);
         // Упреждение аима (слайдер на вкладке аима): в игру уходит в секундах.

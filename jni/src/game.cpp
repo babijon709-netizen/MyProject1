@@ -7362,7 +7362,8 @@ bool esp_local_eye_position(float& x, float& y, float& z) {
 
 // Players near us this frame (all 360 degrees, not only the ones projected
 // on screen). Feeds the enemy-counter pill in the overlay.
-static int  g_frame_player_count = 0;
+static int      g_frame_player_count = 0;
+static int      g_frame_bot_count = 0;
 static int      g_frame_transforms_empty_streak = 0;
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
@@ -7603,6 +7604,7 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
         box.y1 = s_feet.y < s_top.y ? s_feet.y : s_top.y;
         box.y2 = s_feet.y < s_top.y ? s_top.y : s_feet.y;
         out.push_back(box);
+        ++g_frame_bot_count;
     }
 }
 
@@ -7741,6 +7743,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
 }
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
+    g_frame_bot_count = 0;
     std::vector<EspBox> result;
     auto transient_return = [&](int tag) {
         std::vector<EspBox> published =
@@ -8583,3 +8586,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 }
 
 int esp_nearby_player_count() { return g_frame_player_count; }
+int esp_nearby_bot_count() {
+    // Bot markers have their own throttled registry/cache and do not require
+    // skeleton ESP or aimbot mode to be enabled.
+    esp_bot_aim_maintain();
+    return static_cast<int>(esp_bot_aim_list().size());
+}
