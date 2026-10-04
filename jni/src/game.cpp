@@ -1,5 +1,4 @@
 #include "game.h"
-#include "esp_continuity.h"
 #include "player_esp_watchdog.h"
 #include "silent_aim.h"
 #include "viewmodel.h"
@@ -7390,11 +7389,6 @@ static std::vector<uint64_t> g_population_snapshot;
 // считать «3 любых» сменой мира нельзя (лог 09-20: +0-9 прорывались).
 static std::vector<uint64_t> s_adopt_cand;
 static int s_adopt_ident_streak = 0;
-// Last fully published player boxes.  Unlike object caches this intentionally
-// survives an ordinary death/respawn teardown and bridges only empty visual
-// frames; process loss still clears it in esp_reset().
-static EspContinuity g_esp_continuity;
-
 // Everything derived from concrete objects in a world/session. Called when the
 // whole player population is replaced.  Structural choices (position field,
 // matrix convention and Transform hierarchy offsets) belong to the release
@@ -7439,7 +7433,6 @@ void esp_reset() {
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
-    g_esp_continuity.clear();
     g_frame_publish_fail_streak = 0;
     g_player_esp_watchdog.reset();
     g_local_position_fail_streak = 0; g_world_change_streak = 0;
@@ -7746,10 +7739,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
     std::vector<EspBox> result;
     auto transient_return = [&](int tag) {
-        std::vector<EspBox> published =
-            g_esp_continuity.publish(std::move(result), false, mono_seconds());
-        watch_boxes(published, (size_t)-1, nullptr, tag);
-        return published;
+        watch_boxes(result, (size_t)-1, nullptr, tag);
+        return result;
     };
 
     // Watchdog: every frame that fails to publish a camera + local position
@@ -7774,8 +7765,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_player_count = 0;
 
     if (g_pid <= 0 || !g_il2cpp_base) {
-        g_esp_continuity.clear();
-        return result;
+            return result;
     }
 
     // Фрикам — до всех ранних выходов: сводки и покадровая запись нужны и в
@@ -8578,9 +8568,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     append_bot_boxes(result);
-    result = g_esp_continuity.publish(std::move(result),
-                                      local_position_from_player && !local_respawning,
-                                      mono_seconds());
     watch_boxes(result, local_entity_index, &skip_reason, 0);
     return result;
 }
