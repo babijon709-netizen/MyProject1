@@ -5326,10 +5326,6 @@ static int g_position_fallback_logged = 0;
 static int g_position_fallback_rejected_logged = 0;
 // uid -> the object we drew last time, so a tie does not flip between copies.
 static std::unordered_map<std::string, uint64_t> g_player_track_pick;
-// Диагностика «боксы ныряют под землю»: помним, где последний раз РИСОВАЛИ
-// каждый бокс, и логируем резкие вертикальные скачки без большого гор. сдвига.
-static std::unordered_map<uint64_t, Vec3> g_diag_prev_feet;
-static std::unordered_map<uint64_t, double> g_diag_last_log;
 
 static void prune_player_track(const std::vector<uint64_t>& players) {
     for (auto it = g_player_track.begin(); it != g_player_track.end();) {
@@ -7913,9 +7909,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<Vec3> positions(s_transforms.size());
     std::vector<char> position_ok(s_transforms.size(), 0);
     std::vector<char> skip_reason(s_transforms.size(), 0); // наблюдатель мерцаний: код пропуска
-    // Откуда в кадре позиция: 'D' прямая, 'K' KCC, 'M' модель, 'H' фильтровый
-    // холд без чтения, 'V' подмена маунт-латчом. Для диагностики ныров.
-    std::vector<char> pos_source(s_transforms.size(), 0);
     size_t live_player_positions = 0;
 
     {
@@ -7938,7 +7931,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 read_ok = false;
                 ++g_position_origin_rejected;
             }
-            char src_tag = 'D';
             if (!read_ok) {
                 // Только что заспавнившийся неподвижный игрок: синхронизируемые
                 // поля PlayerManager ещё не получили ни одной записи (писатель
@@ -7952,7 +7944,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 Vec3 alt{};
                 const PlayerAux& fallback_aux = player_aux(s_transforms[index]);
                 bool have_alt = player_kcc_position(fallback_aux, alt);
-                const bool have_alt_kcc = have_alt;
                 if (have_alt) {
                     if (!g_use_direct_player_position) alt.y += 1.60F;  // ноги -> глаза
                 } else if (player_model_position(s_transforms[index], alt)) {
@@ -7983,7 +7974,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     if (accept) {
                         candidate = alt;
                         read_ok = true;
-                        src_tag = (alt.y == alt.y && fallback_aux.kcc && have_alt_kcc) ? 'K' : 'M';
                         ++g_position_fallback_this_frame;
                     } else {
                         ++g_position_fallback_rejected;
@@ -7994,17 +7984,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Один сбой чтения или один мусорный кадр больше не гасят и не
             // дёргают бокс — см. filter_player_position.
             PlayerTrack& filter = g_player_track[s_transforms[index]];
-            Vec3 pre_filter = candidate;
             if (!filter_player_position(filter, read_ok, candidate, s_transforms[index])) continue;
-            if (!read_ok) src_tag = 'H'; // нарисовано прогнозом фильтра без чтения
-            Vec3 pre_mount = candidate;
             apply_mounted_position(s_transforms[index], candidate);
-            if (fabsf(candidate.x - pre_mount.x) + fabsf(candidate.y - pre_mount.y) +
-                fabsf(candidate.z - pre_mount.z) > 0.05F) src_tag = 'V';
             positions[index] = candidate;
             position_ok[index] = 1;
-            pos_source[index] = src_tag;
-            (void)pre_filter;
             track_player(s_transforms[index], candidate);
             if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
             if (!has_camera_position) continue;
@@ -8264,15 +8247,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             suppressed[take_mine ? rival : index] = 1;
             if (take_mine) found->second = index;
         }
-        for (const auto& entry : chosen) {
-            uint64_t winner = s_transforms[entry.second];
-            auto old_pick = g_player_track_pick.find(entry.first);
-            if (old_pick != g_player_track_pick.end() && old_pick->second != winner)
-                LogLine("визуал: объекты с userID %s сменили победителя 0x%llx -> 0x%llx",
-                        entry.first.c_str(), (unsigned long long)old_pick->second,
-                        (unsigned long long)winner);
-            g_player_track_pick[entry.first] = winner;
-        }
+        for (const auto& entry : chosen) g_player_track_pick[entry.first] = s_transforms[entry.second];
         // Ghost PlayerManager left at the boarding point: same frozen lastSaved
         // as a rider, even when userID on the leftover is empty.
         for (size_t index = 0; index < s_transforms.size(); ++index) {
@@ -8296,41 +8271,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (suppressed[i]) { skip_reason[i] = 'S'; continue; }
         if (!position_ok[i]) { skip_reason[i] = 'P'; continue; }
         Vec3 feet = positions[i];
-        if (g_diag_prev_feet.size() > 2048) g_diag_prev_feet.clear();
-        {
-            auto prev = g_diag_prev_feet.find(s_transforms[i]);
-            if (prev != g_diag_prev_feet.end()) {
-                const float dy = feet.y - prev->second.y;
-                const float hx = feet.x - prev->second.x, hz = feet.z - prev->second.z;
-                const float horiz = sqrtf(hx * hx + hz * hz);
-                if (fabsf(dy) > 2.5F && horiz < 25.0F) {
-                    const double now_s = mono_seconds();
-                    double& last = g_diag_last_log[s_transforms[i]];
-                    if (now_s - last >= 0.5) {
-                        last = now_s;
-                        auto fft = g_player_track.find(s_transforms[i]);
-                        char uid_txt[48] = "?";
-                        int still = -1;
-                        if (fft != g_player_track.end()) { snprintf(uid_txt, sizeof(uid_txt), "%s", fft->second.uid); still = fft->second.still_frames; }
-                        auto lat = g_mount_latch.find(s_transforms[i]);
-                        LogLine("визуал: %s 0x%llx (uid %s, still %d): (%.1f,%.2f,%.1f) -> (%.1f,%.2f,%.1f) (dy %.1f, гор %.1fм) src=%c",
-                                dy < 0.0F ? "НЫРОК" : "ВСПЛЫТИЕ", (unsigned long long)s_transforms[i],
-                                uid_txt, still,
-                                (double)prev->second.x, (double)prev->second.y, (double)prev->second.z,
-                                (double)feet.x, (double)feet.y, (double)feet.z,
-                                (double)dy, (double)horiz, (int)pos_source[i]);
-                        if (lat != g_mount_latch.end())
-                            LogLine("визуал:     latch engaged=%d saved_still=%d prev_saved=(%.1f,%.1f,%.1f) have=%d last=(%.1f,%.1f,%.1f) last_ok=%d",
-                                    (int)lat->second.engaged, lat->second.saved_still,
-                                    (double)lat->second.prev_saved.x, (double)lat->second.prev_saved.y,
-                                    (double)lat->second.prev_saved.z, (int)lat->second.have_saved,
-                                    (double)lat->second.last.x, (double)lat->second.last.y,
-                                    (double)lat->second.last.z, (int)lat->second.last_ok);
-                    }
-                }
-            }
-            g_diag_prev_feet[s_transforms[i]] = feet;
-        }
 
         float distance = -1.0F;
         if (has_local_position) {
