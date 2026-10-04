@@ -103,7 +103,7 @@ struct FpsUiInfo {
     Status status = Status::Off;
     int field_value = 0;             // фактическое значение backing-поля targetFrameRate
     int pace_kind = 0;               // тип Android frame pacing (0 = заглушен)
-    uint64_t build_id = 0;           // неопознанный build ID libunity (0 = опознан/нет данных)
+    uint64_t build_id = 0;           // build ID найденной libunity (0 = mapping'а нет/не прочитан)
 };
 }
 

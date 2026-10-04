@@ -148,6 +148,7 @@ void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pick
                                     bool sleepers = false, bool house = false);
 // Упреждение аима: секунды забега вперёд по скорости цели (0 = вести по
 // текущему положению кости). Слайдер «Упреждение» на вкладке аима.
+void        esp_set_screen_stretch(float factor);
 void        esp_set_aim_lead(float seconds);
 // «Всегда день»: время суток удерживается в полдне (клиентский визуал).
 void        esp_set_always_day(bool enabled);

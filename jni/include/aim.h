@@ -17,6 +17,8 @@ enum AimMode {
     AIM_MODE_SILENT = 2,
 };
 
+#include <atomic>
+
 void UpdateAim(float dt);
 // Конец кадра оверлея (повтор оси выстрела в сайтелнт-режиме).
 void AimEndFrame();
@@ -31,6 +33,16 @@ extern bool s_fingerDown;
 extern bool g_aimActive;
 // Запасной коэффициент град/px (измерено на устройстве при чувствительности 2.0).
 constexpr float kAimGainAtRef = 0.10f;
+
+// ---- Дыхание уголков рамки захваченной цели -------------------------------
+// Выбор цели кладёт сюда id свежей цели и момент захвата (CLOCK_MONOTONIC,
+// секунды), а g_aim_hold_at обновляет КАЖДЫЙ тик, пока цель остаётся у аима.
+// ESP-оверлей, пока цель держится (hold свежий), крутит непрерывный цикл
+// «вдох»: рамку цели пружиной разносит на ~15 px и возвращает резинкой
+// (ease-out) — период 0.45 с; захват и есть первый период этого цикла.
+extern std::atomic<unsigned long long> g_aim_pulse_target;
+extern std::atomic<double>             g_aim_pulse_at;
+extern std::atomic<double>             g_aim_hold_at;
 
 // Точка, из которой аимбот водит палец (доли экрана; дефолт 74%/50%).
 float AimTouchFracX();
