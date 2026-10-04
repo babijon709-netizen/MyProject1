@@ -224,8 +224,9 @@ void DrawWatermark(float dt) {
 
         // Две компактные пиктограммы и числа. Текстовые подписи и точка
         // намеренно убраны: порядок слева направо — игроки, боты.
-        const float iconW = 28.f, gap = 10.f, groupGap = 24.f;
-        float bW = pad + iconW + gap + eSz.x + groupGap + iconW + gap + bSz.x + pad;
+        const float iconW = 24.f, gap = 10.f, groupGap = 34.f;
+        const float dividerW = 1.f;
+        float bW = pad + iconW + gap + eSz.x + groupGap + dividerW + groupGap + iconW + gap + bSz.x + pad;
         float bH = ImMax(eSz.y, bSz.y) + pad;
         // Пользовательская позиция: доли экрана = ЦЕНТР пилюли. Кламп
         // держит её внутри экрана целиком.
@@ -260,24 +261,27 @@ void DrawWatermark(float dt) {
         const ImU32 enemyCol = C::U(acc);
         const ImU32 botCol = IM_COL32(190, 120, 255, 255);
         auto drawPersonIcon = [&](float x, ImU32 col, bool bot) {
-            // Small vector glyph: head plus shoulders. Bots use a square
-            // visor so the two counters remain distinguishable without text.
-            fg->AddCircleFilled({x + 14.f, dcy - 7.f}, 5.f, col, 16);
+            // Both glyphs use exactly the same 24x24 box. Only the visor
+            // differentiates bots, so neither icon appears visually larger.
+            const float cx = x + 12.f;
+            fg->AddCircleFilled({cx, dcy - 6.f}, 4.5f, col, 16);
+            fg->AddRectFilled({x + 4.f, dcy - 1.f}, {x + 20.f, dcy + 9.f}, col, 4.f);
             if (bot) {
-                fg->AddRectFilled({x + 6.f, dcy - 1.f}, {x + 22.f, dcy + 9.f}, col, 3.f);
-                fg->AddRectFilled({x + 10.f, dcy + 2.f}, {x + 12.f, dcy + 5.f}, bgCol);
-                fg->AddRectFilled({x + 16.f, dcy + 2.f}, {x + 18.f, dcy + 5.f}, bgCol);
-            } else {
-                fg->AddCircleFilled({x + 14.f, dcy + 8.f}, 10.f, col, 20);
+                fg->AddRectFilled({x + 8.f, dcy + 1.f}, {x + 10.f, dcy + 4.f}, bgCol);
+                fg->AddRectFilled({x + 14.f, dcy + 1.f}, {x + 16.f, dcy + 4.f}, bgCol);
             }
         };
         const float tY = bY + (bH - ImMax(eSz.y, bSz.y)) * 0.5f;
         const float enemyX = bX + pad;
         const float enemyNumX = enemyX + iconW + gap;
-        const float botX = enemyNumX + eSz.x + groupGap;
+        const float dividerX = enemyNumX + eSz.x + groupGap;
+        const float botX = dividerX + dividerW + groupGap;
         const float botNumX = botX + iconW + gap;
         drawPersonIcon(enemyX, enemyCol, false);
         drawPersonIcon(botX, botCol, true);
+        fg->AddRectFilled({dividerX, bY + 10.f},
+                          {dividerX + dividerW, bY + bH - 10.f},
+                          C::UA(C::Dim(), 0.55f), 0.5f);
         fg->AddText(fn, fs, {enemyNumX, tY}, C::UA(C::Txt(), 0.9f), enemyBuf);
         fg->AddText(fn, fs, {botNumX, tY}, C::UA(C::Txt(), 0.9f), botBuf);
     }
