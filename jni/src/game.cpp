@@ -8,6 +8,7 @@
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // compile-time offsets текущего релиза
+#include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -5288,15 +5289,9 @@ struct PlayerTrack {
     Vec3   vel_ref{};       // position the current estimate was measured from
     double vel_ref_t = 0.0; // and when
     bool   have_vel_ref = false;
-    // Последняя ПРИНЯТАЯ позиция и счётчики временного фильтра (см.
+    // Последняя ПРИНЯТАЯ позиция и состояние временного фильтра (см.
     // filter_player_position): бокс рисуется по ним, а не по сырому чтению.
-    Vec3   drawn{};
-    bool   has_drawn = false;
-    double drawn_t = 0.0;
-    int    hold_frames = 0;  // сколько кадров живём без успешного чтения
-    Vec3   jump{};           // подозрительный отсчёт, ждущий подтверждения
-    bool   has_jump = false;
-    int    jump_frames = 0;
+    posfilter::State filt{};
 };
 
 double mono_seconds() {
@@ -5581,19 +5576,11 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
 // чужих игроков приходят пачкой раз в ~0.1 с, так что законный «прыжок» между
 // кадрами может быть в несколько метров. Всё, что больше, почти всегда мусор —
 // и даже если это настоящий телепорт, мы отстанем от него на пару кадров.
-static constexpr double kPosHoldSeconds      = 0.35;  // ~старые 3 кадра, но независимо от FPS
-static constexpr int   kPosJumpConfirmFrames = 2;     // скачок должен повториться
-static constexpr float kPosJumpMeters        = 1.5F;  // базовый допуск, метры
-static constexpr float kPosJumpSpeed         = 28.0F; // плюс м/с на каждый кадр
-static constexpr float kPosExtrapolateLimit  = 1.5F;  // насколько дорисовываем по скорости
-static constexpr float kPosJumpSameSpot      = 1.5F;  // «тот же» подозрительный отсчёт
-
-// Возвращает false, когда бокс в этом кадре рисовать не надо. pos — вход
+// Пассажиры коптера — отдельный случай «настоящего» скачка: подтверждение по
+// форме ломаной, а не по той же точке (см. position_filter.h, покрыт тестом).
 // (сырое чтение, при read_ok) и выход (то, что рисуем).
 static double s_filt_sec = -1e9;
-static int s_filt_susp = 0, s_filt_conf = 0;
-static uint64_t s_filt_last = 0;
-static float s_filt_last_d = 0.0F;
+static posfilter::Obs s_filt_obs;
 
 static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, uint64_t player) {
     const double now = mono_seconds();
@@ -5602,79 +5589,18 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, 
     // в секунду и только когда было что считать.
     if (now - s_filt_sec >= 1.0) {
         s_filt_sec = now;
-        if (s_filt_susp + s_filt_conf > 0) {
+        if (s_filt_obs.susp + s_filt_obs.conf > 0) {
             LogLine("визуал: фильтр позиций за секунду: подозрений %d, подтверждений %d (последний 0x%llx на %.1fм)",
-                    s_filt_susp, s_filt_conf, (unsigned long long)s_filt_last, (double)s_filt_last_d);
-            s_filt_susp = 0; s_filt_conf = 0;
+                    s_filt_obs.susp, s_filt_obs.conf,
+                    (unsigned long long)s_filt_obs.last, (double)s_filt_obs.last_d);
+            s_filt_obs.susp = 0; s_filt_obs.conf = 0;
         }
     }
 
-    if (!track.has_drawn) {
-        if (!read_ok) return false;
-        track.drawn = pos; track.drawn_t = now; track.has_drawn = true;
-        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
-        return true;
-    }
-
-    double dt = now - track.drawn_t;
-    if (!(dt > 0.0)) dt = 0.0;
-    if (dt > 0.25) dt = 0.25;
-    const float fdt = (float)dt;
-
-    // Последняя принятая позиция, продвинутая по измеренной скорости; дальше
-    // метра-полутора не продлеваем, чтобы не унести бокс самим фильтром.
-    Vec3 predicted = track.drawn;
-    {
-        const float mx = track.vel.x * fdt, my = track.vel.y * fdt, mz = track.vel.z * fdt;
-        const float step2 = mx * mx + my * my + mz * mz;
-        const float limit2 = kPosExtrapolateLimit * kPosExtrapolateLimit;
-        const float scale = (step2 > limit2 && step2 > 0.0F) ? sqrtf(limit2 / step2) : 1.0F;
-        predicted.x += mx * scale; predicted.y += my * scale; predicted.z += mz * scale;
-    }
-
-    if (!read_ok) {
-        ++track.hold_frames;
-        // Frame-count holds become shorter on high-refresh devices.  Use
-        // monotonic time so the observed 1-2 s death/respawn gap is covered at
-        // 60, 120 and 144 FPS alike.
-        if (now - track.drawn_t > kPosHoldSeconds) return false;
-        pos = predicted;
-        return true;
-    }
-
-    const float dx = pos.x - predicted.x, dy = pos.y - predicted.y, dz = pos.z - predicted.z;
-    const float dev = sqrtf(dx * dx + dy * dy + dz * dz);
-    const float limit = kPosJumpMeters + kPosJumpSpeed * fdt;
-    if (std::isfinite(dev) && dev <= limit) {
-        track.drawn = pos; track.drawn_t = now;
-        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
-        return true;
-    }
-
-    ++s_filt_susp;   // рваный отсчёт (подтвердится ли — см. ниже)
-    // Скачок за пределы правдоподобия. Один и тот же отсчёт подряд — похоже на
-    // настоящий телепорт, принимаем; каждый кадр разный — это мусор, остаёмся
-    // на последней хорошей позиции.
-    bool same = false;
-    if (track.has_jump) {
-        const float jx = pos.x - track.jump.x, jy = pos.y - track.jump.y, jz = pos.z - track.jump.z;
-        same = std::isfinite(jx) && (jx * jx + jy * jy + jz * jz) < kPosJumpSameSpot * kPosJumpSameSpot;
-    }
-    if (same) ++track.jump_frames;
-    else { track.jump = pos; track.jump_frames = 1; }
-    track.has_jump = true;
-
-    if (track.jump_frames >= kPosJumpConfirmFrames) {
-        track.drawn = pos; track.drawn_t = now;
-        track.has_jump = false; track.jump_frames = 0; track.hold_frames = 0;
-        // Скорость через телепорт не измеряется — сбрасываем, иначе упреждение
-        // будет на пару кадров смотреть в старую сторону.
-        track.vel = {}; track.have_vel_ref = false;
-        ++s_filt_conf; s_filt_last = player; s_filt_last_d = dev;   // скачок подтверждён
-        return true;
-    }
-    pos = predicted;
-    return true;
+    const bool ok = posfilter::filter(track.filt, read_ok, pos, track.vel, now, s_filt_obs);
+    if (s_filt_obs.vel_reset) { track.vel = {}; track.have_vel_ref = false; s_filt_obs.vel_reset = false; }
+    if (ok && s_filt_obs.conf) s_filt_obs.last = player;
+    return ok;
 }
 
 // ===================== Remote (third-person) held weapon =====================

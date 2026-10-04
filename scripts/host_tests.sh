@@ -1,11 +1,14 @@
 #!/bin/sh
-# Host-прогон юнит-тестов viewmodel (без устройства/NDK).
+# Host-прогон юнит-тестов viewmodel/ESP (без устройства/NDK).
 # Использование: ./scripts/host_tests.sh
 set -e
 cd "$(dirname "$0")/.."
 CXX=${CXX:-g++}
-mkdir -p /tmp/xvcen_host_tests
-$CXX -std=gnu++17 -Wall -Wextra \
-    -I jni/src -I jni/include \
-    jni/tests/test_fps_memory.cpp -o /tmp/xvcen_host_tests/test_fps_memory
-/tmp/xvcen_host_tests/test_fps_memory
+OUT=/tmp/xvcen_host_tests
+mkdir -p "$OUT"
+for t in test_fps_memory test_pos_filter; do
+    $CXX -std=gnu++17 -Wall -Wextra \
+        -I jni/src -I jni/include \
+        "jni/tests/$t.cpp" -o "$OUT/$t"
+    "$OUT/$t"
+done
