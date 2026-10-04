@@ -55,6 +55,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_marker_max_distance(g_state.marker_dist);
         // Упреждение аима (слайдер на вкладке аима): в игру уходит в секундах.
         esp_set_aim_lead(g_state.aim_lead_ms * 0.001f);
+        esp_set_screen_stretch(g_state.screen_stretch_x);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         s_boxes = esp_get_boxes((int)sw, (int)sh);
     }
@@ -239,7 +240,7 @@ void DrawEspOverlay() {
             // Дыхание рамки захваченной цели (см. aim.h): пока аим ДЕРЖИТ эту
             // цель (hold свежий — без цели выбор не тикает и затухает за
             // 0.2 с), уголки крутят непрерывный цикл «вдох»: пружинный разлёт
-            // на ~7.5 px за 1.0 с и возврат резинкой 1.0 с (скольжение к
+            // на ~3.5 px за 1.0 с и возврат резинкой 1.0 с (скольжение к
             // концу, ease-out кубик), период 2.0 с — секунда на разлёт,
             // секунда на возврат (настройка по просьбе «разлёт 1 с, возврат 1 с»).
             float poff = 0.f;
@@ -250,7 +251,7 @@ void DrawEspOverlay() {
                 const double hold_age = now - g_aim_hold_at.load(std::memory_order_relaxed);
                 if (hold_age >= 0.0 && hold_age <= 0.20) {
                     constexpr double kPeriod = 2.0, kOut = 1.0;
-                    constexpr float kMax = 7.5f;  // разбег вдвое меньше (настройка по отзыву)
+                    constexpr float kMax = 3.5f;   // разбег 0.35 px по просьбе (было 7.5)
                     double t = now - g_aim_pulse_at.load(std::memory_order_relaxed);
                     if (t < 0.0) t = 0.0;
                     double ph = t / kPeriod; ph = (ph - floor(ph)) * kPeriod;
@@ -263,10 +264,7 @@ void DrawEspOverlay() {
                     }
                 }
             }
-            // По X разлёт умножается на пользовательский растяг (вкл. Аим →
-            // «Растяг уголков»), по Y остаётся 1.0.
-            const float psx = poff * g_state.aim_pulse_stretch_x;
-            CornerBox(bx1 - psx, by1 - poff, bx2 + psx, by2 + poff,
+            CornerBox(bx1 - poff, by1 - poff, bx2 + poff, by2 + poff,
                       ColU32(ally ? cfg::esp::ally_col : cfg::esp::box_col));
         }
 

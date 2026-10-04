@@ -772,7 +772,8 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
 
     } else if (secId == 1) {
         FgSHdr(XS("Линии и боксы"));
-        FgCardBg(Layout::SliderH);
+        FgCardBg(Layout::SliderH * 2);
+        FgSliderRow(XS("Растяг экрана"), &g_state.screen_stretch_x, 1.0f, 1.5f, XS("\u00d7%.2f"), false, g_state.sl_screen_stretch);
         FgSliderRow(XS("Толщина"),   &g_state.esp_thick, 0.5f, 5.f,   "%.1f",     true, g_state.sl_esp_thick);
 
     } else if (secId == 5) {

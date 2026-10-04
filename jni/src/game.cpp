@@ -6093,6 +6093,14 @@ static float head_lift_for_range(const Vec3& world) {
 static float g_aim_lead_seconds = 0.0F;
 static Vec3 g_aim_lead{};
 
+// Растяг экрана (Aspect Ratio), множитель к aspect камеры игры; 1.0 = выкл.
+// Поставляется из меню через esp_set_screen_stretch (см. esp_draw.cpp).
+static float g_screen_stretch_x = 1.0F;
+void esp_set_screen_stretch(float factor) {
+    // Кламп к допустимому диапазону слайдера (1.00–1.50).
+    if (!(factor >= 0.75F && factor <= 1.5F)) factor = 1.0F;
+    g_screen_stretch_x = factor;
+}
 void esp_set_aim_lead(float seconds) {
     // Без isfinite (-ffast-math): значение приходит со слайдера 0..150 мс
     // и проверяется при загрузке конфига, сюда мусор не попадает — обычный
@@ -7894,6 +7902,30 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 return transient_return(6);
             if (!read_native_camera_matrices(native_cam, sw / sh, projection, view))
                 return transient_return(7);
+        }
+        // Растяг экрана (Aspect Ratio, меню «Визуалы → Ещё настройки»): пишем в
+        // поле aspect камеры игры базовый экранный аспект, умноженный на
+        // коэффициент, — Unity рисует кадр уже деформированным, и модели
+        // врагов становятся шире/жирнее (круги-прицелы овальные — норма для
+        // фичи). Пишем КАЖДЫЙ кадр тем же g_mem, что и аим: движок может
+        // возвращать aspect на место при смене вида; наш же w2s берёт матрицу
+        // из того поля, так что проекция ESP растягивается вместе с игрой.
+        // Базу берём из геометрии экрана (sw/sh), а не из памяти — там уже
+        // может лежать наша же запись. При возврате слайдера в 1.00 аспект
+        // один раз восстанавливаем в ровный sw/sh.
+        {
+            const float stretch = g_screen_stretch_x;
+            static float s_stretch_last = 1.0F;
+            if (sh > 1.0F) {
+                const float base = sw / sh;
+                if (stretch > 1.005F) {
+                    const float want = base * stretch;
+                    wr_buf(native_cam + CAMERA_ASPECT, &want, sizeof(want));
+                } else if (s_stretch_last > 1.005F) {
+                    wr_buf(native_cam + CAMERA_ASPECT, &base, sizeof(base));
+                }
+            }
+            s_stretch_last = stretch;
         }
         // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
         vp = mat_mul(projection, view);

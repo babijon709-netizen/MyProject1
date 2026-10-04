@@ -105,11 +105,11 @@ struct AppState {
     RadioAnim ra_aim_head, ra_aim_chest, ra_aim_pelvis;
     float a_aim_pr0 = 1, a_aim_pr1 = 0, a_aim_pr2 = 0;
     RadioAnim ra_aim_pr0, ra_aim_pr1, ra_aim_pr2;
-    // Растяг «дыхания» уголков цели по горизонтали (множитель к poff по X,
-    // 1.0 = равномерно, 2.0 = вдвое шире, 0 = не разъезжаются по X).
-    // Сессионное: бинарный CfgBlob заморожен версией (config.cpp), своих
-    // слотов нет — как цвета ботов/машин.
-    float aim_pulse_stretch_x = 1.0f;
+    // Растяг экрана (Aspect Ratio): множитель к полю aspect камеры ИГРЫ —
+    // рендер самой игры тянется по горизонтали, модели врагов становятся
+    // шире (круги/прицелы — овалами, это нормальный вид фичи). 1.0 = выкл.
+    // Сессионное: бинарный CfgBlob заморожен версией (config.cpp).
+    float screen_stretch_x = 1.0f;
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
@@ -123,7 +123,7 @@ struct AppState {
     float a_freecam_btn_show = 0;
     float a_fps_90 = 0, a_fps_120 = 0, a_fps_144 = 0, a_fps_rst = 0;
 
-    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size, sl_aim_lead, sl_aim_pulse_x;
+    SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size, sl_aim_lead, sl_screen_stretch;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()
