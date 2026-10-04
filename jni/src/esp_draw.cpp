@@ -239,10 +239,9 @@ void DrawEspOverlay() {
             // Дыхание рамки захваченной цели (см. aim.h): пока аим ДЕРЖИТ эту
             // цель (hold свежий — без цели выбор не тикает и затухает за
             // 0.2 с), уголки крутят непрерывный цикл «вдох»: пружинный разлёт
-            // на ~15 px за 0.30 с и возврат резинкой 0.825 с (скольжение к
-            // концу, ease-out кубик), период 1.125 с — тот же профиль, что у
-            // первой микро-вспышки, но растянутый в ~2.5 раза (просьба
-            // «отпружинивание медленнее и плавнее»).
+            // на ~15 px за 1.0 с и возврат резинкой 1.0 с (скольжение к
+            // концу, ease-out кубик), период 2.0 с — секунда на разлёт,
+            // секунда на возврат (настройка по просьбе «разлёт 1 с, возврат 1 с»).
             float poff = 0.f;
             if (g_state.aim_touch && box.id != 0 &&
                 box.id == g_aim_pulse_target.load(std::memory_order_relaxed)) {
@@ -250,7 +249,7 @@ void DrawEspOverlay() {
                 const double now = (double)pts.tv_sec + (double)pts.tv_nsec * 1e-9;
                 const double hold_age = now - g_aim_hold_at.load(std::memory_order_relaxed);
                 if (hold_age >= 0.0 && hold_age <= 0.20) {
-                    constexpr double kPeriod = 1.125, kOut = 0.30;
+                    constexpr double kPeriod = 2.0, kOut = 1.0;
                     constexpr float kMax = 15.f;
                     double t = now - g_aim_pulse_at.load(std::memory_order_relaxed);
                     if (t < 0.0) t = 0.0;
