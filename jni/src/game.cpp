@@ -5430,7 +5430,13 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
             live_h2 = vec3_horiz2(p, saved);
         }
     }
-    if (have_model) {
+    if (have_model && !id_mounted && !latch.engaged) {
+        // While riding, characterModel can remain parented to the seat's old
+        // PlayerManager copy for a tick. Selecting whichever sample is farther
+        // from lastSaved made the box alternate between the boarding point and
+        // the vehicle every frame. The rendered/worldCameraRoot transform is
+        // the authoritative moving sample; use the model only on foot or when
+        // the rendered transform is unavailable.
         Vec3 p = model;
         if (!ground) p.y += 0.90F; // hips -> roughly eye, matches hierarchy boxes
         float h2 = vec3_horiz2(p, saved);
@@ -5439,6 +5445,12 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
             have_live = true;
             live_h2 = h2;
         }
+    } else if (!have_live && have_model) {
+        Vec3 p = model;
+        if (!ground) p.y += 0.90F;
+        live = p;
+        have_live = true;
+        live_h2 = vec3_horiz2(p, saved);
     }
     if (!ground && !have_live && position_looks_like_world_space(feet)) {
         live = feet;
@@ -8065,6 +8077,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (latch_index != s_transforms.size() && position_ok[latch_index]) {
             local_entity_index = latch_index;
             local = positions[latch_index];
+            // The local PlayerManager position is the boarding-point field on
+            // some vehicle states. For the distance origin, the camera pose is
+            // authoritative and follows the vehicle, while the entity index is
+            // still retained so the local player is excluded from ESP.
+            if (player_is_mounted(s_transforms[latch_index]) && has_camera_position)
+                local = camera_position;
             has_local_position = true;
             local_position_from_player = true;
             uint8_t respawning = 0;
