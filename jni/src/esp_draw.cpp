@@ -263,7 +263,10 @@ void DrawEspOverlay() {
                     }
                 }
             }
-            CornerBox(bx1 - poff, by1 - poff, bx2 + poff, by2 + poff,
+            // По X разлёт умножается на пользовательский растяг (вкл. Аим →
+            // «Растяг уголков»), по Y остаётся 1.0.
+            const float psx = poff * g_state.aim_pulse_stretch_x;
+            CornerBox(bx1 - psx, by1 - poff, bx2 + psx, by2 + poff,
                       ColU32(ally ? cfg::esp::ally_col : cfg::esp::box_col));
         }
 

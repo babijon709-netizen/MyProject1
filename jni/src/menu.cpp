@@ -236,13 +236,13 @@ float TabContent(int tab, float dt, float cW) {
                     dl->AddLine({cX + padX, pos.y + rowH - 0.5f},
                                 {cX + cW - padX, pos.y + rowH - 0.5f}, C::UA(C::Sep(), 1.f), 0.8f);
             };
-            prioRow("##ap0", XS("Умный (как сейчас)"), 0, false, g_state.a_aim_pr0);
+            prioRow("##ap0", XS("Умный"),              0, false, g_state.a_aim_pr0);
             prioRow("##ap1", XS("Ближе к прицелу"),    1, false, g_state.a_aim_pr1);
             prioRow("##ap2", XS("Ближе ко мне"),       2, true,  g_state.a_aim_pr2);
         }
 
         SHdr(XS("Наводка"));
-        CardBg(Layout::SliderH * 3);
+        CardBg(Layout::SliderH * 4);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", false, false, g_state.sl_gun_str, dt);
         // Упреждение: аим ведёт не по текущему положению кости, а по точке,
@@ -250,7 +250,12 @@ float TabContent(int tab, float dt, float cW) {
         // кости (дефолт: упреждение исторически выключено — на резкой смене
         // направления оно раскачивало прицел). Подбирается под свой пинг.
         SliderRow("##aldd", XS("Упреждение"), &g_state.aim_lead_ms,
-                  0.f, 150.f, XS("%.0f мс"), true, false, g_state.sl_aim_lead, dt);
+                  0.f, 150.f, XS("%.0f мс"), false, false, g_state.sl_aim_lead, dt);
+        // Растяг по горизонтали: множитель разлёта уголков цели вдоль оси X
+        // при «дыхании» (1.0 — как по вертикали, 2.0 — вдвое шире, 0 — уголки
+        // не отходят в стороны). До перезапуска (см. app_state.h).
+        SliderRow("##apstr", XS("Растяг уголков"), &g_state.aim_pulse_stretch_x,
+                  0.f, 2.f, XS("×%.1f"), true, false, g_state.sl_aim_pulse_x, dt);
 
         // ---- Тач-зона аима -------------------------------------------------
         // Где именно лежит палец, которым аимбот водит камеру. Выбирается
