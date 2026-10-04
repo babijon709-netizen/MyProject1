@@ -5578,8 +5578,8 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
 // и даже если это настоящий телепорт, мы отстанем от него на пару кадров.
 static constexpr double kPosHoldSeconds      = 0.35;  // ~старые 3 кадра, но независимо от FPS
 static constexpr int   kPosJumpConfirmFrames = 2;     // скачок должен повториться
-static constexpr float kPosJumpMeters        = 3.0F;  // базовый допуск, метры
-static constexpr float kPosJumpSpeed         = 55.0F; // плюс м/с на каждый кадр
+static constexpr float kPosJumpMeters        = 1.5F;  // базовый допуск, метры
+static constexpr float kPosJumpSpeed         = 28.0F; // плюс м/с на каждый кадр
 static constexpr float kPosExtrapolateLimit  = 1.5F;  // насколько дорисовываем по скорости
 static constexpr float kPosJumpSameSpot      = 1.5F;  // «тот же» подозрительный отсчёт
 
