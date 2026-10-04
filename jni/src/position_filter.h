@@ -80,7 +80,13 @@ inline bool filter(State& track, bool read_ok, Vec3& pos, const Vec3& vel,
         // FD-канале залипает на десятки кадров (и на 144, и на 30 FPS), и с
         // 0.35 с бокс гас посреди боя — та самая «esp слетает на пару
         // секунд». Экстраполяция всё равно зажата kPosExtrapolateLimit.
-        if (now - track.drawn_t > kPosHoldSeconds) return false;
+        // Таймаут = позиция больше не известна: следующий отсчёт примем как
+        // первый, а не будем вечно сравнивать с устаревшей точкой (иначе
+        // игрок, уехавший за паузу, не выходил из фильтра вовсе).
+        if (now - track.drawn_t > kPosHoldSeconds) {
+            track.has_drawn = false;
+            return false;
+        }
         pos = predicted;
         return true;
     }

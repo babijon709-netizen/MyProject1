@@ -43,6 +43,12 @@ int main() {
         CHECK(dist(q, {10, 64, 10}) < 1e-5F, "hold keeps last pos");
         CHECK(step(s, o, q, false, 0.9), "hold 0.9s alive");
         CHECK(!step(s, o, q, false, 1.2), "hold dies after 1s");
+        // Умер = неизвестно где: следующий отсчёт принимаем как первый,
+        // без подтверждения скачка (убежавший куда-то игрок не залипает
+        // в «неподтверждённом» состоянии навсегда).
+        Vec3 far{600, 64, 600};
+        CHECK(step(s, o, far, true, 1.25), "reborn first read draws");
+        CHECK(dist(far, {600, 64, 600}) < 1e-4F, "reborn at new place");
     }
     // 3) Движение пешком принимается без подтверждений.
     {
@@ -112,8 +118,9 @@ int main() {
         }
         CHECK(dist(last_drawn, {rx, 64, rz}) < 7.5F, "flight keeps up");
     }
-    // 7) Восстановление после смерти-холда: игрок за паузу улетел на 300м —
-    //    после возвращения чтения бокс подтверждается по ломаной за 3 кадра.
+    // 7) Восстановление после смерти-холда: умерший трек = «позиции нет»,
+    //    первая же живая точка рисуется сразу (как свежий спавн), а дальнейший
+    //    полёт подтверждается ломаной — никакого вечного «неподтверждённого».
     {
         State s; Obs o;
         Vec3 p{10, 64, 10};
@@ -122,13 +129,16 @@ int main() {
         CHECK(!step(s, o, q, false, 4.0), "gap kills box");
         // Чтения вернулись: игрок уже далеко и летит прочь.
         Vec3 m{310, 64, 10};
-        CHECK(step(s, o, m, true, 4.033), "resume frame1");
+        CHECK(step(s, o, m, true, 4.033), "resume restarts as first draw");
+        CHECK(dist(m, {310, 64, 10}) < 1e-4F, "resume at real new place");
         m = {313.3F, 64, 10.6F};
         CHECK(step(s, o, m, true, 4.066), "resume frame2");
         m = {316.6F, 64, 11.2F};
         CHECK(step(s, o, m, true, 4.099), "resume frame3");
+        m = {319.9F, 64, 11.8F};
+        CHECK(step(s, o, m, true, 4.132), "resume frame4");
         CHECK(o.conf >= 1, "resume confirmed");
-        CHECK(dist(m, {316.6F, 64, 11.2F}) < 1e-4F, "resume follows real pos");
+        CHECK(dist(m, {319.9F, 64, 11.8F}) < 1e-4F, "resume follows real pos");
     }
     if (failures) { printf("%d FAILURES\n", failures); return 1; }
     printf("ALL POS-FILTER TESTS PASS\n");

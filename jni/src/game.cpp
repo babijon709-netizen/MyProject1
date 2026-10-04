@@ -5303,8 +5303,10 @@ static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
 // characterModel), потому что синхронизируемое поле ещё не записано игрой —
 // наблюдение за жалобой «нет боксов на свежеспавнившихся».
 static int g_position_fallback_this_frame = 0;
+static int g_position_fallback_rejected = 0;  // отклонённые как далёкие (чужая база)
 static double g_position_fallback_log_at = 0.0;
 static int g_position_fallback_logged = 0;
+static int g_position_fallback_rejected_logged = 0;
 // uid -> the object we drew last time, so a tie does not flip between copies.
 static std::unordered_map<std::string, uint64_t> g_player_track_pick;
 
@@ -7925,9 +7927,29 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     have_alt = true;
                 }
                 if (have_alt && position_looks_like_world_space(alt)) {
-                    candidate = alt;
-                    read_ok = true;
-                    ++g_position_fallback_this_frame;
+                    // Фолбэк нужен игроку БЕЗ позиции (свежий спавн). У KCC/
+                    // characterModel другая база по высоте и свои паузы: сел в
+                    // кресло/лёг/плывёт/в лодке — их точка может стоять на
+                    // несколько метров ниже сетевой, и чередование источников
+                    // раскачивало бокс «под землю» циклами (жалоба после первого
+                    // фикса). Уже рисуемого игрока аварийный источник принимаем
+                    // только рядом с нарисованной точкой; дальше — обычный
+                    // холд фильтра, который за секунду сам перезапустит трек.
+                    bool accept = true;
+                    auto prev = g_player_track.find(s_transforms[index]);
+                    if (prev != g_player_track.end() && prev->second.filt.has_drawn) {
+                        const Vec3& d = prev->second.filt.drawn;
+                        const float ddx = alt.x - d.x, ddz = alt.z - d.z;
+                        accept = (ddx * ddx + ddz * ddz) <= 3.0F * 3.0F &&
+                                 fabsf(alt.y - d.y) <= 3.0F;
+                    }
+                    if (accept) {
+                        candidate = alt;
+                        read_ok = true;
+                        ++g_position_fallback_this_frame;
+                    } else {
+                        ++g_position_fallback_rejected;
+                    }
                 }
             }
             if (read_ok) ++live_player_positions;
@@ -7951,14 +7973,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // Раз в секунду — сколько позиций пришло из запасного источника.
             const double now = mono_seconds();
             if (now - g_position_fallback_log_at >= 1.0) {
-                if (g_position_fallback_logged > 0)
-                    LogLine("визуал: позиция из KCC/модели для %d игроков за секунду (свежий спавн)",
-                            g_position_fallback_logged);
+                if (g_position_fallback_logged > 0 || g_position_fallback_rejected_logged > 0)
+                    LogLine("визуал: позиция из KCC/модели для %d игроков за секунду (свежий спавн, далёких отвергнуто %d)",
+                            g_position_fallback_logged, g_position_fallback_rejected_logged);
                 g_position_fallback_log_at = now;
                 g_position_fallback_logged = 0;
+                g_position_fallback_rejected_logged = 0;
             }
             g_position_fallback_logged += g_position_fallback_this_frame;
+            g_position_fallback_rejected_logged += g_position_fallback_rejected;
             g_position_fallback_this_frame = 0;
+            g_position_fallback_rejected = 0;
         }
         // Prefer the resolver's exact local PlayerManager whenever it is in
         // the population.  Nearest-to-camera is only a startup fallback when
