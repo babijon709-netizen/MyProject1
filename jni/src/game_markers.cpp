@@ -1366,7 +1366,8 @@ static void marker_track_position(MarkerEntity& entity) {
             // that one sample move a label under the terrain; accept it only
             // after the normal time filter gets another coherent read.
             !(entity.position_valid && sampled.y < entity.position.y - 1.25F &&
-              vec3_horiz2(sampled, entity.position) < 4.0F)) {
+              ((sampled.x - entity.position.x) * (sampled.x - entity.position.x) +
+               (sampled.z - entity.position.z) * (sampled.z - entity.position.z)) < 4.0F)) {
             entity.position = sampled;
             entity.position_valid = true;
             entity.position_last_ok = mono_seconds();
