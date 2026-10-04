@@ -70,25 +70,31 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // keeping only slots that are then dereferenced as  ldr x8,[klass,#0xB8]
 // (Il2CppClass::static_fields) - i.e. exactly the access our reader performs.
 //
-// МЕХАНИЗМ (важно, ошибка 9e26509 была ровно здесь): код игры читает класс
-// ДВУМЯ шагами — adrp/ldr берёт из .data ВНЕШНЮЮ GOT-запись (outer), чьё
-// содержимое лоадер восстанавливает релокацией R_AARCH64_RELATIVE: значение
-// outer = base + addend = адрес ВНУТРЕННЕГО слота; klass = [внутренний слот].
-// Наш читер делает ОНО разыменование: rd_ptr(base + RVA) -> klass. Значит RVA
-// обязан быть ВНУТРЕННИМ слотом (addend), а не внешней записью! Проверка
-// этого билда (дизассемблер + .rela.dyn): PM OnStartClient@0x69184f0:
-//   ldr x20,[0xd9a8c68]  ; outer -> reloc addend 0xddb1ad8
-//   ldr x0,[x20]         ; klass = [0xddb1ad8]
-//   ldr x8,[x0,#0xB8]    ; static_fields -> [x8,#0x10] clientPlayerList
-// NC get_connection@0xbfd8b04: outer 0xd9a71a0 -> addend 0x59daa78,
-//   klass=[0x59daa78], statics[+0x38]=connection (все 6 статиков NC идут
-//   через этот же слот: handlers+0x28, spawned+0x30, connection+0x38,
-//   ready+0x40, localPlayer+0x48, prefabs+0x78).
-// GC (iu@0x68922d8 и 12 методов): outer 0xd9a72f8 -> addend 0x59d921c,
-//   klass=[0x59d921c], statics — все 13 полей GameControllerBase.
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDDB1AD8;  // ВНУТРЕННИЙ слот (addend outer 0xd9a8c68); в 9e26509 ошибочно стоял внешний 0xD9A8C68 — одно разыменование давало адрес слота вместо класса, из-за этого не работал ВЕСЬ софт; через слот читаются activePlayerList(+0x8, 14 методов) и clientPlayerList(+0x10, 19 методов)
+// МЕХАНИЗМ (ошибка 9e26509 была здесь): код игры читает класс ДВУМЯ шагами —
+// adrp/ldr берёт из .data ВНЕШНЮЮ GOT-запись (outer), чьё содержимое лоадер
+// восстанавливает релокацией R_AARCH64_RELATIVE: значение outer = base +
+// addend = адрес ВНУТРЕННЕГО слота; klass = [внутренний слот]. Наш читер
+// делает ОДНО разыменование: rd_ptr(base + RVA) -> klass, значит RVA обязан
+// быть ВНУТРЕННИМ слотом (addend).
+//
+// УРОК 337e891 (слоты были неверны — опечатка в одной hex-цифре outer):
+// правильные outer этого билда: PM 0xd9acc68 (не 0xd9a8c68!), GC 0xd9ab2f8
+// (не 0xd9a72f8), NC 0xd9ab1a0 (не 0xd9a71a0) — «опечатанные» адреса тоже
+// существуют в .rela.dyn, но указывают на чужие слоты, поэтому ручная цепочка
+// «подтверждалась» против чужих ячеек. Надёжная методика (применена здесь):
+// 1) dump.cs даёт RVA методов класса ПОИМЁННО; 2) дизассемблируем их и
+// голосуем: слот = addend того outer, на который ссылается большинство
+// собственных методов класса; 3) РАНТАЙМ-ПОДТВЕРЖДЕНИЕ по дампам benzhack
+// (сессия pid 7619, base=0x6e1002b000, rw-сегмент=imagedata): в ячейке слота
+// лежит указатель на Il2CppClass в ptr1-регионе, из структуры читаются
+// имя/неймспейс (строки в блобе 0x6dfaec8000) — все пять классов совпали
+// ПО ИМЕНИ. Старые ячейки 0xDDB1AD8/0xDDB1AA8 опровергнуты рантаймом: там
+// мусор 0xa000b409/0xa000b3fd (это «таблица типов v2» протектора S16 из
+// малых целых, НЕ слоты классов). Перекрёстное подтверждение: PM-PLH = 0x30,
+// как и в прошлом рабочем билде (0xD9C5310/0xD9C52E0).
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDCFD2A0;  // ВНУТРЕННИЙ слот: outer 0xd9acc68 -> rela addend (раньше из-за опечатки брали outer 0xd9a8c68 -> 0xddb1ad8, чужой слот с мусором). Oxide.PlayerManager (TypeDefIndex 9624): методы LoL@0x691aac8, LmT@0x691aba8 и ещё 52 из 120 проверенных ссылаются на этот outer; рантайм: [слот]=0x6dd1b336b0=Il2CppClass{PlayerManager,Oxide}; через слот activePlayerList(+0x8)/clientPlayerList(+0x10)
 // Cysharp.Threading.Tasks.PlayerLoopHelper; re-derived from this release ELF.
-inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA    = 0xDDB1AA8;  // кандидат = PM-0x30 (в прошлом билде PLH тоже лежал ровно на PM-0x30: 0xD9C52E0 vs 0xD9C5310); прямой код доступа зашифрован протектором (геттер ссылается на заглушку в .dynamic — DT_VERNEED 0x101d0, патчится в рантайме), но внешний слот 0xda41040 имеет релоку R_AARCH64_RELATIVE ровно на 0xddb1aa8, и код @0xc7f576c передаёт klass с этого слота в вызов. Имя класса всё равно сверяется (loot_memory: class_state "PlayerLoopHelper"/"Cysharp.Threading.Tasks")
+inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA    = 0xDCFD270;  // ВНУТРЕННИЙ слот: outer 0xd9abab8 -> addend; на него ссылаются 14 из 19 методов PLH (get_MainThreadId@0xc632da8 — единственный слот метода, читает mainThreadId@statics+0x10; .cctor@0xc634c7c пишет ThrowMarkerContinuationQueue@statics+0x0) и остальной Cysharp-код (init-проверки); рантайм: [слот]=0x6dd1b35230=Il2CppClass{PlayerLoopHelper,Cysharp.Threading.Tasks}; = PM-0x30, как в прошлом билде. Имя класса дополнительно сверяется (loot_memory: class_state)
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
 
@@ -127,7 +133,7 @@ inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = 0x18;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0x59D921C; // ВНУТРЕННИЙ слот (addend outer 0xd9a72f8; в 9e26509 ошибочно 0xD9A72F8); GameControllerBase, все 13 статиков
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xDCF8530; // ВНУТРЕННИЙ слот: outer 0xd9ab2f8 -> addend (опечатка прошлого вывода: 0xd9a72f8); 81 из 120 методов GameControllerBase (nii@0x68962d0 и др.); рантайм: [слот]=0x6dd1cfc840=Il2CppClass{GameControllerBase,Oxide}, statics — все 13 статиков
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -429,7 +435,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0x59DAA78;  // ВНУТРЕННИЙ слот (addend outer 0xd9a71a0; в 9e26509 ошибочно 0xD9A71A0); единственный слот со ВСЕМИ шестью статиками NetworkClient: handlers(+0x28), spawned(+0x30), connection(+0x38), ready(+0x40), localPlayer(+0x48), prefabs(+0x78); сам слот лежит в RX-области 0x59dxxxx (протектор прячет данные среди кода) и заполняется его рантайм-инициализацией
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDCFC518;  // ВНУТРЕННИЙ слот: outer 0xd9ab1a0 -> addend (опечатка прошлого вывода: 0xd9a71a0 -> 0x59daa78 в RX-области); 99 из 104 методов Mirror.NetworkClient (get_sendInterval@0xbfdc4fc и др.); рантайм: [слот]=0x6dd2249020=Il2CppClass{NetworkClient,Mirror}; статики: handlers(+0x28), spawned(+0x30), connection(+0x38), ready(+0x40), localPlayer(+0x48), prefabs(+0x78) — раскладка подтверждена dump.cs
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x30;  // было 0x28; перед spawned вставлен handlers(+0x28)
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -478,11 +484,17 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 // снова переименован (IY -> UV -> ak); структура цела: единственный
 // не-literal статик (List<Self>, offset 0x0) + TOD_CycleParameters Cycle
 // на 0x40. Прошлые окна: 0xD7A0000..0xD840000, затем 0xD9B0000..0xDA50000.
-// Окно = весь слотовый регион .bss этого билда: рантайм-таблица слотов типов
-// (данные benzhack: 31696 записей на RVA 0xdd9d380..0xdddb180) плюс соседние
-// слоты (0xdd00550, 0xdd45258, 0xdd5xxxx, 0xdd6xxxx, PM 0xddb1ad8). В 9e26509
+// Окно = слотовый регион rw-сегмента этого билда: настоящие слоты классов
+// лежат на 0xdcf****-0xdd*****(PM 0xdcfd2a0, PLH 0xdcfd270, NC 0xdcfc518,
+// GC 0xdcf8530, ak 0xdd03e88); «таблица типов v2» протектора на 0xdd8d380+
+// (31696 записей S16) классов НЕ содержит (рантайм-проверка: там малые
+// целые/мусор). В 9e26509
 // окно ошибочно накрывало .data.rel.ro (внешние записи: в них лежат АДРЕСА
-// слотов, а не классы). 768 КБ = 768 шагов сканера по 1 КБ (~13 с @60fps),
+// слотов, а не классы). Слот ak этого билда ВЕРИФИЦИРОВАН: outer 0xd9ab350 ->
+// addend 0xDD03E88 (геттер инстанса ak.IPB@0x684b1b0: [outer]->klass->
+// [+0xB8]->statics->[statics+0x0] = List<ak>; рантайм: [слот]=0x6dd2461360=
+// Il2CppClass{ak}); лежит на 0x3E88 от начала окна — сканер доходит до него
+// за ~16 шагов (~0.3 с @60fps). Остальное окно — запас на следующий билд:
 // сканер крутится циклично и валидирует кандидатов по полной структуре
 // (статик List<Self> + Cycle + sane-дата), так что ложных срабатываний нет.
 inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDD00000;
