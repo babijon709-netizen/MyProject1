@@ -356,7 +356,12 @@ void tick_fps(uint64_t session, int requested_limit) {
     const bool enabled = limit != 0;
     if (!enabled && !fps_controller.has_state()) { fps_last_limit = 0; return; }
     const auto now = Clock::now();
-    if (limit == fps_last_limit && now - fps_last_tick < std::chrono::milliseconds(100)) return;
+    // Обычно поле трогать незачем чаще десяти раз в секунду. Но если игра
+    // применяет свою настройку кадров каждый кадр, наше значение держится
+    // лишь доли секунды из каждой десятой — тогда поправляем покадрово.
+    const auto interval = fps_controller.contested() ? std::chrono::milliseconds(16)
+                                                     : std::chrono::milliseconds(100);
+    if (limit == fps_last_limit && now - fps_last_tick < interval) return;
     const bool changed = limit != fps_last_limit;
     fps_last_tick = now; fps_last_limit = limit;
     // A libunity mapping can be replaced during a scene reload. Keeping the

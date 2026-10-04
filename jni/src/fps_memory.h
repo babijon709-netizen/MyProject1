@@ -88,16 +88,22 @@ template<class IO> class FpsController {
     uint64_t session_ = 0, base_ = 0;
     // Последнее подтверждённое содержимое памяти — для отображения в меню.
     int32_t field_seen_ = 0, pace_seen_ = 0;
+    // Подряд идущие тики, в которых игра вернула своё значение поверх нашего.
+    int contested_ = 0;
 public:
     Status status = Status::Off;
     explicit FpsController(IO& memory) : io(memory) {}
     bool has_state() const { return cap_.written || pace_.written; }
     int32_t field_seen() const { return field_seen_; }
     int32_t pace_seen() const { return pace_seen_; }
+    // Игра переписывает targetFrameRate сама (своя настройка графики
+    // применяется каждый кадр). Тогда раз в 100 мс поправлять поле мало:
+    // большую часть кадров движок видит значение игры, и предел не меняется.
+    bool contested() const { return contested_ >= 2; }
     void reset(bool restore) {
         if (restore && fps_layout(io, base_)) { cap_.restore(io); pace_.restore(io); }
         cap_ = {}; pace_ = {}; base_ = session_ = 0; status = Status::Off;
-        field_seen_ = pace_seen_ = 0;
+        field_seen_ = pace_seen_ = 0; contested_ = 0;
     }
     void tick(uint64_t session, uint64_t base, int requested_limit) {
         const int limit = sanitize_fps_limit(requested_limit);
@@ -125,7 +131,14 @@ public:
         bool ok = cap_.sample(io, base + layout->target);
         FrameRate current{};
         if (ok) ok = io.read(base + layout->target, current);
-        if (ok && current.value != limit) ok = cap_.put(io, FrameRate{limit});
+        if (ok && current.value != limit) {
+            // Наше значение сбили: это игра, а не мы (свои записи контроллер
+            // не теряет). Считаем такие тики — по ним ускоряется повтор.
+            if (cap_.written && contested_ < 1000) ++contested_;
+            ok = cap_.put(io, FrameRate{limit});
+        } else if (ok) {
+            contested_ = 0;
+        }
         if (ok) { ok = io.read(base + layout->target, current); if (ok) field_seen_ = current.value; }
         // Pacing-драйвер глушим нулём: иначе его интервал из прошлой установки
         // сеттера задаёт темп поверх нашего targetFrameRate. Для раскладки,
