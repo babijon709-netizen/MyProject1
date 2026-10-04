@@ -2728,12 +2728,32 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
     return discover_layout_from_native_transforms(native_transforms, best_position_count, candidate_count);
 }
 
+// worldCameraRoot sits at eye level, the box is built from the feet.
+static constexpr float kCameraRootHeight = 1.60F;
+
 static bool read_entity_position(uint64_t source, Vec3& position) {
     if (!source) return false;
-    if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
+    if (g_use_direct_player_position && g_player_position_offset != 0) {
+        position = rd_v3(source + g_player_position_offset);
+        if (vec3_is_finite(position) && position_looks_like_world_space(position))
+            return true;
+        // Direct field uninitialized on fresh spawn: try lastTickPosition (-0x0C)
+        Vec3 tick_pos = rd_v3(source + g_player_position_offset - 0x0C);
+        if (vec3_is_finite(tick_pos) && position_looks_like_world_space(tick_pos)) {
+            position = tick_pos;
+            return true;
+        }
+    }
+    // Direct position uninitialized (fresh spawn / pool) or invalid: read native transform!
     uint64_t native = resolve_player_native_transform(source);
     if (!native) return false;
-    return read_transform_hierarchy_position(native, position);
+    Vec3 cam_pos{};
+    if (read_transform_hierarchy_position(native, cam_pos) && vec3_is_finite(cam_pos) && position_looks_like_world_space(cam_pos)) {
+        if (g_use_direct_player_position) cam_pos.y -= kCameraRootHeight;
+        position = cam_pos;
+        return true;
+    }
+    return false;
 }
 
 static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
@@ -2750,6 +2770,8 @@ bool position_looks_like_world_space(const Vec3& position) {
     if (!vec3_is_finite(position)) return false;
     if (fabsf(position.x) > 20000.0F || fabsf(position.z) > 20000.0F) return false;
     if (fabsf(position.y) > 10000.0F) return false;
+    if (fabsf(position.x) < 0.01F && fabsf(position.z) < 0.01F) return false;
+    if (fabsf(position.y) < 0.0001F) return false; // Y == 0.0f is uninitialized/unplaced spawn baseline
     return fabsf(position.x) + fabsf(position.y) + fabsf(position.z) > 0.01F;
 }
 
@@ -2789,9 +2811,9 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
 }
 
 // Direct (PlayerManager field) position offsets, most trusted first. The
-// canonical field is lastSavedPosition (0x1D0); lastTickPosition (0x1C8) is
+// canonical field is lastSavedPosition (0x1F4); lastTickPosition (0x1E8) is
 // equivalent. The rest are legacy guesses kept as a last resort only.
-static const uint64_t k_known_position_offsets[] = {0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC, 0x1E8};
+static const uint64_t k_known_position_offsets[] = {PLAYER_POSITION, 0x1F4, 0x1E8, 0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC};
 
 static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& players) {
     bool saved_use_direct = g_use_direct_player_position;
@@ -5361,9 +5383,6 @@ static bool player_model_position(uint64_t player, Vec3& out) {
         && position_looks_like_world_space(out);
 }
 
-// worldCameraRoot sits at eye level, the box is built from the feet.
-static constexpr float kCameraRootHeight = 1.60F;
-
 // Mounted-state latch. lastSavedPosition freezes at the boarding point while
 // the rendered transform (and/or the character model) rides with the vehicle.
 // vehicleID / the transform also flicker mid-tick. Engage on seat/vehicle OR
@@ -5593,8 +5612,16 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, 
     }
 
     if (!track.has_drawn) {
-        if (!read_ok) return false;
+        if (!read_ok || !position_looks_like_world_space(pos)) return false;
         track.drawn = pos; track.drawn_t = now; track.has_drawn = true;
+        track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
+        return true;
+    }
+
+    // Newly spawned player (within first 0.3s before velocity is established):
+    // immediately adopt any fresh valid reading to prevent holding ungrounded positions.
+    if (now - track.drawn_t < 0.30 && !track.have_vel_ref && read_ok && position_looks_like_world_space(pos)) {
+        track.drawn = pos; track.drawn_t = now;
         track.hold_frames = 0; track.has_jump = false; track.jump_frames = 0;
         return true;
     }

@@ -129,6 +129,7 @@ struct MarkerEntity {
     Vec3     position{};
     bool     position_valid = false;
     int      pos_cooldown = 0;  // frames until the next position re-read (far animals)
+    int      settle_frames = 30; // initial settling frames on spawn
     int      kind = ESP_MARKER_ORE;
     // Fixed labels point into static strings; ground pickups build their own
     // ("Ягоды x12"), in which case `text` holds it and `label` is null.
@@ -1059,10 +1060,10 @@ bool marker_world_position(uint64_t transform, Vec3& out) {
     // absurd, zero on screen). Any implausible read falls through to the
     // slow probing path instead of being trusted.
     if (g_skeleton_layout_valid && read_transform_hierarchy_layout(transform, g_skeleton_layout, out) &&
-        vec3_is_finite(out) && position_looks_like_world_space(out))
+        vec3_is_finite(out) && position_looks_like_world_space(out) && fabsf(out.y) >= 0.001f)
         return true;
     return read_transform_hierarchy_position(transform, out) && vec3_is_finite(out) &&
-           position_looks_like_world_space(out);
+           position_looks_like_world_space(out) && fabsf(out.y) >= 0.001f;
 }
 
 // Walk Mirror's client registry and cache every ore node / animal in it.
@@ -1282,7 +1283,12 @@ static bool rebuild_marker_entities() {
             entity.transform = native_component_transform(managed_object_native(component));
             if (!entity.transform) // component without its own renderer: use the identity
                 entity.transform = native_component_transform(managed_object_native(identity));
-            entity.position_valid = marker_world_position(entity.transform, entity.position);
+            Vec3 init_pos{};
+            entity.position_valid = marker_world_position(entity.transform, init_pos) &&
+                                    vec3_is_finite(init_pos) && position_looks_like_world_space(init_pos) &&
+                                    fabsf(init_pos.y) >= 0.001f;
+            if (entity.position_valid) entity.position = init_pos;
+            entity.settle_frames = 30;
             if (entity.transform) g_marker_scan_pending.push_back(entity);
             if (g_marker_scan_pending.size() >= kMarkerEntityLimit) break;
         }
@@ -1330,19 +1336,30 @@ void reset_marker_caches() {
 // cooldown simply ticks twice and far bots re-read twice as often — harmless.
 static void marker_track_position(MarkerEntity& entity) {
     bool want_read = !entity.position_valid;
-    if (entity.kind == ESP_MARKER_ANIMAL || entity.kind == ESP_MARKER_BOT ||
-        entity.kind == ESP_MARKER_VEHICLE) {
+    if (entity.settle_frames > 0) {
+        --entity.settle_frames;
+        want_read = true;
+    } else if (entity.kind == ESP_MARKER_ANIMAL || entity.kind == ESP_MARKER_BOT ||
+               entity.kind == ESP_MARKER_VEHICLE || entity.kind == ESP_MARKER_PICKUP ||
+               entity.kind == ESP_MARKER_BACKPACK) {
         if (--entity.pos_cooldown <= 0) {
             want_read = true;
             float ddx = entity.position.x - g_frame_local_pos.x;
             float ddz = entity.position.z - g_frame_local_pos.z;
             float d2 = ddx * ddx + ddz * ddz;
             entity.pos_cooldown = (!entity.position_valid || d2 < 60.0F * 60.0F) ? 1
-                                : (d2 < 150.0F * 150.0F) ? 6 : 15;
+                                : (d2 < 150.0F * 150.0F) ? 4 : 10;
         }
     }
-    if (want_read)
-        entity.position_valid = marker_world_position(entity.transform, entity.position);
+    if (want_read) {
+        Vec3 fresh_pos{};
+        if (marker_world_position(entity.transform, fresh_pos) &&
+            vec3_is_finite(fresh_pos) && position_looks_like_world_space(fresh_pos) &&
+            fabsf(fresh_pos.y) >= 0.001f) {
+            entity.position = fresh_pos;
+            entity.position_valid = true;
+        }
+    }
 }
 
 std::vector<EspMarker> esp_get_markers() {
@@ -1437,9 +1454,9 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_SLEEPER && !g_markers_sleeper_enabled) continue;
         if (entity.kind == ESP_MARKER_HOUSE && !g_markers_house_enabled) continue;
         // Ore nodes never move, so their position is only read on a rescan.
-        // Animals and bots DO move — throttled re-reads, see marker_track_position.
+        // Animals, bots, pickups and unsettled entities DO move — throttled re-reads, see marker_track_position.
         marker_track_position(entity);
-        if (!entity.position_valid) continue;
+        if (!entity.position_valid || fabsf(entity.position.y) < 0.001f) continue;
 
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
@@ -1541,7 +1558,7 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
     std::vector<BotAimEnt> out;
     if (!g_bot_aim_enabled) return out;
     for (const MarkerEntity& entity : g_marker_entities) {
-        if (entity.kind != ESP_MARKER_BOT || !entity.position_valid) continue;
+        if (entity.kind != ESP_MARKER_BOT || !entity.position_valid || fabsf(entity.position.y) < 0.001f) continue;
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
         float dz = entity.position.z - g_frame_local_pos.z;
