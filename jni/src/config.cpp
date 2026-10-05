@@ -96,7 +96,7 @@ void RememberAccent() {
 void RestoreAccent() {
     std::ifstream f(CfgAccentPath());
     if (!f) return;
-    int idx = 0; float r = 0.900f, g = 0.900f, b = 0.900f;
+    int idx = 0; float r = 0.545f, g = 0.486f, b = 1.000f;
     if (!(f >> idx >> r >> g >> b)) return;
     if (idx < 0 || idx > 8) idx = 0;
     auto cl = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };

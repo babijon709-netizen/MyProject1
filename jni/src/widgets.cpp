@@ -172,14 +172,15 @@ void DrawToggle(ImDrawList* dl, float ax, float cy, float t) {
     const float tW = 58.f, tH = 32.f, pad = 4.f;
     const float tx = ax, ty = cy - tH * 0.5f;
     const ImVec4 track = C::Lerp4(C::Light::TrkOff, C::Dark::TrkOff);
-    dl->AddRectFilled({tx, ty}, {tx + tW, ty + tH}, C::Mix(track, C::Acc(), t), tH * 0.5f);
+    dl->AddRectFilled({tx, ty}, {tx + tW, ty + tH},
+                      C::Mix(track, C::Acc(), t), tH * 0.5f);
     dl->AddRect({tx, ty}, {tx + tW, ty + tH},
                 C::UA(t > 0.5f ? C::AccDk() : C::Sep(), 0.75f), tH * 0.5f, 0, 1.f);
 
-    const float knobW = 22.f;
-    const float kx = Lerpf(tx + pad, tx + tW - pad - knobW, t);
-    dl->AddRectFilled({kx, ty + pad}, {kx + knobW, ty + tH - pad},
-                      t > 0.5f ? C::U(C::Bg()) : C::U(C::Txt()), (tH - pad * 2.f) * 0.5f);
+    const float knobR = (tH - pad * 2.f) * 0.5f;
+    const float kx = Lerpf(tx + pad + knobR, tx + tW - pad - knobR, t);
+    dl->AddCircleFilled({kx + 0.5f, cy + 1.f}, knobR + 1.f, IM_COL32(0, 0, 0, 45), 24);
+    dl->AddCircleFilled({kx, cy}, knobR, IM_COL32(245, 245, 252, 255), 24);
 }
 
 static void RenderToggleRowVisuals(ImDrawList* dl, ImFont* fn, float fs,

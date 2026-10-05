@@ -93,7 +93,12 @@ static bool ModeButton(const char* id, float w, float h, const char* title,
     dl->AddRectFilled({p.x + 1.f, p.y + 3.f}, {p.x + w + 1.f, p.y + h + 3.f},
                       IM_COL32(0, 0, 0, g_darkTheme ? 34 : 16), R::Btn);
     dl->AddRectFilled(p, {p.x + w, p.y + h}, C::U(body), R::Btn);
-    dl->AddRect(p, {p.x + w, p.y + h}, C::UA(C::Sep(), 0.9f), R::Btn, 0, 1.f);
+    if (hov || held)
+        dl->AddRectFilled(p, {p.x + w, p.y + h}, C::UA(C::Acc(), held ? 0.15f : 0.08f), R::Btn);
+    dl->AddRect(p, {p.x + w, p.y + h},
+                C::UA((hov || driver) && style_on ? C::Acc() : C::Sep(),
+                      (hov || driver) && style_on ? 0.42f : 0.9f),
+                R::Btn, 0, 1.f);
     if (driver)
         dl->AddRectFilled({p.x, p.y}, {p.x + 4.f, p.y + h},
                           C::UA(style_on ? C::Acc() : C::Dim(), 0.95f), 2.f);
@@ -178,12 +183,26 @@ static bool RunModeSelect() {
                               IM_COL32(0, 0, 0, int(48 * t)), R::Sheet);
             dl->AddRectFilled({panelX, panelY}, {panelX + panelW, panelY + panelH},
                               C::U(C::LeftBg()), R::Sheet);
+            dl->AddRectFilled({panelX, panelY}, {panelX + panelW, panelY + panelH},
+                              C::UA(C::Acc(), 0.035f * t), R::Sheet);
             dl->AddRect({panelX, panelY}, {panelX + panelW, panelY + panelH},
-                        C::UA(C::Sep(), t), R::Sheet, 0, 1.f);
-            dl->AddRectFilled({panelX, panelY}, {panelX + 5.f, panelY + panelH},
-                              C::UA(C::Acc(), t), 2.f);
+                        C::UA(C::Acc(), 0.34f * t), R::Sheet, 0, 1.f);
+            dl->AddLine({panelX + R::Sheet, panelY + 1.f},
+                        {panelX + panelW - R::Sheet, panelY + 1.f},
+                        C::UA(C::Acc(), 0.55f * t), 2.f);
 
-            dl->AddText(fn, tfs, {panelX + 32.f, panelY + 30.f},
+            static const int lightRgb[3][3] = {
+                {255, 95, 87}, {254, 188, 46}, {40, 200, 64}
+            };
+            for (int i = 0; i < 3; ++i) {
+                const ImVec2 lc{panelX + 24.f + i * 22.f, panelY + 22.f};
+                dl->AddCircleFilled(lc, 6.f,
+                    IM_COL32(lightRgb[i][0], lightRgb[i][1], lightRgb[i][2], int(255 * t)), 20);
+                dl->AddCircle(lc, 6.f, IM_COL32(0, 0, 0, int(70 * t)), 20, 1.f);
+            }
+
+            dl->AddText(fn, tfs,
+                        {panelX + (panelW - ts.x) * 0.5f, panelY + 30.f},
                         C::UA(C::Txt(), t), title);
             dl->AddLine({panelX + 32.f, panelY + 54.f + ts.y},
                         {panelX + panelW - 32.f, panelY + 54.f + ts.y},

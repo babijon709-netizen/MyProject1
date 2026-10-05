@@ -89,10 +89,10 @@ struct AppState {
     float hud_cnt_x = -1.f, hud_cnt_y = -1.f;
     // ui_fps выключен навсегда (счётчик убран), рамки карточек — всегда вкл.
     bool  ui_fps = false, ui_dark_mode = true, ui_show_sep = true;
-    // Акцент интерфейса: 0 = монохром по умолчанию, 1..7 = цветные пресеты,
+    // Акцент интерфейса: 0 = фиолетовый Barbatos, 1..7 = цветные пресеты,
     // 8 = свой цвет из ui_accent_rgb. Хранится отдельно от профиля.
     int   ui_accent_idx = 0;
-    ImVec4 ui_accent_rgb = {0.900f, 0.900f, 0.900f, 1.0f};
+    ImVec4 ui_accent_rgb = {0.545f, 0.486f, 1.000f, 1.0f};
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
     bool  ui_panel_left = true;
 

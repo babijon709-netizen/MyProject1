@@ -1,5 +1,5 @@
 #pragma once
-// Чёрная монохромная визуальная система GUI с крупными скруглениями.
+// Barbatos-inspired dark graphite theme with a violet accent and rounded surfaces.
 
 #include "imgui.h"
 #include "ui_util.h"
@@ -7,8 +7,8 @@
 namespace R {
     static constexpr float Card  = 20.f;
     static constexpr float Pill  = 18.f;
-    static constexpr float Sheet = 26.f;
-    static constexpr float Btn   = 16.f;
+    static constexpr float Sheet = 24.f;
+    static constexpr float Btn   = 15.f;
 }
 
 extern bool  g_darkTheme;
@@ -18,31 +18,31 @@ extern ImVec4 g_accent;
 extern bool   g_accentOn;
 
 namespace C {
-    // Обе стороны перехода одинаковы намеренно: старые конфиги со светлой
-    // темой тоже отображаются в новом чёрном стиле.
+    // Both palettes intentionally match: old light-theme configs must keep the
+    // same dark Barbatos presentation.
     namespace Light {
-        static constexpr ImVec4 Bg     = {0.008f, 0.008f, 0.008f, 1};
-        static constexpr ImVec4 LeftBg = {0.018f, 0.018f, 0.018f, 1};
-        static constexpr ImVec4 Card   = {0.055f, 0.055f, 0.055f, 1};
-        static constexpr ImVec4 Acc    = {0.900f, 0.900f, 0.900f, 1};
-        static constexpr ImVec4 AccDk  = {0.690f, 0.690f, 0.690f, 1};
-        static constexpr ImVec4 Red    = {0.847f, 0.353f, 0.290f, 1};
-        static constexpr ImVec4 Txt    = {0.949f, 0.949f, 0.949f, 1};
-        static constexpr ImVec4 Dim    = {0.545f, 0.545f, 0.545f, 1};
-        static constexpr ImVec4 TrkOff = {0.137f, 0.137f, 0.137f, 1};
-        static constexpr ImVec4 Sep    = {0.216f, 0.216f, 0.216f, 1};
+        static constexpr ImVec4 Bg     = {0.027f, 0.029f, 0.043f, 1};
+        static constexpr ImVec4 LeftBg = {0.043f, 0.047f, 0.067f, 1};
+        static constexpr ImVec4 Card   = {0.075f, 0.078f, 0.110f, 1};
+        static constexpr ImVec4 Acc    = {0.545f, 0.486f, 1.000f, 1};
+        static constexpr ImVec4 AccDk  = {0.388f, 0.325f, 0.820f, 1};
+        static constexpr ImVec4 Red    = {1.000f, 0.361f, 0.322f, 1};
+        static constexpr ImVec4 Txt    = {0.949f, 0.953f, 0.976f, 1};
+        static constexpr ImVec4 Dim    = {0.558f, 0.573f, 0.655f, 1};
+        static constexpr ImVec4 TrkOff = {0.137f, 0.145f, 0.200f, 1};
+        static constexpr ImVec4 Sep    = {0.180f, 0.188f, 0.259f, 1};
     }
     namespace Dark {
-        static constexpr ImVec4 Bg     = {0.008f, 0.008f, 0.008f, 1};
-        static constexpr ImVec4 LeftBg = {0.018f, 0.018f, 0.018f, 1};
-        static constexpr ImVec4 Card   = {0.055f, 0.055f, 0.055f, 1};
-        static constexpr ImVec4 Acc    = {0.900f, 0.900f, 0.900f, 1};
-        static constexpr ImVec4 AccDk  = {0.690f, 0.690f, 0.690f, 1};
-        static constexpr ImVec4 Red    = {0.847f, 0.353f, 0.290f, 1};
-        static constexpr ImVec4 Txt    = {0.949f, 0.949f, 0.949f, 1};
-        static constexpr ImVec4 Dim    = {0.545f, 0.545f, 0.545f, 1};
-        static constexpr ImVec4 TrkOff = {0.137f, 0.137f, 0.137f, 1};
-        static constexpr ImVec4 Sep    = {0.216f, 0.216f, 0.216f, 1};
+        static constexpr ImVec4 Bg     = {0.027f, 0.029f, 0.043f, 1};
+        static constexpr ImVec4 LeftBg = {0.043f, 0.047f, 0.067f, 1};
+        static constexpr ImVec4 Card   = {0.075f, 0.078f, 0.110f, 1};
+        static constexpr ImVec4 Acc    = {0.545f, 0.486f, 1.000f, 1};
+        static constexpr ImVec4 AccDk  = {0.388f, 0.325f, 0.820f, 1};
+        static constexpr ImVec4 Red    = {1.000f, 0.361f, 0.322f, 1};
+        static constexpr ImVec4 Txt    = {0.949f, 0.953f, 0.976f, 1};
+        static constexpr ImVec4 Dim    = {0.558f, 0.573f, 0.655f, 1};
+        static constexpr ImVec4 TrkOff = {0.137f, 0.145f, 0.200f, 1};
+        static constexpr ImVec4 Sep    = {0.180f, 0.188f, 0.259f, 1};
     }
 
     static inline ImVec4 Lerp4(ImVec4 a, ImVec4 b) {
@@ -55,7 +55,7 @@ namespace C {
     static inline ImVec4 Card()   { return Lerp4(Light::Card,   Dark::Card);   }
     static inline ImVec4 AccLight() { return g_accentOn ? g_accent : Light::Acc; }
     static inline ImVec4 AccDark()  { return g_accentOn ? g_accent : Dark::Acc; }
-    static inline ImVec4 AccDkOf(ImVec4 v) { return {v.x*0.72f, v.y*0.72f, v.z*0.72f, 1.f}; }
+    static inline ImVec4 AccDkOf(ImVec4 v) { return {v.x*0.72f, v.y*0.68f, v.z*0.84f, 1.f}; }
     static inline ImVec4 Acc()    { return Lerp4(AccLight(), AccDark()); }
     static inline ImVec4 AccDk()  { return g_accentOn ? AccDkOf(g_accent) : Lerp4(Light::AccDk, Dark::AccDk); }
     static inline ImVec4 Red()    { return Lerp4(Light::Red,    Dark::Red);    }
@@ -66,9 +66,9 @@ namespace C {
 
     static inline ImVec4 Raised() {
         const ImVec4 card = Card();
-        const ImVec4 txt = Txt();
-        return {Lerpf(card.x, txt.x, 0.055f), Lerpf(card.y, txt.y, 0.055f),
-                Lerpf(card.z, txt.z, 0.055f), 1.f};
+        const ImVec4 acc = Acc();
+        return {Lerpf(card.x, acc.x, 0.12f), Lerpf(card.y, acc.y, 0.12f),
+                Lerpf(card.z, acc.z, 0.12f), 1.f};
     }
 
     static ImU32 Mix(ImVec4 a, ImVec4 b, float t) {
@@ -83,14 +83,14 @@ namespace C {
 namespace Layout {
     static constexpr float RowH      = 72.f;
     static constexpr float SliderH   = 102.f;
-    static constexpr float HeaderH   = 78.f;
+    static constexpr float HeaderH   = 74.f;
     static constexpr float Inset     = 18.f;
     static constexpr float PadX      = 22.f;
     static constexpr float BtnH      = 58.f;
     static constexpr float BottomH   = 116.f;
     static constexpr float TabW      = 126.f;
     static constexpr float RailW     = 226.f;
-    static constexpr float TabHV     = 82.f;
+    static constexpr float TabHV     = 78.f;
 }
 
 void ApplyTheme();

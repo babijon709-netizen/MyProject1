@@ -15,6 +15,7 @@
 #include "esp_draw.h"
 #include "aim.h"
 #include "logfile.h"                 // AimTouchFracX/Y (строки калибровки)
+#include "VidAvatar.h"
 static float pill_y   = -1.f;
 static float pill_vel =  0.f;
 
@@ -22,9 +23,9 @@ struct TabRect { float sx; };
 static TabRect tab_rects[kTabCount];
 
 // ---- Акцент интерфейса: палитра стиля всего GUI ---------------------------
-// Нулевой пресет оставляет интерфейс монохромным.
+// Нулевой пресет — фирменный фиолетовый Barbatos.
 static const ImVec4 kAccentCols[] = {
-    {0.900f, 0.900f, 0.900f, 1.f},  // 0 монохром
+    {0.545f, 0.486f, 1.000f, 1.f},  // 0 Barbatos violet
     {0.290f, 0.475f, 0.690f, 1.f},  // 1 синий
     {0.220f, 0.610f, 0.620f, 1.f},  // 2 бирюзовый
     {0.365f, 0.635f, 0.380f, 1.f},  // 3 зелёный
@@ -1150,6 +1151,21 @@ static const char* TabTitle(int k) {
 // Высота рабочей шапки с названием текущего раздела.
 static float MenuHeaderH(bool) { return Layout::HeaderH; }
 
+// Характерный для Barbatos ряд macOS-индикаторов. Они остаются декоративными:
+// окно по-прежнему открывается счётчиком и перетаскивается за шапку.
+static void DrawBarbatosLights(ImDrawList* dl, ImVec2 origin) {
+    static const ImU32 colors[3] = {
+        IM_COL32(255, 95, 87, 255),
+        IM_COL32(254, 188, 46, 255),
+        IM_COL32(40, 200, 64, 255)
+    };
+    for (int i = 0; i < 3; ++i) {
+        const ImVec2 c{origin.x + 20.f + i * 24.f, origin.y + 20.f};
+        dl->AddCircleFilled(c, 7.f, colors[i], 24);
+        dl->AddCircle(c, 7.f, IM_COL32(0, 0, 0, 70), 24, 1.f);
+    }
+}
+
 // ====================== Фрикам: управление полётом ========================
 //
 // Пока функция включена, поверх игры лежат три независимых органа управления,
@@ -2036,10 +2052,16 @@ void RenderMenu() {
     ImGui::Begin("##menu", nullptr, wf);
     {
         const ImVec2 bgP = g_win.pos;
+        const ImVec2 bgM{bgP.x + WW, bgP.y + WH};
+        auto* shadow = ImGui::GetBackgroundDrawList();
+        shadow->AddRectFilled({bgP.x + 5.f, bgP.y + 7.f},
+                              {bgM.x + 5.f, bgM.y + 7.f},
+                              IM_COL32(0, 0, 0, 105), R::Sheet);
         auto* bgDL = ImGui::GetWindowDrawList();
-        bgDL->AddRectFilled(bgP, {bgP.x + WW, bgP.y + WH}, C::U(C::Bg()), R::Sheet);
-        bgDL->AddRect(bgP, {bgP.x + WW, bgP.y + WH}, C::UA(C::Sep(), 0.95f),
-                      R::Sheet, 0, 1.f);
+        bgDL->AddRectFilled(bgP, bgM, C::U(C::Bg()), R::Sheet);
+        bgDL->AddRect(bgP, bgM, C::UA(C::Sep(), 0.95f), R::Sheet, 0, 1.f);
+        bgDL->AddLine({bgP.x + R::Sheet, bgP.y + 1.f},
+                      {bgM.x - R::Sheet, bgP.y + 1.f}, C::UA(C::Acc(), 0.48f), 2.f);
     }
 
     ImVec2 wp = g_win.pos;
@@ -2155,23 +2177,17 @@ void RenderMenu() {
         ldl->AddLine({lpPos.x + railW, lpPos.y + 10.f},
                      {lpPos.x + railW, lpPos.y + WH - 10.f}, C::UA(C::Sep(), 0.9f), 1.f);
 
-        const float brandSide = 44.f;
-        const float brandX = lpPos.x + (railW - brandSide) * 0.5f;
-        const float brandY = lpPos.y + 18.f;
-        ldl->AddRectFilled({brandX, brandY}, {brandX + brandSide, brandY + brandSide},
-                           C::U(C::Acc()), brandSide * 0.32f);
-        const char* mark = "B";
-        const float markFS = ImGui::GetFontSize() * 1.28f;
-        const ImVec2 markSz = ImGui::GetFont()->CalcTextSizeA(markFS, FLT_MAX, 0, mark);
-        ldl->AddText(ImGui::GetFont(), markFS,
-                     {brandX + (brandSide - markSz.x) * 0.5f,
-                      brandY + (brandSide - markSz.y) * 0.5f},
-                     C::U(C::LeftBg()), mark);
-        ldl->AddLine({lpPos.x + 18.f, lpPos.y + 78.f},
-                     {lpPos.x + railW - 18.f, lpPos.y + 78.f}, C::UA(C::Sep(), 0.8f), 1.f);
+        DrawBarbatosLights(ldl, lpPos);
+        const float avatarR = ImMin(50.f, railW * 0.25f);
+        const ImVec2 avatarCenter{lpPos.x + railW * 0.5f, lpPos.y + 92.f};
+        ldl->AddCircleFilled(avatarCenter, avatarR + 12.f, C::UA(C::Acc(), 0.08f), 64);
+        VidAvatar::Draw(ldl, avatarCenter.x, avatarCenter.y, avatarR, dt,
+                        C::UA(C::Acc(), 0.92f), C::U(C::LeftBg()));
+        ldl->AddLine({lpPos.x + 18.f, lpPos.y + 154.f},
+                     {lpPos.x + railW - 18.f, lpPos.y + 154.f}, C::UA(C::Sep(), 0.8f), 1.f);
 
-        const float startY = 90.f;
-        const float footerH = 18.f;
+        const float startY = 164.f;
+        const float footerH = 12.f;
         const float tabH = ImMin(Layout::TabHV,
                                  ImMax(58.f, (WH - startY - footerH) / (float)kTabShown));
         for (int slot = 0; slot < kTabShown; ++slot) {
@@ -2189,11 +2205,13 @@ void RenderMenu() {
         if (pill_y < 0.f) { pill_y = target; pill_vel = 0.f; }
         SpringTick(pill_y, pill_vel, target, dt);
         const float activeY = wp.y + pill_y;
-        ldl->AddRectFilled({lpPos.x + 11.f, activeY + 6.f},
-                           {lpPos.x + railW - 11.f, activeY + tabH - 6.f},
-                           C::U(C::Raised()), R::Btn);
-        ldl->AddRectFilled({lpPos.x + 11.f, activeY + 6.f},
-                           {lpPos.x + 15.f, activeY + tabH - 6.f}, C::U(C::Acc()), 2.f);
+        const ImVec2 activeMin{lpPos.x + 11.f, activeY + 6.f};
+        const ImVec2 activeMax{lpPos.x + railW - 11.f, activeY + tabH - 6.f};
+        ldl->AddRectFilled(activeMin, activeMax, C::U(C::Raised()), R::Btn);
+        ldl->AddRectFilled(activeMin, activeMax, C::UA(C::Acc(), 0.10f), R::Btn);
+        ldl->AddRect(activeMin, activeMax, C::UA(C::Acc(), 0.32f), R::Btn, 0, 1.f);
+        ldl->AddRectFilled({activeMin.x, activeMin.y + 10.f},
+                           {activeMin.x + 4.f, activeMax.y - 10.f}, C::U(C::Acc()), 2.f);
 
         for (int slot = 0; slot < kTabShown; ++slot) {
             const int id = kTabOrder[slot];
@@ -2231,11 +2249,13 @@ void RenderMenu() {
         if (pill_y < 0.f) { pill_y = target; pill_vel = 0.f; }
         SpringTick(pill_y, pill_vel, target, dt);
         const float activeX = wp.x + pill_y;
-        ldl->AddRectFilled({activeX + 7.f, lpPos.y + 7.f},
-                           {activeX + tabW - 7.f, lpPos.y + botH - 8.f},
-                           C::U(C::Raised()), R::Btn);
-        ldl->AddRectFilled({activeX + 18.f, lpPos.y},
-                           {activeX + tabW - 18.f, lpPos.y + 4.f}, C::U(C::Acc()), 2.f);
+        const ImVec2 activeMin{activeX + 7.f, lpPos.y + 7.f};
+        const ImVec2 activeMax{activeX + tabW - 7.f, lpPos.y + botH - 8.f};
+        ldl->AddRectFilled(activeMin, activeMax, C::U(C::Raised()), R::Btn);
+        ldl->AddRectFilled(activeMin, activeMax, C::UA(C::Acc(), 0.10f), R::Btn);
+        ldl->AddRect(activeMin, activeMax, C::UA(C::Acc(), 0.32f), R::Btn, 0, 1.f);
+        ldl->AddRectFilled({activeX + 20.f, lpPos.y},
+                           {activeX + tabW - 20.f, lpPos.y + 4.f}, C::U(C::Acc()), 2.f);
 
         for (int slot = 0; slot < kTabShown; ++slot) {
             const int id = kTabOrder[slot];
@@ -2258,21 +2278,18 @@ void RenderMenu() {
         const ImVec2 hp = ImGui::GetWindowPos();
         ImFont* font = ImGui::GetFont();
         const char* title = TabTitle(g_state.cur_tab);
-        const float titleFS = ImGui::GetFontSize() * 1.42f;
+        const float titleFS = ImGui::GetFontSize() * 1.38f;
         const ImVec2 titleSz = font->CalcTextSizeA(titleFS, FLT_MAX, 0, title);
         cdl->AddText(font, titleFS,
-                     {hp.x + 30.f, hp.y + (hdrH - titleSz.y) * 0.5f},
+                     {hp.x + (cW - titleSz.x) * 0.5f,
+                      hp.y + (hdrH - titleSz.y) * 0.5f - 2.f},
                      C::U(C::Txt()), title);
-        cdl->AddRectFilled({hp.x + 18.f, hp.y + 22.f},
-                           {hp.x + 22.f, hp.y + hdrH - 22.f}, C::U(C::Acc()), 2.f);
+        cdl->AddRectFilled({hp.x + cW * 0.5f - 20.f, hp.y + hdrH - 8.f},
+                           {hp.x + cW * 0.5f + 20.f, hp.y + hdrH - 5.f},
+                           C::U(C::Acc()), 1.5f);
         cdl->AddLine({hp.x + 18.f, hp.y + hdrH - 1.f},
                      {hp.x + cW - 18.f, hp.y + hdrH - 1.f}, C::UA(C::Sep(), 0.85f), 1.f);
-
-        // Ненавязчивая зона перетаскивания в правой части шапки.
-        const float gripX = hp.x + cW - 52.f;
-        for (int n = 0; n < 3; ++n)
-            cdl->AddLine({gripX, hp.y + 31.f + n * 8.f},
-                         {gripX + 24.f, hp.y + 31.f + n * 8.f}, C::UA(C::Dim(), 0.6f), 2.f);
+        if (!panelLeft) DrawBarbatosLights(cdl, g_win.pos);
         ImGui::Dummy({cW, hdrH});
     }
 
