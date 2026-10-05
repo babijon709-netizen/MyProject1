@@ -1,4 +1,5 @@
 #include "fps_memory.h"
+#include "game.h"
 #include "weapon_tuning_memory.h"
 #include "weapon_speed_memory.h"
 #include "loot_memory.h"
@@ -312,8 +313,15 @@ std::recursive_mutex& viewmodel_session_mutex() {
     return mutex;
 }
 
+bool viewmodel_write_heap(uint64_t address, const void* data, std::size_t size) {
+    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
+    if (!data || !size || size > 64 || !g_mem.bound() || g_pid <= 0) return false;
+    return heap_gate_allows(address, size) && g_mem.write(address, data, size);
+}
+
 void esp_viewmodel_reset(bool restore) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
+    esp_reset_headshot_body(restore && g_mem.bound());
     controller.reset(restore && g_mem.bound());
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))

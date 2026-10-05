@@ -351,7 +351,7 @@ static void ConfigSaveToPath(const std::string& path) {
         extension.flags |= (g_state.esp_turrets ? 128u : 0u) |
                            (g_state.esp_backpacks ? 256u : 0u) |
                            (g_state.esp_sleepers ? 512u : 0u);
-        // v4: упреждение аима в миллисекундах (0 = выкл).
+        // v4+: упреждение аима в миллисекундах (0 = выкл).
         extension.aim_lead_ms = g_state.aim_lead_ms;
         uint8_t extra[sizeof(extension)];
         memcpy(extra, &extension, sizeof(extra));
@@ -408,21 +408,21 @@ void ConfigLoad(int idx, bool announce) {
     XorBuf(extra, extraGot);
     g_state.viewmodel = viewmodel::decode(extra, extraGot);
     g_state.esp_turrets = g_state.esp_backpacks = g_state.esp_sleepers = false;
-    // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4 ниже может
-    // вернуть своё значение. Сам прицеп теперь 36 байт (v4); прицеп v3 был
-    // 32 — обрабатываем оба размера, иначе старые конфиги потеряли бы
-    // турели/рюкзаки/спящих.
+    // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4/v5 ниже могут
+    // вернуть своё значение. Сам прицеп 36 байт с v4; прицеп v3 был 32 —
+    // обрабатываем оба размера, иначе старые конфиги потеряли бы турели,
+    // рюкзаки и спящих.
     g_state.aim_lead_ms = 0.f;
     if (extraGot == 32 || extraGot == sizeof(viewmodel::ConfigExtension)) {
         viewmodel::ConfigExtension extension;
         memcpy(&extension, extra, extraGot);   // v3: 32 байта, хвост — дефолты
         if (extension.magic == 0x31574d56u &&
-            (extension.version == 3 || extension.version == 4) &&
+            (extension.version == 3 || extension.version == 4 || extension.version == 5) &&
             extension.size == extraGot) {
             g_state.esp_turrets = (extension.flags & 128u) != 0;
             g_state.esp_backpacks = (extension.flags & 256u) != 0;
             g_state.esp_sleepers = (extension.flags & 512u) != 0;
-            if (extension.version == 4)
+            if (extension.version >= 4)
                 g_state.aim_lead_ms = viewmodel::decode_aim_lead_ms(extra, extraGot);
         }
     }
