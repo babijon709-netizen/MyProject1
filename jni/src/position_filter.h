@@ -13,8 +13,8 @@ namespace posfilter {
 // Значения подобраны под верхние скорости игры: бег ~8, машина ~50,
 // коптер до ~120 м/с. Мусорный отсчёт скачет случайно по карте, а игрок —
 // никогда быстрее транспорта.
-constexpr double kPosHoldSeconds      = 1.0;   // холд без успешного чтения (время, не кадры!)
-constexpr int    kPosJumpConfirmFrames = 2;    // скачок должен повториться
+constexpr double kPosHoldSeconds      = 2.0;   // холд без успешного чтения (время, не кадры!)
+constexpr int    kPosJumpConfirmFrames = 3;    // нужен повтор в несколько кадров, чтобы не гасить ESP на шуме
 constexpr float  kPosJumpMeters        = 1.5F; // базовый допуск, метры
 constexpr float  kPosJumpSpeed         = 28.0F;// плюс м/с на секунду простоя
 constexpr float  kPosExtrapolateLimit  = 1.5F; // потолок дорисовки по скорости
@@ -49,7 +49,7 @@ struct Obs {
 // now — монотонные секунды вызывающего. vel — измеренная скорость игрока
 // (для экстраполяции на сбойном кадре). pos in/out: сырое -> рисуемое.
 inline bool filter(State& track, bool read_ok, Vec3& pos, const Vec3& vel,
-                   double now, Obs& obs) {
+                    double now, Obs& obs) {
     if (!track.has_drawn) {
         if (!read_ok) return false;
         track.drawn = pos; track.drawn_t = now; track.has_drawn = true;
@@ -76,13 +76,10 @@ inline bool filter(State& track, bool read_ok, Vec3& pos, const Vec3& vel,
 
     if (!read_ok) {
         ++track.hold_frames;
-        // Держим бокс по времени, а не по кадрам: серия сбоев чтения на
-        // FD-канале залипает на десятки кадров (и на 144, и на 30 FPS), и с
-        // 0.35 с бокс гас посреди боя — та самая «esp слетает на пару
-        // секунд». Экстраполяция всё равно зажата kPosExtrapolateLimit.
-        // Таймаут = позиция больше не известна: следующий отсчёт примем как
-        // первый, а не будем вечно сравнивать с устаревшей точкой (иначе
-        // игрок, уехавший за паузу, не выходил из фильтра вовсе).
+        // Важно не гасить ESP сразу на временном окне в 1s: некоторые игроки
+        // "проваливаются" на 1–2 секунды из-за кратковременных read-gap, а это
+        // выглядит как рандомное пропадание в бою. Держим последнее валидное
+        // место до expiry, а потом уже сбрасываем трек.
         if (now - track.drawn_t > kPosHoldSeconds) {
             track.has_drawn = false;
             return false;
