@@ -1,22 +1,35 @@
 #include "theme.h"
 
 bool  g_darkTheme = true;
-float g_themeT    = 1.f;
+float g_themeT = 1.f;
 float g_menuFadeIn = 0.f;
-ImVec4 g_accent = {0.545f, 0.486f, 1.000f, 1};
+ImVec4 g_accent = {0.843f, 0.635f, 0.310f, 1.f};
 bool   g_accentOn = false;
 
 void ApplyTheme() {
     ImGui::GetIO().ConfigDebugHighlightIdConflicts = false;
     auto& s = ImGui::GetStyle();
-    s.WindowRounding = 24; s.ChildRounding  = 20; s.FrameRounding = 16;
-    s.GrabRounding   = 16; s.PopupRounding  = 16; s.TabRounding   = 16;
-    s.WindowBorderSize = 0; s.FrameBorderSize = 0;
-    s.ItemSpacing  = {10, 0}; s.FramePadding  = {14, 12}; s.WindowPadding = {0, 0};
-    s.ScrollbarSize = 0; s.GrabMinSize = 20;
+    s.WindowRounding = R::Sheet;
+    s.ChildRounding = 0.f;
+    s.FrameRounding = R::Btn;
+    s.GrabRounding = 4.f;
+    s.PopupRounding = R::Sheet;
+    s.TabRounding = R::Btn;
+    s.WindowBorderSize = 1.f;
+    s.ChildBorderSize = 0.f;
+    s.FrameBorderSize = 0.f;
+    s.PopupBorderSize = 1.f;
+    s.ItemSpacing = {10.f, 0.f};
+    s.ItemInnerSpacing = {8.f, 6.f};
+    s.FramePadding = {14.f, 10.f};
+    s.WindowPadding = {0.f, 0.f};
+    s.ScrollbarSize = 0.f;
+    s.GrabMinSize = 18.f;
+
     auto* c = s.Colors;
     c[ImGuiCol_WindowBg]              = C::Bg();
     c[ImGuiCol_ChildBg]               = {0, 0, 0, 0};
+    c[ImGuiCol_PopupBg]               = C::Card();
     c[ImGuiCol_Border]                = C::Sep();
     c[ImGuiCol_BorderShadow]          = {0, 0, 0, 0};
     c[ImGuiCol_Text]                  = C::Txt();

@@ -69,38 +69,43 @@ static void MigrateLegacyRtMode() {
     RememberMode(MODE_RT_DEV);
 }
 
-// ---- кнопка режима (только текст, без подписи) -----------------------------
-//
-// style_on=false — драйвер не отвечает: корпус приглушён, но тап всё равно
-// возвращается вызывающему (тот покажет причину тостом и перепроверит).
+// style_on=false — транспорт не отвечает: карточка приглушена, но остаётся
+// кликабельной для повторной проверки после загрузки драйвера.
 static bool ModeButton(const char* id, float w, float h, const char* title,
-                       bool style_on, bool accent, float fs) {
+                       bool style_on, bool driver, float fs) {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(id, {w, h});
 
     const bool tapped = WasTappedHere();
-    const bool held   = ImGui::IsItemActive() && ImGui::IsItemHovered();
-    const bool hov    = ImGui::IsItemHovered();
-
-    auto*  dl = ImGui::GetWindowDrawList();
+    const bool held = ImGui::IsItemActive() && ImGui::IsItemHovered();
+    const bool hov = ImGui::IsItemHovered();
+    auto* dl = ImGui::GetWindowDrawList();
     ImFont* fn = ImGui::GetFont();
 
-    // Корпус: обычная карточка; у FT-Драйвера — рамка акцентом. Нажатие —
-    // затемнение корпуса.
-    ImVec4 body = style_on ? (accent ? C::Card() : C::LeftBg()) : C::TrkOff();
-    if (held) body.w *= 0.82f;
-    else if (hov) body.w *= 0.94f;
-    dl->AddRectFilled(p, {p.x + w, p.y + h}, C::U(body), R::Btn);
-    if (style_on && accent) {
-        ImVec4 ring = C::Acc();
-        ring.w *= held ? 0.85f : 1.f;
-        dl->AddRect(p, {p.x + w, p.y + h}, C::U(ring), R::Btn, 0.f, 3.f);
+    ImVec4 body = style_on ? C::Card() : C::TrkOff();
+    if (held) {
+        body.x *= 0.88f; body.y *= 0.88f; body.z *= 0.88f;
+    } else if (hov) {
+        const ImVec4 raised = C::Raised();
+        body = {Lerpf(body.x, raised.x, 0.65f), Lerpf(body.y, raised.y, 0.65f),
+                Lerpf(body.z, raised.z, 0.65f), 1.f};
     }
+    dl->AddRectFilled({p.x + 1.f, p.y + 3.f}, {p.x + w + 1.f, p.y + h + 3.f},
+                      IM_COL32(0, 0, 0, g_darkTheme ? 34 : 16), R::Btn);
+    dl->AddRectFilled(p, {p.x + w, p.y + h}, C::U(body), R::Btn);
+    dl->AddRect(p, {p.x + w, p.y + h}, C::UA(C::Sep(), 0.9f), R::Btn, 0, 1.f);
+    if (driver)
+        dl->AddRectFilled({p.x, p.y}, {p.x + 4.f, p.y + h},
+                          C::UA(style_on ? C::Acc() : C::Dim(), 0.95f), 2.f);
 
-    const float tfs = fs * 1.25f;
+    const float tfs = fs * 1.05f;
     const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
-    dl->AddText(fn, tfs, {p.x + (w - ts.x) * 0.5f, p.y + (h - ts.y) * 0.5f},
+    dl->AddText(fn, tfs, {p.x + 20.f, p.y + (h - ts.y) * 0.5f},
                 C::U(style_on ? C::Txt() : C::Dim()), title);
+
+    const float sx = p.x + w - 22.f, sy = p.y + 18.f;
+    dl->AddRectFilled({sx - 5.f, sy - 5.f}, {sx + 5.f, sy + 5.f},
+                      C::U(style_on ? C::Acc() : C::Dim()), 2.f);
     return tapped;
 }
 
@@ -154,30 +159,44 @@ static bool RunModeSelect() {
             const float fs = ImGui::GetFontSize();
 
             const float t = EaseInOut(fade);
-            const float slide = (1.f - t) * -30.f;   // въезжает сверху
+            const float slide = (1.f - t) * 24.f;
 
-            // Заголовок + кнопки — единый блок ровно по центру экрана
-            // (по горизонтали и по вертикали): без фона, только текст
-            // с тенью для читаемости поверх экрана под оверлеем.
-            // Сетка 2х2: экстернал и FT сверху, RT-Dev и RT-Hook снизу.
+            dl->AddRectFilled({0.f, 0.f}, {vw, vh}, C::UA(C::Bg(), 0.96f * t));
+
             const char* title = XS("Способ чтения");
-            const float tfs = fs * 1.55f;
+            const float tfs = fs * 1.50f;
             const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
-            const float gap  = 14.f;
+            const float gap = 12.f;
             const float btnH = fs * 3.4f;
-            const float btnW = ImMin((vw - 36.f - gap) / 2.f, 300.f);
-            const float tGap = fs * 1.3f;                 // заголовок -> кнопки
-            const float blockH = tfs + tGap + btnH * 2.f + gap;
-            const float ty = (vh - blockH) * 0.5f + slide;   // центр по вертикали
-            const float tx = (vw - ts.x) * 0.5f;
-            dl->AddText(fn, tfs, {tx + 2.f, ty + 2.f}, IM_COL32(0, 0, 0, 110), title);
-            dl->AddText(fn, tfs, {tx, ty}, C::U(C::Txt()), title);
+            const float panelW = ImMin(vw - 32.f, 690.f);
+            const float btnW = (panelW - 64.f - gap) * 0.5f;
+            const float panelH = 90.f + tfs + 28.f + btnH * 2.f + gap + 34.f;
+            const float panelX = (vw - panelW) * 0.5f;
+            const float panelY = (vh - panelH) * 0.5f + slide;
 
-            // Сетка кнопок под заголовком.
+            dl->AddRectFilled({panelX + 2.f, panelY + 5.f},
+                              {panelX + panelW + 2.f, panelY + panelH + 5.f},
+                              IM_COL32(0, 0, 0, int(48 * t)), R::Sheet);
+            dl->AddRectFilled({panelX, panelY}, {panelX + panelW, panelY + panelH},
+                              C::U(C::LeftBg()), R::Sheet);
+            dl->AddRect({panelX, panelY}, {panelX + panelW, panelY + panelH},
+                        C::UA(C::Sep(), t), R::Sheet, 0, 1.f);
+            dl->AddRectFilled({panelX, panelY}, {panelX + 5.f, panelY + panelH},
+                              C::UA(C::Acc(), t), 2.f);
+
+            const float metaFS = fs * 0.70f;
+            dl->AddText(fn, metaFS, {panelX + 32.f, panelY + 22.f},
+                        C::UA(C::Dim(), t), "BENZWARE  /  STARTUP");
+            dl->AddText(fn, tfs, {panelX + 32.f, panelY + 48.f},
+                        C::UA(C::Txt(), t), title);
+            dl->AddLine({panelX + 32.f, panelY + 82.f + ts.y},
+                        {panelX + panelW - 32.f, panelY + 82.f + ts.y},
+                        C::UA(C::Sep(), 0.85f * t), 1.f);
+
             const float rowW = btnW * 2.f + gap;
-            const float by   = ty + tfs + tGap;
-            const float bx   = (vw - rowW) * 0.5f;
-            const float by2  = by + btnH + gap;           // второй ряд
+            const float bx = panelX + (panelW - rowW) * 0.5f;
+            const float by = panelY + 104.f + ts.y;
+            const float by2 = by + btnH + gap;
 
             ImGui::SetCursorScreenPos({bx, by});
             if (ModeButton("##mode_ext", btnW, btnH,

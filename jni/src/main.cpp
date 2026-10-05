@@ -356,7 +356,6 @@ int main(int argc, char* argv[]) {
         shutdown(); Touch_Close(); return 0;
     }
     start_attach_thread();
-    LoadTabIcons();
     ApplyTheme();
     RestoreLang();          // язык из прошлого запуска (конфиг ниже может его переписать)
     RestoreAccent();        // акцент интерфейса из прошлого запуска

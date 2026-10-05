@@ -123,11 +123,12 @@ void DrawToast(float dt) {
     ImVec4 card = C::Card(), txt = C::Txt(), dim = C::Dim(), acc = C::Acc();
 
     fg->AddRectFilled({tx + 2.f, ty + 4.f}, {tx + tW + 2.f, ty + tH + 4.f},
-        IM_COL32(0, 0, 0, int(26 * alpha)), 26.f);
+        IM_COL32(0, 0, 0, int(32 * alpha)), R::Card);
     fg->AddRectFilled({tx, ty}, {tx + tW, ty + tH},
-        IM_COL32(int(card.x*255), int(card.y*255), int(card.z*255), int(alpha * 245)), 26.f);
+        IM_COL32(int(card.x*255), int(card.y*255), int(card.z*255), int(alpha * 245)), R::Card);
     fg->AddRect({tx, ty}, {tx + tW, ty + tH},
-        C::UA(acc, 0.32f * alpha), 26.f, 0, 1.3f);
+        C::UA(C::Sep(), 0.9f * alpha), R::Card, 0, 1.f);
+    fg->AddRectFilled({tx, ty}, {tx + 4.f, ty + tH}, C::UA(acc, alpha), 2.f);
 
     fg->PushClipRect({tx + 1.f, ty + 1.f}, {tx + tW - 1.f, ty + tH - 1.f}, true);
 
@@ -193,14 +194,17 @@ void DrawWatermark(float dt) {
     // Тапы по ней не обрабатываются вовсе, так что она «прозрачна» для
     // кликов и ничему не мешает.
     {
-        const float fs = 38.f, padX = 24.f, padY = 14.f;
+        const float fs = 34.f, padX = 22.f, padY = 13.f;
         const char* name = XS("t.me/benzware");
         auto nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
         float bW = padX * 2.f + nSz.x;
         float bH = padY * 2.f + nSz.y;
         const float bX = 12.f, bY = 12.f;
-        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.8f), bH * 0.5f);
-        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::UA(acc, 0.5f), bH * 0.5f, 0, 1.5f);
+        fg->AddRectFilled({bX + 1.f, bY + 3.f}, {bX + bW + 1.f, bY + bH + 3.f},
+                          IM_COL32(0, 0, 0, 28), R::Card);
+        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.92f), R::Card);
+        fg->AddRect({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Sep(), 0.9f), R::Card, 0, 1.f);
+        fg->AddRectFilled({bX, bY}, {bX + 4.f, bY + bH}, C::UA(acc, 0.95f), 2.f);
         fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(C::Txt(), 0.95f), name);
 
     }
@@ -218,7 +222,7 @@ void DrawWatermark(float dt) {
             enemies = esp_nearby_player_count();
         }
 
-        const float fs = 40.f, pad = 18.f, bR = 46.f;
+        const float fs = 38.f, pad = 18.f, bR = R::Card;
         const int bots = g_esp_attached ? esp_nearby_bot_count() : 0;
         char enemyBuf[16], botBuf[16];
         snprintf(enemyBuf, sizeof(enemyBuf), "%d", enemies);
@@ -259,11 +263,12 @@ void DrawWatermark(float dt) {
         fg->AddRectFilled({bX + 2.f, bY + 3.f}, {bX + bW + 2.f, bY + bH + 3.f},
             IM_COL32(0, 0, 0, 20), bR);
         fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, bgCol, bR);
-        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, brdCol, bR, 0, 1.5f);
+        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Sep(), 0.95f), bR, 0, 1.f);
+        fg->AddRectFilled({bX, bY}, {bX + 4.f, bY + bH}, brdCol, 2.f);
 
         const float dcy = bY + bH * 0.5f;
         const ImU32 enemyCol = C::U(acc);
-        const ImU32 botCol = IM_COL32(190, 120, 255, 255);
+        const ImU32 botCol = IM_COL32(105, 150, 162, 255);
         auto drawPersonIcon = [&](float x, ImU32 col, bool bot) {
             // Both glyphs use exactly the same 24x24 box. Only the visor
             // differentiates bots, so neither icon appears visually larger.
