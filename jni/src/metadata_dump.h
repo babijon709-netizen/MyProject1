@@ -4,7 +4,7 @@
 //
 //     su -c /data/local/tmp/xvcen dump                  // режим из .mode
 //     su -c /data/local/tmp/xvcen dump external         // режим аргументом
-//     su -c /data/local/tmp/xvcen dump rt 12345         // режим + конкретный pid
+//     su -c /data/local/tmp/xvcen dump rt-dev 12345     // режим + конкретный pid
 //
 // Зачем: офсеты чита привязаны к сборке игры, а обфускатор перекатывает их на
 // каждом обновлении. Дамп метаданных — первый шаг пересбора офсетов: его
@@ -1006,7 +1006,7 @@ static bool dump_blob(const Blob& b, const char* path, Log* log) {
     if (failed >= b.size) {
         remove(path);
         log->say("!! 0x%llx: страницы метаданных не читаются транспортом — "
-                 "попробуй другой режим (external/ft/rt)",
+                 "попробуй другой режим (external/ft/rt-dev/rt-hook)",
                  (unsigned long long)b.addr);
         return false;
     }
@@ -1035,14 +1035,18 @@ static int saved_backend() {
            (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
         s.pop_back();
     if (s == "kernel") return ESP_MEM_FT;
-    if (s == "rt") return ESP_MEM_RT;
+    // «rt» — формат кратко существовавшей версии с одним RT-Dev. Оставляем
+    // его только как совместимость и трактуем как rt-dev, не как RT-Hook.
+    if (s == "rt" || s == "rt-dev") return ESP_MEM_RT_DEV;
+    if (s == "rt-hook") return ESP_MEM_RT_HOOK;
     return ESP_MEM_EXTERNAL;
 }
 
 static const char* backend_name(int backend) {
     switch (backend) {
         case ESP_MEM_FT: return "FT-Драйвер";
-        case ESP_MEM_RT: return "RT-Dev";
+        case ESP_MEM_RT_DEV: return "RT-Dev";
+        case ESP_MEM_RT_HOOK: return "RT-Hook";
         default: return "Прямое чтение";
     }
 }
@@ -1062,7 +1066,7 @@ static int Run(int argc, char* argv[]) {
             mode_arg = a;
         } else {
             printf("не понимаю аргумент: %s\n", a);
-            printf("использование: xvcen dump [external|ft|rt] [pid]\n");
+            printf("использование: xvcen dump [external|ft|rt-dev|rt-hook] [pid]\n");
             return 1;
         }
     }
@@ -1072,11 +1076,13 @@ static int Run(int argc, char* argv[]) {
             backend = ESP_MEM_EXTERNAL;
         else if (!strcmp(mode_arg, "ft") || !strcmp(mode_arg, "kernel"))
             backend = ESP_MEM_FT;
-        else if (!strcmp(mode_arg, "rt"))
-            backend = ESP_MEM_RT;
+        else if (!strcmp(mode_arg, "rt-dev") || !strcmp(mode_arg, "rt"))
+            backend = ESP_MEM_RT_DEV;  // «rt» — compatibility alias для старого .mode
+        else if (!strcmp(mode_arg, "rt-hook"))
+            backend = ESP_MEM_RT_HOOK;
         if (backend < 0) {
             printf("неизвестный режим: %s "
-                   "(external | ft | rt)\n", mode_arg);
+                   "(external | ft | rt-dev | rt-hook)\n", mode_arg);
             return 1;
         }
     } else {
@@ -1203,7 +1209,8 @@ static int Run(int argc, char* argv[]) {
     // ---- скан --------------------------------------------------------------
     if (regions.empty()) parse_regions(maps_text, &regions);
     const bool kernel_backend =
-        backend == ESP_MEM_FT || backend == ESP_MEM_RT;
+        backend == ESP_MEM_FT || backend == ESP_MEM_RT_DEV ||
+        backend == ESP_MEM_RT_HOOK;
     std::vector<Region> cand;
     std::uint64_t cand_bytes = 0;
     int closed_cnt = 0;

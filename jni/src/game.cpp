@@ -40,7 +40,8 @@
 memio::Reader g_mem;
 
 // Способ доступа к памяти: экстернал (/proc/<pid>/mem), кернел FT (сокет
-// bing-класса) или кернел RT-Dev (/dev-узел с ioctl 0x801/0x802).
+// bing-класса), RT-Dev (/dev-узел с ioctl 0x801/0x802) или RT-Hook
+// (перехваченный syscall ioctl 0x259/0x25a).
 // Выбирается один раз на старте (экран режима, mode_select.h) до первого
 // bind; сам g_mem о деталях не знает — разница целиком в memio::Transport.
 static int g_mem_backend = ESP_MEM_EXTERNAL;
@@ -49,7 +50,8 @@ void esp_set_mem_backend(int backend) {
     g_mem_backend = backend;
     memio::Transport* t = &memio::procfs_transport();
     if (backend == ESP_MEM_FT) t = &memio::kernel_transport();
-    else if (backend == ESP_MEM_RT) t = &memio::rt_transport();
+    else if (backend == ESP_MEM_RT_DEV) t = &memio::rt_dev_transport();
+    else if (backend == ESP_MEM_RT_HOOK) t = &memio::rt_hook_transport();
     g_mem.set_transport(t);
 }
 
@@ -61,7 +63,7 @@ int esp_mem_last_errno() { return g_mem.last_error(); }
 
 // Сайлент-аим: доступ из своего потока — только через выбранный на экране
 // способ чтения. Никакого собственного /proc/<pid>/mem: в кернел-режимах
-// (FT/RT) он появлялся в /proc/<self>/fd чита и молча ломался там, где
+// (FT/RT-Dev/RT-Hook) он появлялся в /proc/<self>/fd чита и молча ломался там, где
 // прямой доступ к памяти закрыт. Чтение — read_quiet (мимо кадрового кэша
 // рендер-потока, как у viewmodel), запись — обычный путь Reader.
 bool esp_silent_target(int pid) {

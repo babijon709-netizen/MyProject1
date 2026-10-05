@@ -8,7 +8,7 @@ module name=hookdd, license=GPL, author=waangchuan, description=
 memory.h hw_breakpoint.h comm.h cvector.c, hookdd.mod.c), vermagic
 5.10.226LZ离@gnmtl-00002-g7d7b7d0205d2-dirty SMP preempt mod_unload
 modversions aarch64. Символы не стрипнуты, clang/LTO — релокации .text
-лежат в .rela.text.__cfi_check (как у QX).
+лежат в .rela.text.__cfi_check.
 
 ## Транспорт: ХУК SYSCALL IOCTL (не сокет и не /dev!)
 
@@ -56,7 +56,7 @@ Root-гейт 0x259/0x25b: cred=current+0x780; uid(cred+4)==0 || euid(cred+0x14)
 
 Структура COPY (0x20, natural align arm64; ldp x1,x2,[sp,#0x30] в
 диспетчере): `u32 pid +0x00; pad +0x04; u64 addr +0x08; u64 buffer +0x10;
-u64 size +0x18` — РАСКЛАДКА СОВПАДАЕТ с QX wanbai. Возврат hook_ioctl:
+u64 size +0x18` — РАСКЛАДКА: `u32 pid`, pad и три `u64` поля. Возврат hook_ioctl:
 успех → 0; отказ → -1 (-EPERM, errno 1).
 
 ## read/write_process_memory (.text+0x2618 / +0x2ae4)
@@ -68,9 +68,8 @@ mmput/put_task_struct) → **цикл по страницам**: chunk = min(0x1
 физической страницы (pgprot с учётом arm64_use_ng_mappings), dmb ish +
 dc civac по строкам кэша, copy_to_user/copy_from_user, vunmap; продвижение
 addr/buffer/size, пока size != 0. Статус: true(1) — успех, 0 — отказ.
-**Ключевое отличие от QX: чанкинг по 4К делает САМ драйвер** — клиенту
-нарезать не обязательно (клиент всё равно режет — страховка от других
-сборок, пов идентична QX).
+**Драйвер сам чанкует по 4К** — клиент также режет запросы как страховку
+для всех известных сборок.
 
 ## Проба наличия (без побочных эффектов)
 
@@ -78,7 +77,7 @@ addr/buffer/size, пока size != 0. Статус: true(1) — успех, 0 �
 - драйвер НЕ загружен → обычное ядро: fd=-1 → **EBADF** (9);
 - драйвер загружен, мы root → hook_ioctl → 0 (проба чтения своей памяти);
 - драйвер загружен, не root → printk «noroot» в dmesg + -1/EPERM.
-Классификация как у QX: читаем паттерн из своей памяти через 0x259,
+Классификация: читаем паттерн из своей памяти через 0x259,
 пишем scratch через 0x25a, сверяем.
 
 ## Следы на устройстве / скрытность
@@ -138,8 +137,10 @@ sed "1,/^#离/d" отрезает шелл-часть, insmod /data/tmpf, dmesg 
 
 ## Реализация в чите
 
-jni/src/kernel_io.h, класс RtTransport: команды kRtCmdRead=0x259 /
-kRtCmdWrite=0x25a, структура RtCopyMem (0x20), fd=-1 (kRtAnyFd),
-чанкинг 4К (страховка), classify() — пробы по своей памяти.
-UI: четвёртая кнопка «RT-Драйвер» (mode_select.h, сетка 2х2),
-ESP_MEM_RT=3 (game.h/game.cpp), блок в --check-driver (main.cpp).
+jni/src/kernel_io.h, класс RtHookTransport: команды kRtHookCmdRead=0x259 /
+kRtHookCmdWrite=0x25a, структура RtHookCopyMem (0x20), fd=-1,
+чанкинг 4К, classify() — пробы по своей памяти.
+UI: четвёртая кнопка «RT-Hook» (mode_select.h, сетка 2х2),
+ESP_MEM_RT_HOOK (game.h/game.cpp), отдельный блок в --check-driver (main.cpp).
+RT-Dev — отдельный `/dev`-транспорт с ABI 0x801/0x802; его нельзя
+подменять RT-Hook.

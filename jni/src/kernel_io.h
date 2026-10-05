@@ -629,7 +629,7 @@ struct RtDevCopyMem {
 #pragma pack(pop)
 static_assert(sizeof(RtDevCopyMem) == 0x20, "размер запроса RT-Dev изменился");
 
-class RtTransport : public Transport {
+class RtDevTransport : public Transport {
 public:
     const char* name() const override { return "rt-dev (драйвер)"; }
 
@@ -785,18 +785,180 @@ private:
 };
 
 // Единый экземпляр RT-Dev транспорта (по образцу kernel_transport).
-inline RtTransport& rt_transport() {
-    static RtTransport t;
+inline RtDevTransport& rt_dev_transport() {
+    static RtDevTransport t;
     return t;
 }
 
 // RT-Dev доступен? (устройство находится и отвечает пробой по своей
 // памяти — для меню выбора и --check-driver).
-inline bool rt_available() {
-    RtTransport& t = rt_transport();
+inline bool rt_dev_available() {
+    RtDevTransport& t = rt_dev_transport();
     if (t.connected()) return t.verified() ? true : t.classify().kind == CMD_READ;
     if (t.connect() < 0) return false;
     return t.classify().kind == CMD_READ;
+}
+
+// ---- класс 4: RT-hook (hookdd) — хук syscall ioctl, команды 0x259/0x25a ----
+//
+// Драйверы «RT-hook» (архив RT-hook.7z, канал @RTdrivers, автор waangchuan,
+// module hookdd/gynhdd, исходники /root/yijian/gynhdd/: entry.c hook.c
+// memory.h hw_breakpoint.h comm.h cvector.c). Не регистрирует НИ сокет, НИ
+// /dev-узел: init_module патчит sys_call_table[__NR_ioctl=29] (install_hook),
+// страницу таблицы сам делает writable (inline PTE-walk + бит DBM + tlbi),
+// затем самоскрывается (list_del(&module.list) + kobject_del + rb_erase из
+// vmap_area_root/list). Обращение — обычный syscall ioctl с ЛЮБЫМ fd (fd
+// диспетчер НЕ проверяет вовсе); чужие cmd проходят в оригинальный ioctl
+// без изменений, т.е. для остальных процессов всё выглядит как обычно.
+//
+//   0x259 чтение  {u32 pid; u32 pad; u64 addr; u64 buffer; u64 size} — 0x20;
+//   0x25a запись  — та же структура;
+//   0x25b база модуля {u32 pid; char* name; u16 ?; -> u64 base @+0x10}
+//          (root-gated, нами не используется — базы из /proc/<pid>/maps);
+//   0x25d показать процесс / 0x25f скрыть процесс (list_del_rcu + restore);
+//   0x25e снять хук (sys_hook(29, original) + hw_bp exit) — «выгрузка»;
+//   0x260/0x261 аппаратные breakpoints (perf_event: register_user_hw_
+//          breakpoint + счётчик попаданий) — читу не нужны;
+//   0x25c и всё вне 0x259..0x261 — проход в оригинальный ioctl.
+//
+// 0x259/0x25b гейтятся root'ом (uid==0 || euid==0 || capable(CAP_SYS_ADMIN),
+// отказ — printk «noroot» и -1); 0x25a записи гейта НЕ имеют. Структура
+// read/write_process_memory: find_get_pid -> get_pid_task -> get_task_mm ->
+// свой PTE-walk по 4 уровням -> vmap физической страницы + sync кэша; САМИ
+// чанкуют по 4К в цикле, статус true(1). hook_ioctl
+// возвращает 0 (успех) / -1 (EPERM). Проба наличия без побочных эффектов:
+// ioctl(-1, 0x259, &req) — без драйвера ядро отвечает EBADF, с драйвером
+// возвращается 0: fd невалиден, но диспетчеру всё равно.
+// След на устройстве: в fd-листе чита НЕТ НИЧЕГО (ни сокета, ни /dev) —
+// самый скрытный из классов; хук виден только из ядра (sys_call_table).
+
+constexpr int kRtHookCmdRead  = 0x259;   // чтение {pid,addr,buffer,size}
+constexpr int kRtHookCmdWrite = 0x25a;   // запись — та же структура
+
+#pragma pack(push, 1)
+struct RtHookCopyMem {
+    uint32_t pid;      // +0x00: целевой процесс
+    uint32_t pad;      // +0x04
+    uint64_t addr;     // +0x08: адрес в памяти игры
+    uint64_t buffer;   // +0x10: наш буфер
+    uint64_t size;     // +0x18: сколько байт
+};
+#pragma pack(pop)
+static_assert(sizeof(RtHookCopyMem) == 0x20, "размер запроса RT-Hook изменился");
+
+class RtHookTransport : public Transport {
+public:
+    const char* name() const override { return "rt-hook (драйвер)"; }
+
+    // «Открытия» нет: fd не нужен вообще (диспетчер его игнорирует).
+    // Только подтверждаем, что хук стоит, и запоминаем цель.
+    bool open(pid_t pid) override {
+        if (pid <= 0) return false;
+        if (!ensure_driver()) return false;
+        pid_ = (int)pid;
+        return true;
+    }
+    void close() override { pid_ = -1; }
+
+    // Драйвер перезашит (или снят хуком 0x25e) — сбросить подтверждение:
+    // следующая проба ioctl(-1, 0x259) покажет, стоит ли хук снова.
+    void invalidate() {
+        pid_ = -1;
+        verified_ = false;
+    }
+
+    ssize_t read_once(uint64_t addr, void* out, size_t len) override {
+        return rw(true, addr, out, len);
+    }
+    ssize_t write_once(uint64_t addr, const void* in, size_t len) override {
+        return rw(false, addr, const_cast<void*>(in), len);
+    }
+
+    bool connected() const { return verified_; }
+    bool verified()  const { return verified_; }
+
+    // Живая проба по СОБСТВЕННОЙ памяти (по образцу проверки FT): читаем паттерн
+    // и пишем в scratch через ioctl(-1, 0x259/0x25a). Подтверждает, что
+    // syscall ioctl действительно перехвачен и данные двигает драйвер.
+    CmdProbe classify() {
+        CmdProbe r;
+        uint64_t pat[2]    = {0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL};
+        uint64_t mirror[2] = {0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL};
+        const uint64_t pat0 = pat[0], pat1 = pat[1];
+        const int save_pid = pid_;
+        pid_ = (int)getpid();
+        if (rw(true, (uint64_t)(uintptr_t)pat, mirror, sizeof(pat)) == sizeof(pat) &&
+            mirror[0] == pat0 && mirror[1] == pat1) {
+            uint64_t scratch[2] = {1, 1};
+            uint64_t wsrc[2]    = {0xA5A55A5ADEADBEEFULL, 0x0BADC0DE0DDC0FFEULL};
+            if (rw(false, (uint64_t)(uintptr_t)scratch, wsrc, sizeof(scratch)) == sizeof(scratch) &&
+                scratch[0] == wsrc[0] && scratch[1] == wsrc[1]) {
+                r.kind = CMD_READ;   // читает и пишет — транспорт полный
+                verified_ = true;
+                pid_ = save_pid;
+                return r;
+            }
+        }
+        pid_ = save_pid;
+        r.err = errno ? errno : EPERM;
+        verified_ = false;
+        return r;
+    }
+
+private:
+    // Хук стоит? Одна проба чтения своей памяти через ioctl(-1, 0x259).
+    bool ensure_driver() {
+        if (verified_) return true;
+        return classify().kind == CMD_READ;
+    }
+
+    // Запрос. Драйвер 5.10 сам режет по страницам и копирует в цикле, но
+    // чанкинг 4К оставлен: страховка от сборок, где трансляция одна на
+    // запрос, — это безопасно и для старых сборок.
+    ssize_t rw(bool is_read, uint64_t addr, void* buf, size_t len) {
+        if (pid_ <= 0 || !buf || !len) { errno = EBADF; return -1; }
+        uint8_t* p = (uint8_t*)buf;
+        uint64_t a = addr & kAddressTagMask;   // снять TBI/MTE-метку
+        size_t done = 0;
+        while (done < len) {
+            const uint64_t pageLeft = 0x1000 - (a & 0xfff);
+            const size_t chunk = (uint64_t)(len - done) < pageLeft
+                                       ? (len - done) : (size_t)pageLeft;
+            RtHookCopyMem q;
+            memset(&q, 0, sizeof(q));
+            q.pid    = (uint32_t)pid_;
+            q.addr   = a;
+            q.buffer = (uint64_t)(uintptr_t)p;
+            q.size   = (uint64_t)chunk;
+            const int cmd = is_read ? kRtHookCmdRead : kRtHookCmdWrite;
+            if (ioctl(kRtAnyFd, (unsigned long)cmd, &q) != 0)
+                return done ? (ssize_t)done : -1;
+            a += chunk;
+            p += chunk;
+            done += chunk;
+        }
+        return (ssize_t)done;
+    }
+
+    int  pid_ = -1;
+    bool verified_ = false;
+
+    // fd для syscall ioctl: диспетчеру драйвера он безразличен (в handler
+    // не читается), поэтому -1 — без открытия чего-либо и без следа в fd.
+    static constexpr int kRtAnyFd = -1;
+};
+
+// Единый экземпляр RT-Hook транспорта (по образцу kernel_transport).
+inline RtHookTransport& rt_hook_transport() {
+    static RtHookTransport t;
+    return t;
+}
+
+// RT-Hook доступен? (хук ioctl отвечает пробой по своей памяти — для
+// меню выбора и --check-driver).
+inline bool rt_hook_available() {
+    RtHookTransport& t = rt_hook_transport();
+    return t.connected() ? true : t.classify().kind == CMD_READ;
 }
 
 // Единый экземпляр транспорта: читает поток отрисовки, дёргают поток
