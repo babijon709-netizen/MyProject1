@@ -117,7 +117,8 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
    На устройстве: `ls -l /proc/<pid чита>/fd/*` — в кернел-режимах
    НЕ должно быть `-> /proc/<pid игры>/mem` (процесс скрыт: «vold»).
 9. Хост-проверка синтаксиса правленных файлов + CI (артефакт
-   `xvcen-arm64-v8a`); `--check-driver` из Termux — коды выхода:
+   `xvcen-arm64-v8a`). При изменении RT-Dev: `python3 scripts/verify_rt_dev_archive.py`
+   должен подтвердить все модули архива. `--check-driver` из Termux — коды выхода:
    0 = драйвер работает, 1 = ничего не найдено, 2 = драйвер есть, коды
    не подтверждены. `dump` из Termux (игра запущена) — коды выхода:
    0 = метадата сохранена, 1 = игра не найдена / транспорт не привязался,
@@ -172,6 +173,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 | `jni/src/main.cpp` | порядок старта, `--check-driver`, teardown |
 | `reversing/NOTES_5.10.md` | протокол FT 5.10 (auth/чтение/запись, эмуляция до живого R/W) |
 | `reversing/NOTES_RT_DEV.md` | RT-Dev: RTkernel, /dev ABI 0x801/0x802 для всех модулей архива |
+| `scripts/verify_rt_dev_archive.py` | статическая ABI-проверка всех RT-Dev модулей из загруженного архива |
 | `reversing/NOTES_FT_SWEEP.md` | FT: все 34 сборки drivers.7z, упаковка/кейстрим |
 
 ## 8. Как обычно ломают кернел-режимы (анти-паттерны)
