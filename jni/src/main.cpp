@@ -40,7 +40,7 @@
 //                                                  запущенной игры в benzware/dump/
 // Печатает: root/не root, ядро, семейство сокета FT-драйвера и класс маячка,
 // живые пробы команд по собственной памяти (оба известных протокола FT),
-// RT-Dev (/dev/BYNb), RT-Hook (перехваченный syscall ioctl),
+// RT-Dev (/dev/[A-GNY]{1,6}), RT-Hook (перехваченный syscall ioctl),
 // выбранный протокол и коды чтения/записи, а в режиме скана — карту всех кодов
 // 0..0x7FF, которые двигают данные. Классы независимы: достаточно любого
 // подтверждённого. Коды выхода: 0 — какой-то кернел-транспорт готов,
@@ -122,8 +122,8 @@ static int Run(bool full_scan) {
         }
     }
 
-    // 2б) RT-Dev (RTkernel из загруженного архива): fixed char-устройство
-    //     /dev/BYNb. Проверяем чтение/запись 0x801/0x802 по собственной памяти.
+    // 2б) RT-Dev (RTkernel из загруженного архива): char-устройство со
+    //     случайным именем /dev/[A-GNY]{1,6}. Проверяем R/W 0x801/0x802 по себе.
     bool rt_dev_ok = false;
     {
         memio::RtDevTransport& rt = memio::rt_dev_transport();
@@ -133,11 +133,11 @@ static int Run(bool full_scan) {
             printf("  чтение 0x801 / запись 0x802: OK (своя память)\n");
             rt_dev_ok = true;
         } else if (rp.err == ENOENT) {
-            printf("RT-Dev         : /dev/BYNb не найден (RTkernel не загружен)\n");
+            printf("RT-Dev         : узел /dev/[A-GNY]{1,6} не найден (RTkernel не загружен)\n");
         } else if (rp.err != 0) {
-            printf("RT-Dev         : /dev/BYNb не подтвердил ABI 0x801/0x802, errno %d\n", rp.err);
+            printf("RT-Dev         : RTkernel-кандидат не подтвердил ABI 0x801/0x802, errno %d\n", rp.err);
         } else {
-            printf("RT-Dev         : /dev/BYNb не двигал данные\n");
+            printf("RT-Dev         : RTkernel-кандидат не двигал данные\n");
         }
     }
 

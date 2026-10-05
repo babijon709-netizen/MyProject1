@@ -2,8 +2,8 @@
 // mode_select.h — экран выбора способа чтения ПЕРЕД запуском чита.
 //
 // Минималистичный экран: заголовок «Способ чтения» по центру сверху и четыре
-// кнопки сеткой 2х2 — «Прямое чтение», «FT-Драйвер», «RT-Dev» (`/dev/BYNb`,
-// ioctl 0x801/0x802) и «RT-Hook» (syscall ioctl 0x259/0x25a).
+// кнопки сеткой 2х2 — «Прямое чтение», «FT-Драйвер», «RT-Dev» (случайный
+// `/dev/[A-GNY]{1,6}`, ioctl 0x801/0x802) и «RT-Hook» (syscall ioctl 0x259/0x25a).
 // Без фона, подписей и строк состояния: причины отказа приходят тостом по
 // тапу, повторный тап по кнопке драйвера перепроверяет драйвер (прошить
 // .sh можно и после запуска).
@@ -42,7 +42,7 @@ namespace modesel {
 enum Mode {
     MODE_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
     MODE_KERNEL   = 1,   // сокет драйвера bing-класса — «FT-Драйвер»
-    MODE_RT_DEV   = 2,   // /dev/BYNb RT-Dev — «RT-Dev»
+    MODE_RT_DEV   = 2,   // /dev/[A-GNY]{1,6} RT-Dev — «RT-Dev»
     MODE_RT_HOOK  = 3,   // syscall ioctl hookdd/gynhdd — «RT-Hook»
 };
 
@@ -222,9 +222,9 @@ static bool RunModeSelect() {
             ImGui::SetCursorScreenPos({bx, by2});
             if (ModeButton("##mode_rt_dev", btnW, btnH,
                            XS("RT-Dev"), rt_dev, true, fs)) {
-                // RT-Dev создаёт fixed root-only char-узел /dev/BYNb и
-                // принимает ioctl 0x801/0x802. Повторный тап перепроверяет
-                // узел: модуль можно прошить уже после запуска чита.
+                // RT-Dev создаёт random root-only char-узел из точного
+                // паттерна /dev/[A-GNY]{1,6} и принимает ioctl 0x801/0x802.
+                // Повторный тап пересканирует узлы: модуль можно прошить после старта.
                 if (geteuid() != 0) {
                     PlaySound(SND_CLICK);
                     ShowToast(XS("RT-Dev: нет root — запусти чит от su"));

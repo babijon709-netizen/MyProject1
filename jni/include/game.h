@@ -118,7 +118,7 @@ void          esp_mem_frame_begin();
 enum EspMemBackend {
     ESP_MEM_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
     ESP_MEM_FT       = 1,   // сокет драйвера bing-класса — «FT-Драйвер»
-    ESP_MEM_RT_DEV   = 2,   // /dev/BYNb RT-Dev — «RT-Dev»
+    ESP_MEM_RT_DEV   = 2,   // /dev/[A-GNY]{1,6} RT-Dev — «RT-Dev»
     ESP_MEM_RT_HOOK  = 3,   // syscall ioctl hookdd/gynhdd — «RT-Hook»
 };
 void          esp_set_mem_backend(int backend);
