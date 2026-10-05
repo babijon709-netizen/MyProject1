@@ -31,7 +31,7 @@ typedef khronos_uint32_t EGLenum;
 typedef khronos_int32_t EGLAttrib;
 typedef void* EGLDisplay; typedef void* EGLSurface; typedef void* EGLConfig;
 typedef void* EGLContext; typedef void* EGLImageKHR;
-typedef intptr_t EGLNativeDisplayType; typedef intptr_t EGLNativeWindowType;
+typedef intptr_t EGLNativeDisplayType; typedef void* EGLNativeWindowType;
 #define EGL_DEFAULT_DISPLAY ((EGLNativeDisplayType)0)
 #define EGL_NO_DISPLAY ((EGLDisplay)0)
 #define EGL_NO_SURFACE ((EGLSurface)0)
@@ -50,6 +50,10 @@ typedef intptr_t EGLNativeDisplayType; typedef intptr_t EGLNativeWindowType;
 #define EGL_STENCIL_SIZE 0x3026
 #define EGL_SAMPLES 0x3031
 #define EGL_NONE 0x3038
+#define EGL_FALSE 0
+#define EGL_TRUE 1
+#define EGL_BUFFER_SIZE 0x3020
+#define EGL_NATIVE_VISUAL_ID 0x302E
 #define EGL_WIDTH 0x3057
 #define EGL_HEIGHT 0x3056
 #define EGL_GL_COLORSPACE_KHR 0x3092
@@ -226,6 +230,10 @@ typedef void (GL_APIENTRY *PFNGLBINDVERTEXARRAYPROC)(GLuint);
 #define GL_MIN 0x8007
 #define GL_MAX 0x8008
 #define GL_FRAMEBUFFER 0x8D40
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_FRAMEBUFFER_BINDING 0x8CA6
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
 extern "C" {
 void glActiveTexture(GLenum);
 void glAttachShader(GLuint, GLuint);
@@ -234,8 +242,11 @@ void glBindTexture(GLenum, GLuint);
 void glBindVertexArray(GLuint);
 void glBlendEquation(GLenum);
 void glBlendEquationSeparate(GLenum, GLenum);
-void glBlendFunc(GLenum, GLenum, GLenum, GLenum);
+void glBlendFunc(GLenum, GLenum);
 void glBlendFuncSeparate(GLenum, GLenum, GLenum, GLenum);
+void glBlitFramebuffer(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+void glFramebufferTexture2D(GLenum, GLenum, GLenum, GLuint, GLint);
+void glGetBooleanv(GLenum, GLboolean*);
 void glBufferData(GLenum, GLsizeiptr, const void*, GLenum);
 void glBufferSubData(GLenum, GLintptr, GLsizeiptr, const void*);
 void glClear(GLbitfield);
@@ -279,6 +290,7 @@ void glTexImage2D(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum,
 void glTexSubImage2D(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*);
 void glTexParameteri(GLenum, GLenum, GLint);
 void glUniform1i(GLint, GLint);
+void glUniform1f(GLint, GLfloat);
 void glUniformMatrix4fv(GLint, GLsizei, GLboolean, const GLfloat*);
 void glUseProgram(GLuint);
 void glVertexAttribPointer(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
@@ -300,6 +312,232 @@ EOF
 cat > .stubs/GLES3/gl32.h <<'EOF'
 #pragma once
 #include <GLES3/gl3.h>
+EOF
+cat > .stubs/android/keycodes.h <<'EOF'
+#pragma once
+#define AKEYCODE_UNKNOWN 0
+#define AKEYCODE_SOFT_LEFT 1
+#define AKEYCODE_SOFT_RIGHT 2
+#define AKEYCODE_HOME 3
+#define AKEYCODE_BACK 4
+#define AKEYCODE_CALL 5
+#define AKEYCODE_ENDCALL 6
+#define AKEYCODE_0 7
+#define AKEYCODE_1 8
+#define AKEYCODE_2 9
+#define AKEYCODE_3 10
+#define AKEYCODE_4 11
+#define AKEYCODE_5 12
+#define AKEYCODE_6 13
+#define AKEYCODE_7 14
+#define AKEYCODE_8 15
+#define AKEYCODE_9 16
+#define AKEYCODE_STAR 17
+#define AKEYCODE_POUND 18
+#define AKEYCODE_DPAD_CENTER 19
+#define AKEYCODE_DPAD_UP 20
+#define AKEYCODE_DPAD_DOWN 21
+#define AKEYCODE_DPAD_LEFT 22
+#define AKEYCODE_DPAD_RIGHT 23
+#define AKEYCODE_CENTER 24
+#define AKEYCODE_VOLUME_UP 25
+#define AKEYCODE_VOLUME_DOWN 26
+#define AKEYCODE_POWER 27
+#define AKEYCODE_CAMERA 28
+#define AKEYCODE_CLEAR 29
+#define AKEYCODE_A 30
+#define AKEYCODE_B 31
+#define AKEYCODE_C 32
+#define AKEYCODE_D 33
+#define AKEYCODE_E 34
+#define AKEYCODE_F 35
+#define AKEYCODE_G 36
+#define AKEYCODE_H 37
+#define AKEYCODE_I 38
+#define AKEYCODE_J 39
+#define AKEYCODE_K 40
+#define AKEYCODE_L 41
+#define AKEYCODE_M 42
+#define AKEYCODE_N 43
+#define AKEYCODE_O 44
+#define AKEYCODE_P 45
+#define AKEYCODE_Q 46
+#define AKEYCODE_R 47
+#define AKEYCODE_S 48
+#define AKEYCODE_T 49
+#define AKEYCODE_U 50
+#define AKEYCODE_V 51
+#define AKEYCODE_W 52
+#define AKEYCODE_X 53
+#define AKEYCODE_Y 54
+#define AKEYCODE_Z 55
+#define AKEYCODE_COMMA 56
+#define AKEYCODE_PERIOD 57
+#define AKEYCODE_ALT_LEFT 58
+#define AKEYCODE_SHIFT_LEFT 59
+#define AKEYCODE_SPACE 60
+#define AKEYCODE_TAB 61
+#define AKEYCODE_SEMICOLON 62
+#define AKEYCODE_APOSTROPHE 63
+#define AKEYCODE_SLASH 64
+#define AKEYCODE_AT 65
+#define AKEYCODE_ENTER 66
+#define AKEYCODE_DEL 67
+#define AKEYCODE_GRAVE 68
+#define AKEYCODE_MINUS 69
+#define AKEYCODE_EQUALS 70
+#define AKEYCODE_LEFT_BRACKET 71
+#define AKEYCODE_RIGHT_BRACKET 72
+#define AKEYCODE_BACKSLASH 73
+#define AKEYCODE_ALT_RIGHT 74
+#define AKEYCODE_SHIFT_RIGHT 75
+#define AKEYCODE_NUM 76
+#define AKEYCODE_PLUS 81
+#define AKEYCODE_MENU 82
+#define AKEYCODE_NOTIFICATION 83
+#define AKEYCODE_SEARCH 84
+#define AKEYCODE_MEDIA_PLAY_PAUSE 85
+#define AKEYCODE_MEDIA_PLAY 86
+#define AKEYCODE_MEDIA_STOP 87
+#define AKEYCODE_MEDIA_NEXT 88
+#define AKEYCODE_MEDIA_PREVIOUS 89
+#define AKEYCODE_MEDIA_REWIND 90
+#define AKEYCODE_MEDIA_FAST_FORWARD 91
+#define AKEYCODE_MUTE 92
+#define AKEYCODE_PAGE_UP 93
+#define AKEYCODE_PAGE_DOWN 94
+#define AKEYCODE_PICTSYMBOLS 95
+#define AKEYCODE_SWITCH_CHARSET 96
+#define AKEYCODE_FORWARD_DEL 112
+#define AKEYCODE_CTRL_LEFT 129
+#define AKEYCODE_CTRL_RIGHT 130
+#define AKEYCODE_CAPS_LOCK 115
+#define AKEYCODE_SCROLL_LOCK 116
+#define AKEYCODE_ESCAPE 111
+#define AKEYCODE_SYSRQ 100
+#define AKEYCODE_BREAK 103
+#define AKEYCODE_MOVE_HOME 122
+#define AKEYCODE_MOVE_END 123
+#define AKEYCODE_INSERT 124
+#define AKEYCODE_F1 131
+#define AKEYCODE_F2 132
+#define AKEYCODE_F3 133
+#define AKEYCODE_F4 134
+#define AKEYCODE_F5 135
+#define AKEYCODE_F6 136
+#define AKEYCODE_F7 137
+#define AKEYCODE_F8 138
+#define AKEYCODE_F9 139
+#define AKEYCODE_F10 140
+#define AKEYCODE_F11 141
+#define AKEYCODE_F12 142
+#define AKEYCODE_NUM_LOCK 143
+#define AKEYCODE_META_LEFT 147
+#define AKEYCODE_META_RIGHT 148
+#define AKEYCODE_NUMPAD_0 158
+#define AKEYCODE_NUMPAD_1 159
+#define AKEYCODE_NUMPAD_2 160
+#define AKEYCODE_NUMPAD_3 161
+#define AKEYCODE_NUMPAD_4 162
+#define AKEYCODE_NUMPAD_5 163
+#define AKEYCODE_NUMPAD_6 164
+#define AKEYCODE_NUMPAD_7 165
+#define AKEYCODE_NUMPAD_8 166
+#define AKEYCODE_NUMPAD_9 167
+#define AKEYCODE_NUMPAD_DIVIDE 168
+#define AKEYCODE_NUMPAD_MULTIPLY 169
+#define AKEYCODE_NUMPAD_SUBTRACT 170
+#define AKEYCODE_NUMPAD_ADD 171
+#define AKEYCODE_NUMPAD_DOT 172
+#define AKEYCODE_NUMPAD_COMMA 173
+#define AKEYCODE_NUMPAD_ENTER 174
+#define AKEYCODE_NUMPAD_EQUALS 175
+EOF
+cat > .stubs/android/input.h <<'EOF'
+#pragma once
+#include <cstdint>
+#include <android/keycodes.h>
+
+struct AInputEvent;
+typedef struct AInputEvent AInputEvent;
+struct AInputQueue;
+typedef struct AInputQueue AInputQueue;
+struct AKeyEvent;
+typedef struct AKeyEvent AKeyEvent;
+struct AMotionEvent;
+typedef struct AMotionEvent AMotionEvent;
+
+enum {
+    AINPUT_EVENT_TYPE_KEY = 1,
+    AINPUT_EVENT_TYPE_MOTION = 2,
+};
+
+#define AKEY_EVENT_ACTION_DOWN 0
+#define AKEY_EVENT_ACTION_UP 1
+
+enum {
+    AMOTION_EVENT_ACTION_DOWN = 0,
+    AMOTION_EVENT_ACTION_UP = 1,
+    AMOTION_EVENT_ACTION_MOVE = 2,
+    AMOTION_EVENT_ACTION_CANCEL = 3,
+    AMOTION_EVENT_ACTION_OUTSIDE = 4,
+    AMOTION_EVENT_ACTION_POINTER_DOWN = 5,
+    AMOTION_EVENT_ACTION_POINTER_UP = 6,
+    AMOTION_EVENT_ACTION_HOVER_MOVE = 7,
+    AMOTION_EVENT_ACTION_SCROLL = 8,
+    AMOTION_EVENT_ACTION_HOVER_ENTER = 9,
+    AMOTION_EVENT_ACTION_HOVER_EXIT = 10,
+    AMOTION_EVENT_ACTION_BUTTON_PRESS = 5,
+    AMOTION_EVENT_ACTION_BUTTON_RELEASE = 6,
+    AMOTION_EVENT_ACTION_MASK = 0xff,
+    AMOTION_EVENT_ACTION_POINTER_INDEX_MASK = 0xff00,
+    AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT = 8,
+};
+
+#define AMOTION_EVENT_BUTTON_PRIMARY (1 << 0)
+#define AMOTION_EVENT_BUTTON_SECONDARY (1 << 1)
+#define AMOTION_EVENT_BUTTON_TERTIARY (1 << 2)
+#define AMOTION_EVENT_BUTTON_NAV (1 << 3)
+#define AMOTION_EVENT_BUTTON_CIRCLE (1 << 4)
+#define AMOTION_EVENT_BUTTON_SQUARE (1 << 5)
+
+enum {
+    AMOTION_EVENT_TOOL_TYPE_UNKNOWN = 0,
+    AMOTION_EVENT_TOOL_TYPE_FINGER = 1,
+    AMOTION_EVENT_TOOL_TYPE_STYLUS = 2,
+    AMOTION_EVENT_TOOL_TYPE_MOUSE = 3,
+    AMOTION_EVENT_TOOL_TYPE_ERASER = 4,
+};
+
+#define AMOTION_EVENT_AXIS_X 0
+#define AMOTION_EVENT_AXIS_Y 1
+#define AMOTION_EVENT_AXIS_PRESSURE 2
+#define AMOTION_EVENT_AXIS_SIZE 3
+#define AMOTION_EVENT_AXIS_ORIENTATION 4
+#define AMOTION_EVENT_AXIS_TOOL_MAJOR 5
+#define AMOTION_EVENT_AXIS_TOOL_MINOR 6
+#define AMOTION_EVENT_AXIS_FINGER_MAJOR 7
+#define AMOTION_EVENT_AXIS_FINGER_MINOR 8
+#define AMOTION_EVENT_AXIS_HSCROLL 9
+#define AMOTION_EVENT_AXIS_VSCROLL 10
+
+#define AMETA_SHIFT_ON 0x0001
+#define AMETA_SYM_ON 0x0004
+#define AMETA_ALT_ON 0x0200
+#define AMETA_META_ON 0x2000
+#define AMETA_CTRL_ON 0x1000
+
+static inline int AInputEvent_getType(const AInputEvent*) { return 0; }
+static inline int AKeyEvent_getAction(const AInputEvent*) { return 0; }
+static inline int AKeyEvent_getKeyCode(const AInputEvent*) { return 0; }
+static inline int AKeyEvent_getMetaState(const AInputEvent*) { return 0; }
+static inline int AKeyEvent_getScanCode(const AInputEvent*) { return 0; }
+static inline int AMotionEvent_getAction(const AInputEvent*) { return 0; }
+static inline int AMotionEvent_getToolType(const AInputEvent*, int32_t) { return 0; }
+static inline float AMotionEvent_getX(const AInputEvent*, int32_t) { return 0.f; }
+static inline float AMotionEvent_getY(const AInputEvent*, int32_t) { return 0.f; }
+static inline int AMotionEvent_getButtonState(const AInputEvent*) { return 0; }
+static inline float AMotionEvent_getAxisValue(const AInputEvent*, int32_t, int32_t) { return 0.f; }
 EOF
 cat > .stubs/android/rect.h <<'EOF'
 #pragma once

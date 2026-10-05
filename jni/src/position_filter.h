@@ -118,10 +118,14 @@ inline bool filter(State& track, bool read_ok, Vec3& pos, const Vec3& vel,
         const float step_limit = kPosJumpSameSpot + kTransportMaxSpeed * fdt;
         if (step > 0.0001F && step <= step_limit) {
             pending_step = {jx, jy, jz}; pending_len = step; pending_valid = true;
-            if (!same && track.have_jump_step && track.jump_step_len > 0.0001F) {
-                const float dotn = (jx * track.jump_step.x + jy * track.jump_step.y +
-                                    jz * track.jump_step.z) / (step * track.jump_step_len);
-                if (dotn > 0.25F) same = true;  // тот же курс — продлеваем ломаную
+            if (!same) {
+                if (!track.have_jump_step) {
+                    same = true;
+                } else if (track.jump_step_len > 0.0001F) {
+                    const float dotn = (jx * track.jump_step.x + jy * track.jump_step.y +
+                                        jz * track.jump_step.z) / (step * track.jump_step_len);
+                    if (dotn > 0.25F) same = true;  // тот же курс — продлеваем ломаную
+                }
             }
         }
     }
