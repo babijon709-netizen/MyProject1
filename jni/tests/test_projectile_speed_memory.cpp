@@ -82,7 +82,7 @@ void check_offset(uint64_t offset, const char* label) {
     float speed = 0.f;
     CHECK(controller.status == viewmodel::Status::Active, label);
     CHECK(io.read(kPrefab + go_active::SHAFTEDPROJECTILE_LAUNCH_SPEED, speed), "accelerated speed readable");
-    CHECK(speed == 50.f * projectile_speed::kMultiplier, "launch speed accelerated");
+    CHECK(speed == projectile_speed::kMaxLaunchSpeed, "launch speed is maximum");
     const uint64_t none = 0;
     io.seed(kFp + go_active::FPMANAGER_CURRENT_OBJECT, none);
     controller.tick(1, 0x40000, kPlayer, true);

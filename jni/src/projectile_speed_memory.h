@@ -7,7 +7,9 @@
 #include <initializer_list>
 
 namespace projectile_speed {
-inline constexpr float kMultiplier = 20.f;
+// Highest bounded launch speed used by the physical-projectile integrator.
+// Keep it finite and fixed rather than multiplying a weapon-specific value.
+inline constexpr float kMaxLaunchSpeed = 10000.f;
 inline constexpr const char* kShaftedProjectile = "ShaftedProjectile";
 inline constexpr const char* kOxide = "Oxide";
 
@@ -146,9 +148,7 @@ template<class IO> class Controller {
             speed_.original = current;
         speed_.address = address;
 
-        float wanted = speed_.original * kMultiplier;
-        if (!viewmodel::finite(wanted) || wanted < 0.01f) return false;
-        if (wanted > 10000.f) wanted = 10000.f;
+        const float wanted = kMaxLaunchSpeed;
         speed_.owned = true; // retain restoration information on write failure
         if (current == wanted) { speed_.last = wanted; return true; }
         if (!io_.write_heap(address, wanted)) return false;
