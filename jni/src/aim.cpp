@@ -215,7 +215,7 @@ struct AimPick {
 // остался бы ноль — он читается как «цепочка не подтвердилась», хотя проверка
 // могла ответить честно и просто «прицела нет».
 static int  s_adsState  = -1;   // 1 в прицеле, 0 нет, -1 режим выключен
-static int  s_adsSource = 0;    // 1 Aim, 2 isAiming, 3 aimFOV, 0 не подтвердилась
+static int  s_adsSource = 0;    // 1 Aim, 2 isAiming, 0 не подтвердилась
 
 static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     g_aimActive = false;
@@ -1381,75 +1381,41 @@ static void AimLogTick(float dt) {
 
 // ====================== Мемори-аим: «память» ===============================
 //
-// ЖЁСТКИЙ ЛОК кости абсолютным углом. Запись идёт в накопитель MouseLook —
-// тот самый, из которого игра каждый кадр разворачивает поворот камеры:
-//
-//     angles = clamp(angles + input * m_Sensitivity)      (MouseLook.ZJo)
-//
-// Накопитель уже в градусах. В него кладётся направление кости, полученное
-// из текущего накопителя и полного остатка до цели. Петля получается
-// структурно неколеблемой:
-//
-//   * захват за один такт: игру запись разворачивается в поворот в её
-//     следующем кадре, и прицел встаёт на кость. Дробного схождения «доля
-//     остатка за такт» с потолками и рампой больше нет — значит нет и
-//     маятника первых двух секунд (жалобы 19.09 и 23.09); память — самый
-//     точный режим, как ему и положено: угол кладётся прямо, без пальца и
-//     без обучения коэффициента;
-//   * каждая запись строится от только что прочитанного накопителя. Граница
-//     фаз (игра ~12 fps, запись видна через такт оверлея) не переносит
-//     старый шаг в следующий расчёт;
-//   * шаг не накапливается: стёртая запись (обработчики ввода игры
-//     перезаписывают +0x4C, пока палец игрока на экране) не копится долгом —
-//     следующий такт просто снова кладёт направление кости.
-//
-// Дрожь кости гасится без уменьшения шага. Шаг — ВСЕГДА полный остаток (лок
-// бьёт ровно в кость: доля у цели давала видимое отставание от идущей кости,
-// жалоба 23.09 «мемори отстаёт от головы»). Дрожь отсекает пара фильтров:
-// мёртвая зона (остаток внутри неё — камера стоит) и порог устойчивого
-// однонаправленного дрейфа в полосе у цели — дрожь знак чередует и порог не
-// набирает, настоящее движение знак держит и проходит целиком
-// (см. mem_axis_off; стенды tools/aim/lock_sim.cpp и mem_test: строгая
-// дрожь не двигает камеру вовсе, медленный дрейф 3°/с сходится без следа).
+// Memory-aim работает напрямую через накопитель MouseLook. Новый шаг всегда
+// направлен к выбранной кости, но ограничен и уменьшается вместе с остатком,
+// чтобы лок не дёргался у цели.
 //
 // Знаки накопителя (замер в логах): [0] rotationX = минус тангаж (вверх —
 // меньше), [1] rotationY = рысканье (вправо — больше).
 
-// Мёртвая зона, град. Внутри неё камера стоит: пока остаток меньше зоны,
-// кость «дышит» (анимация двигает точку на сантиметры), и лок дёргал бы
-// камеру на каждый вдох. 0.12° — ~5 см на 25 м, внутри зоны поражения головы.
-static constexpr float kMemDeadDeg  = 0.12f;
-// Полоса «дрожь кости» и порог дрейфа в ней. Выше полосы шаг ВСЕГДА полный:
-// лок бьёт ровно в кость без вычета мёртвой зоны и без долей — прежняя доля
-// 0.4 в полосе 0.6° давала видимое отставание: на идущей цели лок полз к
-// кости со скоростью ~2°/с, а кость уходила на 5-30°/с (жалоба «мемори
-// отстаёт от головы»). Внутри полосы полный шаг выдаётся только при
-// УСТОЙЧИВОМ однонаправленном дрейфе (дрожь кости знак чередует, настоящее
-// движение — нет). Дрожь ±0.15..0.4° при чередовании знака ни разу не
-// набирает порога — камера стоит (проверено стендом).
-static constexpr float kMemJitterBand = 0.45f;
-static constexpr int   kMemDriftStreak = 3;
+// Плавный жёсткий лок: шаг всегда идёт к той же кости, но большой остаток
+// режется по скорости. По мере подхода шаг пропорционален остатку, а последние
+// 0.10° кладутся целиком — прицел приходит точно в кость без резкого первого
+// разворота и без бесконечного хвоста.
+static constexpr float kMemSettleDeg     = 0.10f;
+static constexpr float kMemFollowAt60Hz = 0.48f;
+static constexpr float kMemMaxSpeedDeg  = 108.0f;
 // ACK по накопителю: расхождение с нашей записью, в пределах которого игра
-// запись приняла (свой ввод игрок между тактами не добавлял). Только для
-// диагностики («отклик» в меню) — жёсткому локу подтверждать нечего: он
-// пишет абсолютный угол каждый такт.
+// приняла значение. Это только диагностика отклика в меню.
 static constexpr float kMemAckEps = 0.10f;
 
 static AimMemDiag s_memDiag;
 
 const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
-// Остаток -> шаг к кости. Возврат: полный остаток (лок ровно в кость) или 0
-// (камера на цели / кость дрожит — стоим). Счётчик однонаправленного дрейфа
-// свой у каждой оси.
-static float mem_axis_off(float err, int& streak) {
-    if (fabsf(err) < kMemDeadDeg) { streak = 0; return 0.f; }
-    if (fabsf(err) >= kMemJitterBand) return err;   // настоящее движение — полный лок
-    // Дрожь-зона: полный шаг только при устойчивом дрейфе в одну сторону.
-    const int s = (err > 0.f) ? 1 : -1;
-    streak = (streak * s > 0) ? streak + s : s;
-    if (streak * s >= kMemDriftStreak) return err;
-    return 0.f;
+// Остаток -> гладкий шаг жёсткого лока. В зоне доводки возвращается весь
+// остаток, иначе — пропорциональный шаг с потолком скорости. Коэффициент
+// приведён к dt, поэтому характер лока не меняется вместе с FPS оверлея.
+static float mem_axis_step(float err, float dt) {
+    if (!std::isfinite(err)) return 0.f;
+    if (fabsf(err) <= kMemSettleDeg) return err;
+    const float framesAt60 = dt * 60.f;
+    const float gain = 1.f - powf(1.f - kMemFollowAt60Hz, framesAt60);
+    const float maxStep = kMemMaxSpeedDeg * dt;
+    float step = err * gain;
+    if (step >  maxStep) step =  maxStep;
+    if (step < -maxStep) step = -maxStep;
+    return step;
 }
 
 static void UpdateAimMemory(float dt) {
@@ -1460,9 +1426,6 @@ static void UpdateAimMemory(float dt) {
     // вернёт чтение): по совпадению видно, приняла ли игра запись.
     static float s_lastWriteX = 0.f, s_lastWriteY = 0.f;
     static bool  s_haveLastWrite = false;
-    // Счётчики однонаправленного дрейфа (см. mem_axis_off): по своему на ось.
-    static int s_streakYaw = 0, s_streakPitch = 0;
-
     float sw = 0.f, sh = 0.f;
     int why = 0;
     if (!AimBegin(dt, sw, sh, &why)) {
@@ -1470,7 +1433,6 @@ static void UpdateAimMemory(float dt) {
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
-        s_streakYaw = s_streakPitch = 0;
         return;
     }
     s_memDiag.inactive = 0;
@@ -1499,7 +1461,6 @@ static void UpdateAimMemory(float dt) {
         // не растёт. Без отметки здесь кадр не отличить от «цели не было».
         ++s_memDiag.read_fail;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
-        s_streakYaw = s_streakPitch = 0;
         return;
     }
 
@@ -1509,7 +1470,6 @@ static void UpdateAimMemory(float dt) {
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
-        s_streakYaw = s_streakPitch = 0;
         return;
     }
     s_memDiag.no_target = 0;
@@ -1517,7 +1477,6 @@ static void UpdateAimMemory(float dt) {
         // Другая цель: подтверждение прошлой записи и дрейф по прежней кости
         // к ней не относятся.
         s_haveLastWrite = false;
-        s_streakYaw = s_streakPitch = 0;
     }
 
     // ---- ACK по накопителю --------------------------------------------------
@@ -1552,22 +1511,17 @@ static void UpdateAimMemory(float dt) {
         s_haveLast = false;
     }
 
-    // ---- жёсткий лок ---------------------------------------------------------
-    // Шаг по каждой оси — ПОЛНЫЙ остаток: лок бьёт ровно в кость, без вычета
-    // мёртвой зоны (прежний вычет сажал камеру в 0.12° ОТ кости, а доля в
-    // полосе у цели давала ползучее отставание на идущей цели). Ноль — камера
-    // на цели или кость дрожит: писать нечего (см. mem_axis_off).
-    const float offYaw   = mem_axis_off(best.yaw,   s_streakYaw);
-    const float offPitch = mem_axis_off(best.pitch, s_streakPitch);
+    // ---- плавный жёсткий лок --------------------------------------------------
+    const float offYaw   = mem_axis_step(best.yaw, dt);
+    const float offPitch = mem_axis_step(best.pitch, dt);
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         ++s_memDiag.on_target;
         return;
     }
 
-    // Направление кости: накопитель MouseLook хранит текущую ориентацию
-    // самой игры, поэтому добавляем к нему полный остаток. Внутренний
-    // источник углов ESP уже учтён при расчёте best.
+    // Накопитель MouseLook хранит текущую ориентацию игры. Прибавляем только
+    // сглаженный остаток; источник углов ESP уже учтён при расчёте best.
     const float writeY = WrapDeg180(accY + offYaw);
     const float writeX = WrapDeg180(accX - offPitch);
 

@@ -4321,7 +4321,6 @@ struct LocalAimState {
     uint64_t aim_activity = 0;
     uint64_t fp_manager = 0;
     uint64_t weapon = 0;
-    int      revalidate = 0;
 };
 static LocalAimState g_aim_state{};
 
@@ -6386,69 +6385,45 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 // ===================== Local player aim (ADS) state =====================
 
 static bool read_local_aim_state() {
-    uint64_t local = resolve_local_player();
+    const uint64_t local = resolve_local_player();
     if (!local) { g_aim_state = {}; return false; }
 
-    // Cheap fast path on cached pointers; re-validate the chain periodically.
-    if (g_aim_state.aim_activity && --g_aim_state.revalidate > 0) {
-        uint8_t active = 0;
-        if (rd_exact(g_aim_state.aim_activity + ACTIVITY_ACTIVE_FLAG, active)) {
-            g_aim_state.aiming = (active != 0);
-            g_aim_state.source = 1;
-            return true;
-        }
-    }
-    if (!g_aim_state.aim_activity && g_aim_state.weapon && --g_aim_state.revalidate > 0) {
-        uint8_t is_aiming = 0;
-        if (rd_ptr(g_aim_state.weapon + FPOBJECT_PLAYER_BACKREF) == local &&
-            rd_exact(g_aim_state.weapon + FPWEAPON_IS_AIMING, is_aiming)) {
-            g_aim_state.aiming = (is_aiming != 0);
-            g_aim_state.source = 2;
-            return true;
-        }
-    }
-
+    // ADS — короткоживущий флаг. После респавна старый PlayerManager и его Aim
+    // activity могут оставаться доступными ещё несколько кадров, поэтому здесь
+    // нет кэша: каждый тик читается цепочка именно текущего локального игрока.
     LocalAimState fresh{};
-    fresh.revalidate = 60;
 
-    // Primary: PlayerManager.playerEventHandler.Aim.Active
-    uint64_t handler = rd_ptr(local + PLAYER_EVENT_HANDLER);
+    // Primary: PlayerManager.playerEventHandler.Aim.Active.
+    const uint64_t handler = rd_ptr(local + PLAYER_EVENT_HANDLER);
     if (handler && rd_ptr(handler + EVENT_HANDLER_MANAGER_BACKREF) == local) {
-        uint64_t activity = rd_ptr(handler + EVENT_HANDLER_AIM_ACTIVITY);
+        const uint64_t activity = rd_ptr(handler + EVENT_HANDLER_AIM_ACTIVITY);
         uint8_t active = 0;
         if (activity && rd_exact(activity + ACTIVITY_ACTIVE_FLAG, active) && active <= 1) {
             fresh.event_handler = handler;
             fresh.aim_activity = activity;
-            fresh.aiming = (active != 0);
+            fresh.aiming = active != 0;
             fresh.source = 1;
             g_aim_state = fresh;
             return true;
         }
     }
 
-    // Fallback: current first-person weapon isAiming flag.
-    uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
+    // Fallback: current first-person weapon isAiming flag. The visual FOV blend
+    // deliberately is not used: it decays after leaving ADS and would keep the
+    // aimbot active through that transition.
+    const uint64_t fp_manager = rd_ptr(local + PLAYER_FP_MANAGER);
     if (fp_manager) {
-        uint64_t weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_WEAPON);
+        const uint64_t weapon = rd_ptr(fp_manager + FPMANAGER_CURRENT_WEAPON);
         if (weapon && rd_ptr(weapon + FPOBJECT_PLAYER_BACKREF) == local) {
             uint8_t is_aiming = 0;
             if (rd_exact(weapon + FPWEAPON_IS_AIMING, is_aiming) && is_aiming <= 1) {
                 fresh.fp_manager = fp_manager;
                 fresh.weapon = weapon;
-                fresh.aiming = (is_aiming != 0);
+                fresh.aiming = is_aiming != 0;
                 fresh.source = 2;
                 g_aim_state = fresh;
                 return true;
             }
-        }
-        // Last resort: the FOV blend factor FPManager drives toward aimFOV.
-        float blend = 0.0F;
-        if (rd_exact(fp_manager + FPMANAGER_AIM_BLEND, blend) && std::isfinite(blend) && blend >= 0.0F && blend <= 1.0F) {
-            fresh.fp_manager = fp_manager;
-            fresh.aiming = blend > 0.5F;
-            fresh.source = 3;
-            g_aim_state = fresh;
-            return true;
         }
     }
 
@@ -6463,9 +6438,7 @@ bool esp_local_player_is_aiming() {
 }
 
 int esp_local_aim_source() {
-    if (g_pid <= 0 || !g_il2cpp_base) return 0;
-    if (!read_local_aim_state()) return 0;
-    return g_aim_state.source;
+    return (g_pid > 0 && g_il2cpp_base) ? g_aim_state.source : 0;
 }
 
 // ---- Дальность удара ближним орудием: FPMelee.m_MaxReach + hitRadius --------
