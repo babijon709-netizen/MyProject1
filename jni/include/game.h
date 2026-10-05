@@ -118,11 +118,10 @@ void          esp_mem_frame_begin();
 enum EspMemBackend {
     ESP_MEM_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
     ESP_MEM_FT       = 1,   // сокет драйвера bing-класса — «FT-Драйвер»
-    ESP_MEM_QX       = 2,   // /dev-узел драйвера QX — «QX-Драйвер»
-    ESP_MEM_RT       = 3,   // хук syscall ioctl (RT-hook) — «RT-Драйвер»
+    ESP_MEM_RT       = 2,   // /dev-узел RT-Dev — «RT-Dev»
 };
 void          esp_set_mem_backend(int backend);
-// Какой режим активен: true для любого ядерного транспорта (FT/QX).
+// Какой режим активен: true для любого ядерного транспорта (FT/RT).
 bool          esp_mem_backend_kernel();
 // Последняя ошибка транспорта (errno): для тоста «почему привязка не идёт».
 int           esp_mem_last_errno();

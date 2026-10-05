@@ -40,7 +40,7 @@
 //                                                  запущенной игры в benzware/dump/
 // Печатает: root/не root, ядро, семейство сокета FT-драйвера и класс маячка,
 // живые пробы команд по собственной памяти (оба известных протокола FT),
-// QX-драйвер (/dev-узел) и RT-драйвер (хук syscall ioctl), выбранный
+// RT-Dev (случайный /dev-узел), выбранный
 // протокол и коды чтения/записи, а в режиме скана — карту всех кодов
 // 0..0x7FF, которые двигают данные. Классы независимы: достаточно любого
 // подтверждённого. Коды выхода: 0 — какой-то кернел-транспорт готов,
@@ -63,7 +63,7 @@ static int Run(bool full_scan) {
 
     // 1) Поиск семейства сокета FT-драйвера по маячку на пробе socket(fam, 6, 0):
     //    1338 — bing-класс, 126/ENOKEY — gongchuang-класс. Раннего выхода
-    //    здесь НЕТ: QX и RT не имеют сокета, их блоки ниже проверяются
+    //    здесь НЕТ: RT не имеет сокета, его блок ниже проверяется
     //    независимо от этого результата.
     int beacon = 0;
     const int fam = memio::driver_find_family(&beacon);
@@ -122,47 +122,26 @@ static int Run(bool full_scan) {
         }
     }
 
-    // 2б) QX-драйвер (класс wanbai): /dev-узел со случайным именем, команды
-    //     ioctl 0x801/0x802. Пробы по собственной памяти, как у bing.
-    bool qx_ok = false;
-    {
-        memio::QxTransport& qt = memio::qx_transport();
-        const int qfd = qt.connect();
-        if (qfd < 0) {
-            printf("QX-драйвер     : узел не найден (известные имена + эвристика /dev)\n");
-        } else {
-            printf("QX-драйвер     : узел %s, fd %d\n", qt.device_path(), qfd);
-            const memio::CmdProbe qp = qt.classify();
-            if (qp.kind == memio::CMD_READ) {
-                printf("  чтение 0x801 / запись 0x802: OK (своя память)\n");
-                qx_ok = true;
-            } else if (qp.err != 0)
-                printf("  проба: отказ, errno %d (узел открыт, но это не QX или драйвер не отвечает)\n", qp.err);
-            else
-                printf("  проба: данные не двигались\n");
-        }
-    }
-
-    // 2в) RT-драйвер (класс hookdd, RT-hook.7z): не имеет ни сокета, ни
-    //     /dev-узла — подменяет sys_call_table[__NR_ioctl=29]. Проба —
-    //     ioctl(-1, 0x259, ...) по собственной памяти: без драйвера ядро
-    //     отвечает EBADF, с драйвером возвращается 0.
+    // 2б) RT-Dev (RTkernel из загруженного архива): char-устройство с
+    //     генерируемым при загрузке именем. Ищем узел эвристикой и проверяем
+    //     чтение/запись 0x801/0x802 по собственной памяти.
     bool rt_ok = false;
     {
-        memio::RtTransport& rtt = memio::rt_transport();
-        const memio::CmdProbe rp = rtt.classify();
-        if (rp.kind == memio::CMD_READ) {
-            printf("RT-драйвер     : хук syscall ioctl стоит\n");
-            printf("  чтение 0x259 / запись 0x25a: OK (своя память)\n");
-            rt_ok = true;
-        } else if (rp.err == EBADF) {
-            printf("RT-драйвер     : хука нет (ioctl уходит в ядро без перехвата)\n");
-        } else if (rp.err == EPERM) {
-            printf("RT-драйвер     : хук стоит, но проба без root (гейт uid/euid/capable)\n");
-        } else if (rp.err != 0) {
-            printf("RT-драйвер     : проба отказ, errno %d\n", rp.err);
+        memio::RtTransport& rt = memio::rt_transport();
+        const int rfd = rt.connect();
+        if (rfd < 0) {
+            printf("RT-Dev         : узел не найден (случайное имя в /dev)\n");
         } else {
-            printf("RT-драйвер     : ioctl принят, но данные не двигались\n");
+            printf("RT-Dev         : узел %s, fd %d\n", rt.device_path(), rfd);
+            const memio::CmdProbe rp = rt.classify();
+            if (rp.kind == memio::CMD_READ) {
+                printf("  чтение 0x801 / запись 0x802: OK (своя память)\n");
+                rt_ok = true;
+            } else if (rp.err != 0) {
+                printf("  проба: отказ, errno %d (узел открыт, но это не RT-Dev или драйвер не отвечает)\n", rp.err);
+            } else {
+                printf("  проба: данные не двигались\n");
+            }
         }
     }
 
@@ -223,13 +202,8 @@ static int Run(bool full_scan) {
                kt.proto_name(), kt.read_cmd(), kt.write_cmd());
         return 0;
     }
-    if (qx_ok) {
-        printf("итог            : QX готов — чтение 0x801 / запись 0x802; /proc не участвует\n");
-        return 0;
-    }
     if (rt_ok) {
-        printf("итог            : RT готов — хук ioctl, чтение 0x259 / запись 0x25a;\n"
-               "                  ни сокета, ни fd — самый скрытный класс\n");
+        printf("итог            : RT-Dev готов — чтение 0x801 / запись 0x802; /proc не участвует\n");
         return 0;
     }
     if (ft_present) {
@@ -239,9 +213,9 @@ static int Run(bool full_scan) {
                "                  su -c <путь>/xvcen --scan-driver\n");
         return 2;
     }
-    printf("итог            : НИ ОДИН класс драйвера не найден (FT/QX/RT).\n"
+    printf("итог            : НИ ОДИН класс драйвера не найден (FT/RT).\n"
            "   Прошей драйвер под СВОЮ версию ядра (uname -r) скриптом .sh\n"
-           "   (drivers.7z — FT, kernal-based-Esp.zip — QX, RT-hook.7z — RT)\n"
+           "   (drivers.7z — FT, rt dev Драйвера root cheat.zip — RT-Dev)\n"
            "   и повтори проверку. Драйверы не переживают перезагрузку —\n"
            "   после ребута прошивай заново.\n");
     const int fd = ::open("/proc/1/mem", O_RDWR | O_CLOEXEC);

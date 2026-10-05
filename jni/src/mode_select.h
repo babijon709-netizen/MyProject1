@@ -1,10 +1,10 @@
 #pragma once
 // mode_select.h — экран выбора способа чтения ПЕРЕД запуском чита.
 //
-// Минималистичный экран: заголовок «Способ чтения» по центру сверху и четыре
-// кнопки сеткой 2х2 — «Прямое чтение» (/proc/<pid>/mem, как раньше),
-// «FT-Драйвер» (сокет ядерного драйвера, kernel_io.h), «QX-Драйвер»
-// (/dev-узел драйвера QX) и «RT-Драйвер» (хук syscall ioctl, RT-hook).
+// Минималистичный экран: заголовок «Способ чтения» по центру сверху и три
+// кнопки — «Прямое чтение» (/proc/<pid>/mem, как раньше), «FT-Драйвер»
+// (сокет ядерного драйвера, kernel_io.h) и «RT-Dev» (случайный /dev-узел,
+// ioctl 0x801/0x802).
 // Без фона, подписей и строк состояния: причины отказа приходят тостом по
 // тапу, повторный тап по кнопке драйвера перепроверяет драйвер (прошить
 // .sh можно и после запуска).
@@ -43,8 +43,7 @@ namespace modesel {
 enum Mode {
     MODE_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
     MODE_KERNEL   = 1,   // сокет драйвера bing-класса — «FT-Драйвер»
-    MODE_QX       = 2,   // /dev-узел драйвера QX — «QX-Драйвер»
-    MODE_RT       = 3,   // хук syscall ioctl (RT-hook) — «RT-Драйвер»
+    MODE_RT       = 2,   // /dev-узел RT-Dev — «RT-Dev»
 };
 
 // ---- сохранение выбора (.mode, по образцу .lang/.accent в config.cpp) -----
@@ -56,8 +55,7 @@ static std::string ModePath() {
 static void RememberMode(Mode m) {
     mkdir(CfgDir(), 0777);
     std::ofstream f(ModePath(), std::ios::trunc);
-    if (f) f << (m == MODE_KERNEL ? "kernel" : m == MODE_QX ? "qx"
-                       : m == MODE_RT ? "rt" : "external");
+    if (f) f << (m == MODE_KERNEL ? "kernel" : m == MODE_RT ? "rt" : "external");
 }
 
 // ---- кнопка режима (только текст, без подписи) -----------------------------
@@ -110,8 +108,7 @@ static bool RunModeSelect() {
     bool drv = false;          // FT-драйвер отвечает на пробу семейства
     int  fam = -1;             // номер семейства сокета FT-драйвера
     drv = memio::driver_available(&fam);
-    bool qx = memio::qx_available();   // QX-драйвер найден и отвечает
-    bool rt = memio::rt_available();   // RT-драйвер: хук ioctl отвечает
+    bool rt = memio::rt_available();   // RT-Dev найден и отвечает
 
     float fade = 0.f;          // появление 0..1
     int   picked = -1;         // -1 — ещё не выбрали
@@ -149,8 +146,8 @@ static bool RunModeSelect() {
             // Заголовок + кнопки — единый блок ровно по центру экрана
             // (по горизонтали и по вертикали): без фона, только текст
             // с тенью для читаемости поверх экрана под оверлеем.
-            // Кнопок четыре — сетка 2х2 (в один ряд на телефоне уже не
-            // влезают), порядок: экстернал и FT сверху, QX и RT снизу.
+            // Две верхние кнопки — экстернал и FT; RT — по центру нижнего
+            // ряда, чтобы три режима оставались равномерно разнесены.
             const char* title = XS("Способ чтения");
             const float tfs = fs * 1.55f;
             const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
@@ -164,7 +161,7 @@ static bool RunModeSelect() {
             dl->AddText(fn, tfs, {tx + 2.f, ty + 2.f}, IM_COL32(0, 0, 0, 110), title);
             dl->AddText(fn, tfs, {tx, ty}, C::U(C::Txt()), title);
 
-            // Сетка 2х2 под заголовком.
+            // Сетка кнопок под заголовком.
             const float rowW = btnW * 2.f + gap;
             const float by   = ty + tfs + tGap;
             const float bx   = (vw - rowW) * 0.5f;
@@ -210,51 +207,19 @@ static bool RunModeSelect() {
                 }
             }
 
-            ImGui::SetCursorScreenPos({bx, by2});
-            if (ModeButton("##mode_qx", btnW, btnH,
-                           XS("QX-Драйвер"), qx, true, fs)) {
-                // Тап по QX-Драйверу. Порядок тот же, что у FT:
-                //   1) не root — узел драйвера открывается только привилегированным;
-                //   2) не найден — рескан с чистого листа (прошить .sh можно и
-                //      после запуска чита, имя узла при этом новое);
-                //   3) отвечает — режим принят, настоящий экзамен — привязка
-                //      к игре (bind читает ELF-заголовок libil2cpp через QX).
-                if (geteuid() != 0) {
-                    PlaySound(SND_CLICK);
-                    ShowToast(XS("QX: нет root — запусти чит от su"));
-                } else if (!qx) {
-                    memio::qx_transport().invalidate();
-                    qx = memio::qx_available();
-                    if (qx) {
-                        picked = MODE_QX;
-                        PlaySound(SND_SUCCESS);
-                    } else {
-                        PlaySound(SND_CLICK);
-                        ShowToast(XS("QX не найден — прошей .sh своей версии ядра"));
-                    }
-                } else {
-                    picked = MODE_QX;
-                    PlaySound(SND_SUCCESS);
-                }
-            }
-
-            ImGui::SetCursorScreenPos({bx + btnW + gap, by2});
+            ImGui::SetCursorScreenPos({bx + (rowW - btnW) * 0.5f, by2});
             if (ModeButton("##mode_rt", btnW, btnH,
-                           XS("RT-Драйвер"), rt, true, fs)) {
-                // Тап по RT-Драйверу. Драйвер этого класса не имеет ни
-                // сокета, ни /dev-узла — он подменяет syscall ioctl
-                // (sys_call_table[29]), поэтому «рескан» здесь — просто
-                // повторная проба чтения своей памяти через ioctl(-1,
-                // 0x259). Порядок прежний:
-                //   1) не root — команды 0x259 гейтятся (uid/euid/capable);
-                //   2) хук не отвечает — перепробовать (прошить .sh можно и
-                //      после запуска чита; хук снимается командой 0x25e);
-                //   3) отвечает — режим принят, настоящий экзамен —
-                //      привязка к игре (bind читает ELF-заголовок
-                //      libil2cpp через перехваченный ioctl).
+                           XS("RT-Dev"), rt, true, fs)) {
+                // Тап по RT-Dev. Модуль создаёт char-устройство /dev с
+                // случайным именем и принимает ioctl 0x801/0x802. Порядок:
+                //   1) не root — узел не откроется;
+                //   2) не найден — пересканировать /dev: модуль могли прошить
+                //      уже после запуска чита;
+                //   3) отвечает — режим принят, а bind прочитает ELF libil2cpp
+                //      через RT-Dev и подтвердит доступ к игре.
                 if (geteuid() != 0) {
                     PlaySound(SND_CLICK);
-                    ShowToast(XS("RT: нет root — запусти чит от su"));
+                    ShowToast(XS("RT-Dev: нет root — запусти чит от su"));
                 } else if (!rt) {
                     memio::rt_transport().invalidate();
                     rt = memio::rt_available();
@@ -263,7 +228,7 @@ static bool RunModeSelect() {
                         PlaySound(SND_SUCCESS);
                     } else {
                         PlaySound(SND_CLICK);
-                        ShowToast(XS("RT не найден — прошей .sh своей версии ядра"));
+                        ShowToast(XS("RT-Dev не найден — прошей .sh своей версии ядра"));
                     }
                 } else {
                     picked = MODE_RT;
@@ -282,12 +247,10 @@ static bool RunModeSelect() {
     // Достаточно одного вызова до первого bind — весь код чтения выше по
     // стеку работает через memio::Transport и про режимы не знает (mem_io.h).
     const Mode mode = (picked == MODE_KERNEL) ? MODE_KERNEL
-                     : (picked == MODE_QX)     ? MODE_QX
                      : (picked == MODE_RT)     ? MODE_RT
                                                : MODE_EXTERNAL;
     if (picked >= 0) RememberMode(mode);
     esp_set_mem_backend(mode == MODE_KERNEL ? ESP_MEM_FT
-                        : mode == MODE_QX   ? ESP_MEM_QX
                         : mode == MODE_RT   ? ESP_MEM_RT
                                             : ESP_MEM_EXTERNAL);
     return picked >= 0;

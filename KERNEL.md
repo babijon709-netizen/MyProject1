@@ -1,7 +1,7 @@
 # KERNEL.md — конституция кернел-режимов (обязательно к прочтению в новых сессиях)
 
 Документ для ИИ-сессий, которые добавляют или меняют функции чита. Его задача —
-чтобы новые функции **не сломали кернел-режимы (FT/QX/RT)** и не «рассекретили»
+чтобы новые функции **не сломали кернел-режимы (FT/RT)** и не «рассекретили»
 процесс. Если коротко: вся работа с памятью игры идёт через ОДИН выбранный
 пользователем транспорт, и `/proc/<pid>/mem` в кернел-режимах не открывается
 НИКОГДА — ни для чтения, ни для записи, ни «на минутку».
@@ -12,7 +12,7 @@
 
 ## 1. Золотое правило
 
-> В кернел-режимах (FT-Драйвер / QX-Драйвер / RT-Драйвер) процесс чита не
+> В кернел-режимах (FT-Драйвер / RT-Dev) процесс чита не
 > открывает `/proc/<pid игры>/mem` и не использует `process_vm_readv` /
 > `process_vm_writev` / `ptrace`. Вся память игры — через `g_mem`
 > (выбранный транспорт). `/proc/<pid>/maps` — можно и нужно (это карта
@@ -36,8 +36,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
         ├── ProcfsTransport   «Прямое чтение»  /proc/<pid>/mem  (единственное
         │                                                   легальное место mem)
         ├── KernelTransport   «FT-Драйвер»     сокет bing/gongchuang (kernel_io.h)
-        ├── QxTransport       «QX-Драйвер»     /dev-узел, ioctl 0x801/0x802
-        └── RtTransport       «RT-Драйвер»     хук syscall ioctl 0x259/0x25a
+        └── RtTransport       «RT-Dev»     случайный /dev-узел, ioctl 0x801/0x802
 ```
 
 - Назначение: `modesel::RunModeSelect()` → `esp_set_mem_backend()` →
@@ -63,8 +62,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 |---|---|---|---|---|
 | Прямое чтение | — | pread/pwrite `/proc/<pid>/mem` | — | — |
 | FT | bing_rw / gongchuang (drivers.7z) | socket(сем.,4,0); команды getsockopt ИЛИ ioctl (поколение 5.10) | `DriverRwReq` 0x28: pid,pad,addr,size,user_buf,magic=0x1337 | auth 0x300, read 0x301, write 0x302; gong: attach 2, vm 4, pte 5/6 |
-| QX | wanbai (kernal-based-Esp.zip) | `/dev/<имя>` + ioctl | `QxCopyMem` 0x20: pid,pad,addr,buffer,size (не через границу 4К — транспорт чанкует сам) | read 0x801, write 0x802, base 0x803 |
-| RT | hookdd/gynhdd (RT-hook.7z) | syscall ioctl с любым fd (fd диспетчеру безразличен) | `RtCopyMem` 0x20: pid,pad,addr,buffer,size | read 0x259, write 0x25a |
+| RT-Dev | RTkernel (`rt dev Драйвера root cheat.zip`) | char-устройство `/dev/<случайное имя>` + ioctl | `RtDevCopyMem` 0x20: pid,pad,addr,buffer,size (не через границу 4К — транспорт чанкует сам) | read 0x801, write 0x802; base 0x803 |
 
 Особенности, которые нельзя забыть:
 - FT: транспорт выучивается на месте (`detect_protocol`: подсемейство bing
@@ -74,7 +72,8 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
   (отвязка pid), СОКЕТЫ НЕ ЗАКРЫВАТЬ.
 - FT getsockopt: level = pid целевого процесса и он НЕ должен быть
   SOL_SOCKET, иначе команда уйдёт в generic-обработчик сокета (ENOPROTOOPT).
-- RT: у чита нет ни сокета, ни /dev-узла — в fd-листе пусто (самый скрытный).
+- RT-Dev: модуль создаёт root-only char-узел со случайным именем. Транспорт
+  находит его до первого чтения игры и держит один fd до завершения процесса.
 - Все транспорты сами снимают TBI/MTE-метку адреса (`kAddressTagMask`) и
   сами чанкуют запросы, где нужно. Вызывающий передаёт сырой адрес и размер.
 - Размеры структур защищены `static_assert` — при правке раскладки сборка
@@ -149,15 +148,14 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 
 ## 6. Решения пользователя, которые нельзя откатывать
 
-- Четыре кнопки 2×2 на экране выбора: «Прямое чтение», «FT-Драйвер»,
-  «QX-Драйвер», «RT-Драйвер»; заголовок «Способ чтения». Без подписей,
-  пояснений и статусов на экране, без серого фона, блок по центру.
-- QX — ОТДЕЛЬНАЯ третья кнопка, никакого авто-выбора между драйверами.
+- Три кнопки на экране выбора: «Прямое чтение», «FT-Драйвер»,
+  «RT-Dev»; заголовок «Способ чтения». Без подписей, пояснений и
+  статусов на экране, без серого фона, блок по центру.
 - Убраны навсегда: метка KER/EXT у ватермарки, тосты «игра найдена/не
   найдена» при привязке.
 - Никаких фоллбэков между способами чтения во время игры (см. §2).
 - Выбранный режим сохраняется в `/storage/emulated/0/benzware/.mode`
-  (`external`/`kernel`/`qx`/`rt`), но экран выбора показывается каждый
+  (`external`/`kernel`/`rt`), но экран выбора показывается каждый
   запуск.
 
 ## 7. Карта файлов
@@ -165,7 +163,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 | Файл | Роль |
 |---|---|
 | `jni/src/mem_io.h` | Reader, блочный кэш, Transport-интерфейс, ProcfsTransport |
-| `jni/src/kernel_io.h` | KernelTransport (FT: bing+gong, детект протокола), QxTransport, RtTransport — вся специфика драйверов |
+| `jni/src/kernel_io.h` | KernelTransport (FT: bing+gong, детект протокола) и RtTransport — вся специфика драйверов |
 | `jni/src/mode_select.h` | экран выбора режима, `.mode`, единственный вызов `esp_set_mem_backend` |
 | `jni/src/game.cpp` / `jni/include/game.h` | `g_mem`, `esp_set_mem_backend`, `esp_silent_*`, `esp_init` (привязка), `esp_alive_check` |
 | `jni/src/process.cpp` | attach-поток: поиск игры, `esp_init`, проверка живости |
@@ -173,8 +171,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 | `jni/src/stealth.h` | маскировка процесса, unlink/restore бинарника, ptrace-слот |
 | `jni/src/main.cpp` | порядок старта, `--check-driver`, teardown |
 | `reversing/NOTES_5.10.md` | протокол FT 5.10 (auth/чтение/запись, эмуляция до живого R/W) |
-| `reversing/NOTES_QX.md` | протокол QX |
-| `reversing/NOTES_RT.md` | RT: все 22 модуля, поколения установки хука |
+| `reversing/NOTES_RT_DEV.md` | RT-Dev: RTkernel, /dev ABI 0x801/0x802 для всех модулей архива |
 | `reversing/NOTES_FT_SWEEP.md` | FT: все 34 сборки drivers.7z, упаковка/кейстрим |
 
 ## 8. Как обычно ломают кернел-режимы (анти-паттерны)

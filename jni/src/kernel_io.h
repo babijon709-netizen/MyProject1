@@ -66,6 +66,7 @@
 #include <fcntl.h>
 #include <string>
 #include <sys/stat.h>
+#include <time.h>
 #include <sys/types.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -599,28 +600,26 @@ private:
     int  attached_pid_ = -1;   // pid, к которому прицеплен gong-сокет (op2)
 };
 
-// ---- класс 3: QX (wanbai) — /dev/<имя>, ioctl 0x801/0x802/0x803 ------------
+// ---- класс 3: RT-Dev — /dev/<случайное имя>, ioctl 0x801/0x802 ---------
 //
-// Драйверы «QX Perfect core» (пакет QX Perfect core v5): char-устройство в
-// /dev с СЛУЧАЙНЫМ именем (5-6 строчных букв — init_module сам генерирует
-// get_random_u32, скрывается list_del+kobject_del), протокол по эталонному
-// читу (wanbai.hpp) и дизассемблу dispatch_ioctl:
-//   0x801 чтение  {u32 pid; u32 pad; u64 addr; u64 buffer; u64 size} — 0x20;
-//   0x802 запись  — та же структура;
-//   0x803 база модуля {pid; char* name; u64 base} (нами не используется:
-//   базы берём из /proc/<pid>/maps, как раньше);
-//   0x800/0x804 — пустышки (возврат 0), ключа НЕТ: эталонный чит работает
-//   без него, диспетчер проверяет только 0x801..0x805.
-// ВАЖНО: read/write_process_memory транслируют ОДНУ страницу и копируют size
-// байт без проверки границы — запросы режем по границам 4К сами.
-// Ошибка команды — возврат -1 (errno 1/EPERM), как у bing-класса.
+// Пакет «rt dev Драйвера root cheat.zip» содержит RTkernel для ядер
+// 4.9–6.6. Статический разбор всех 23 модулей подтверждает единый ABI:
+// char-устройство с именем, которое init_module генерирует сам, и команды
+// 0x801/0x802 с COPY_MEMOBY (0x20):
+//   u32 pid; pad; u64 addr; u64 buffer; u64 size.
+// 0x800 — OP_INIT_KEY, 0x803 — OP_MODULE_BASE; ни один не нужен Reader:
+// базы по-прежнему берём из /proc/<pid>/maps.
+//
+// read/write_process_memory транслируют одну страницу за запрос, поэтому
+// транспорт режет операции по 4К. Драйвер возвращает 0 при успехе и -1 при
+// ошибке.
 
-constexpr int kQxCmdRead        = 0x801;
-constexpr int kQxCmdWrite       = 0x802;
-constexpr int kQxCmdModuleBase  = 0x803;
+constexpr int kRtDevCmdRead        = 0x801;
+constexpr int kRtDevCmdWrite       = 0x802;
+constexpr int kRtDevCmdModuleBase  = 0x803;
 
 #pragma pack(push, 1)
-struct QxCopyMem {
+struct RtDevCopyMem {
     uint32_t pid;      // +0x00: целевой процесс
     uint32_t pad;      // +0x04
     uint64_t addr;     // +0x08: адрес в памяти игры
@@ -628,11 +627,11 @@ struct QxCopyMem {
     uint64_t size;     // +0x18: сколько байт (не через границу 4К!)
 };
 #pragma pack(pop)
-static_assert(sizeof(QxCopyMem) == 0x20, "размер запроса QX изменился");
+static_assert(sizeof(RtDevCopyMem) == 0x20, "размер запроса RT-Dev изменился");
 
-class QxTransport : public Transport {
+class RtTransport : public Transport {
 public:
-    const char* name() const override { return "qx (драйвер)"; }
+    const char* name() const override { return "rt-dev (драйвер)"; }
 
     // Устройство открывается один раз и живёт, пока живёт процесс чита:
     // драйвер переживает переподключения к игре.
@@ -674,7 +673,7 @@ public:
 
     // Живая проба по СОБСТВЕННОЙ памяти (как classify_cmd у bing): читаем
     // паттерн и пишем в scratch. Подтверждает, что найденное устройство —
-    // действительно QX-драйвер, а не чужой char-dev с похожим именем.
+    // действительно RT-Dev драйвер, а не чужой char-dev с похожим именем.
     CmdProbe classify() {
         CmdProbe r;
         if (!ensure_device()) { r.err = errno ? errno : EIO; return r; }
@@ -697,20 +696,17 @@ public:
         }
         pid_ = save_pid;
         r.err = errno ? errno : EPERM;
-        // Нашли устройство, но это не QX: больше не считаем его найденным.
+        // Нашли устройство, но это не RT-Dev: больше не считаем его найденным.
         invalidate();
         return r;
     }
 
 private:
-    // Найти /dev-узел QX. Известные имена + эвристика эталонного чита:
+    // Найти /dev-узел RT-Dev. Имя генерируется модулем, поэтому используем
     // char-устройство, имя только из строчных букв, без '_','-',';', не
     // gpiochip/std*, uid=gid=0, size 0, atime==ctime, год создания не 1970,
-    // длина имени <= 7. Драйвер сам генерит себе такое имя при загрузке.
-    static bool qx_candidate(const char* name, const struct stat& st) {
-        static const char* kKnown[] = {"wanbai", "CheckMe", "Ckanri", "lanran", "video188"};
-        for (const char* k : kKnown)
-            if (strcmp(name, k) == 0) return true;
+    // длина имени <= 7. Это оставляет лишь случайное имя, которое создаёт модуль.
+    static bool rt_dev_candidate(const char* name, const struct stat& st) {
         const size_t len = strlen(name);
         if (len == 0 || len > 7) return false;
         bool has_lower = false;
@@ -733,12 +729,6 @@ private:
 
     bool ensure_device() {
         if (dev_fd_ >= 0) return true;
-        const char* kDevs[] = {"/dev/wanbai", "/dev/CheckMe", "/dev/Ckanri",
-                               "/dev/lanran", "/dev/video188"};
-        for (const char* path : kDevs) {
-            const int fd = ::open(path, O_RDWR | O_CLOEXEC);
-            if (fd >= 0) { dev_fd_ = fd; dev_path_ = path; return true; }
-        }
         DIR* dir = opendir("/dev");
         if (!dir) { errno = ENOENT; return false; }
         struct dirent* e;
@@ -749,7 +739,7 @@ private:
             snprintf(path, sizeof(path), "/dev/%s", e->d_name);
             struct stat st;
             if (stat(path, &st) != 0) continue;
-            if (!qx_candidate(e->d_name, st)) continue;
+            if (!rt_dev_candidate(e->d_name, st)) continue;
             const int fd = ::open(path, O_RDWR | O_CLOEXEC);
             if (fd < 0) continue;
             dev_fd_ = fd;
@@ -772,13 +762,13 @@ private:
             const uint64_t pageLeft = 0x1000 - (a & 0xfff);
             const size_t chunk = (uint64_t)(len - done) < pageLeft
                                        ? (len - done) : (size_t)pageLeft;
-            QxCopyMem q;
+            RtDevCopyMem q;
             memset(&q, 0, sizeof(q));
             q.pid    = (uint32_t)pid_;
             q.addr   = a;
             q.buffer = (uint64_t)(uintptr_t)p;
             q.size   = (uint64_t)chunk;
-            const int cmd = is_read ? kQxCmdRead : kQxCmdWrite;
+            const int cmd = is_read ? kRtDevCmdRead : kRtDevCmdWrite;
             if (ioctl(dev_fd_, (unsigned long)cmd, &q) != 0)
                 return done ? (ssize_t)done : -1;
             a += chunk;
@@ -794,181 +784,19 @@ private:
     bool verified_ = false;
 };
 
-// Единый экземпляр QX-транспорта (по образцу kernel_transport).
-inline QxTransport& qx_transport() {
-    static QxTransport t;
-    return t;
-}
-
-// Драйвер QX доступен? (устройство находится и отвечает пробой по своей
-// памяти — для меню выбора и --check-driver).
-inline bool qx_available() {
-    QxTransport& t = qx_transport();
-    if (t.connected()) return t.verified() ? true : t.classify().kind == CMD_READ;
-    if (t.connect() < 0) return false;
-    return t.classify().kind == CMD_READ;
-}
-
-// ---- класс 4: RT-hook (hookdd) — хук syscall ioctl, команды 0x259/0x25a ----
-//
-// Драйверы «RT-hook» (архив RT-hook.7z, канал @RTdrivers, автор waangchuan,
-// module hookdd/gynhdd, исходники /root/yijian/gynhdd/: entry.c hook.c
-// memory.h hw_breakpoint.h comm.h cvector.c). Не регистрирует НИ сокет, НИ
-// /dev-узел: init_module патчит sys_call_table[__NR_ioctl=29] (install_hook),
-// страницу таблицы сам делает writable (inline PTE-walk + бит DBM + tlbi),
-// затем самоскрывается (list_del(&module.list) + kobject_del + rb_erase из
-// vmap_area_root/list). Обращение — обычный syscall ioctl с ЛЮБЫМ fd (fd
-// диспетчер НЕ проверяет вовсе); чужие cmd проходят в оригинальный ioctl
-// без изменений, т.е. для остальных процессов всё выглядит как обычно.
-//
-//   0x259 чтение  {u32 pid; u32 pad; u64 addr; u64 buffer; u64 size} — 0x20;
-//   0x25a запись  — та же структура;
-//   0x25b база модуля {u32 pid; char* name; u16 ?; -> u64 base @+0x10}
-//          (root-gated, нами не используется — базы из /proc/<pid>/maps);
-//   0x25d показать процесс / 0x25f скрыть процесс (list_del_rcu + restore);
-//   0x25e снять хук (sys_hook(29, original) + hw_bp exit) — «выгрузка»;
-//   0x260/0x261 аппаратные breakpoints (perf_event: register_user_hw_
-//          breakpoint + счётчик попаданий) — читу не нужны;
-//   0x25c и всё вне 0x259..0x261 — проход в оригинальный ioctl.
-//
-// 0x259/0x25b гейтятся root'ом (uid==0 || euid==0 || capable(CAP_SYS_ADMIN),
-// отказ — printk «noroot» и -1); 0x25a записи гейта НЕ имеют. Структура
-// read/write_process_memory: find_get_pid -> get_pid_task -> get_task_mm ->
-// свой PTE-walk по 4 уровням -> vmap физической страницы + sync кэша; САМИ
-// чанкуют по 4К в цикле (в отличие от QX), статус true(1). hook_ioctl
-// возвращает 0 (успех) / -1 (EPERM). Проба наличия без побочных эффектов:
-// ioctl(-1, 0x259, &req) — без драйвера ядро отвечает EBADF, с драйвером
-// возвращается 0: fd невалиден, но диспетчеру всё равно.
-// След на устройстве: в fd-листе чита НЕТ НИЧЕГО (ни сокета, ни /dev) —
-// самый скрытный из классов; хук виден только из ядра (sys_call_table).
-
-constexpr int kRtCmdRead  = 0x259;   // чтение {pid,addr,buffer,size}
-constexpr int kRtCmdWrite = 0x25a;   // запись — та же структура
-
-#pragma pack(push, 1)
-struct RtCopyMem {
-    uint32_t pid;      // +0x00: целевой процесс
-    uint32_t pad;      // +0x04
-    uint64_t addr;     // +0x08: адрес в памяти игры
-    uint64_t buffer;   // +0x10: наш буфер
-    uint64_t size;     // +0x18: сколько байт
-};
-#pragma pack(pop)
-static_assert(sizeof(RtCopyMem) == 0x20, "размер запроса RT изменился");
-
-class RtTransport : public Transport {
-public:
-    const char* name() const override { return "rt-hook (драйвер)"; }
-
-    // «Открытия» нет: fd не нужен вообще (диспетчер его игнорирует).
-    // Только подтверждаем, что хук стоит, и запоминаем цель.
-    bool open(pid_t pid) override {
-        if (pid <= 0) return false;
-        if (!ensure_driver()) return false;
-        pid_ = (int)pid;
-        return true;
-    }
-    void close() override { pid_ = -1; }
-
-    // Драйвер перезашит (или снят хуком 0x25e) — сбросить подтверждение:
-    // следующая проба ioctl(-1, 0x259) покажет, стоит ли хук снова.
-    void invalidate() {
-        pid_ = -1;
-        verified_ = false;
-    }
-
-    ssize_t read_once(uint64_t addr, void* out, size_t len) override {
-        return rw(true, addr, out, len);
-    }
-    ssize_t write_once(uint64_t addr, const void* in, size_t len) override {
-        return rw(false, addr, const_cast<void*>(in), len);
-    }
-
-    bool connected() const { return verified_; }
-    bool verified()  const { return verified_; }
-
-    // Живая проба по СОБСТВЕННОЙ памяти (как classify у QX): читаем паттерн
-    // и пишем в scratch через ioctl(-1, 0x259/0x25a). Подтверждает, что
-    // syscall ioctl действительно перехвачен и данные двигает драйвер.
-    CmdProbe classify() {
-        CmdProbe r;
-        uint64_t pat[2]    = {0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL};
-        uint64_t mirror[2] = {0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL};
-        const uint64_t pat0 = pat[0], pat1 = pat[1];
-        const int save_pid = pid_;
-        pid_ = (int)getpid();
-        if (rw(true, (uint64_t)(uintptr_t)pat, mirror, sizeof(pat)) == sizeof(pat) &&
-            mirror[0] == pat0 && mirror[1] == pat1) {
-            uint64_t scratch[2] = {1, 1};
-            uint64_t wsrc[2]    = {0xA5A55A5ADEADBEEFULL, 0x0BADC0DE0DDC0FFEULL};
-            if (rw(false, (uint64_t)(uintptr_t)scratch, wsrc, sizeof(scratch)) == sizeof(scratch) &&
-                scratch[0] == wsrc[0] && scratch[1] == wsrc[1]) {
-                r.kind = CMD_READ;   // читает и пишет — транспорт полный
-                verified_ = true;
-                pid_ = save_pid;
-                return r;
-            }
-        }
-        pid_ = save_pid;
-        r.err = errno ? errno : EPERM;
-        verified_ = false;
-        return r;
-    }
-
-private:
-    // Хук стоит? Одна проба чтения своей памяти через ioctl(-1, 0x259).
-    bool ensure_driver() {
-        if (verified_) return true;
-        return classify().kind == CMD_READ;
-    }
-
-    // Запрос. Драйвер 5.10 сам режет по страницам и копирует в цикле, но
-    // чанкинг 4К оставлен: страховка от сборок, где трансляция одна на
-    // запрос (как у QX), — поведение одинаково безопасно для обеих.
-    ssize_t rw(bool is_read, uint64_t addr, void* buf, size_t len) {
-        if (pid_ <= 0 || !buf || !len) { errno = EBADF; return -1; }
-        uint8_t* p = (uint8_t*)buf;
-        uint64_t a = addr & kAddressTagMask;   // снять TBI/MTE-метку
-        size_t done = 0;
-        while (done < len) {
-            const uint64_t pageLeft = 0x1000 - (a & 0xfff);
-            const size_t chunk = (uint64_t)(len - done) < pageLeft
-                                       ? (len - done) : (size_t)pageLeft;
-            RtCopyMem q;
-            memset(&q, 0, sizeof(q));
-            q.pid    = (uint32_t)pid_;
-            q.addr   = a;
-            q.buffer = (uint64_t)(uintptr_t)p;
-            q.size   = (uint64_t)chunk;
-            const int cmd = is_read ? kRtCmdRead : kRtCmdWrite;
-            if (ioctl(kRtAnyFd, (unsigned long)cmd, &q) != 0)
-                return done ? (ssize_t)done : -1;
-            a += chunk;
-            p += chunk;
-            done += chunk;
-        }
-        return (ssize_t)done;
-    }
-
-    int  pid_ = -1;
-    bool verified_ = false;
-
-    // fd для syscall ioctl: диспетчеру драйвера он безразличен (в handler
-    // не читается), поэтому -1 — без открытия чего-либо и без следа в fd.
-    static constexpr int kRtAnyFd = -1;
-};
-
-// Единый экземпляр RT-транспорта (по образцу kernel_transport).
+// Единый экземпляр RT-Dev транспорта (по образцу kernel_transport).
 inline RtTransport& rt_transport() {
     static RtTransport t;
     return t;
 }
 
-// Драйвер RT доступен? (хук ioctl отвечает пробой по своей памяти — для
-// меню выбора и --check-driver).
+// RT-Dev доступен? (устройство находится и отвечает пробой по своей
+// памяти — для меню выбора и --check-driver).
 inline bool rt_available() {
     RtTransport& t = rt_transport();
-    return t.connected() ? true : t.classify().kind == CMD_READ;
+    if (t.connected()) return t.verified() ? true : t.classify().kind == CMD_READ;
+    if (t.connect() < 0) return false;
+    return t.classify().kind == CMD_READ;
 }
 
 // Единый экземпляр транспорта: читает поток отрисовки, дёргают поток

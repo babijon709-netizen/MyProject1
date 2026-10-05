@@ -4,7 +4,7 @@
 //
 //     su -c /data/local/tmp/xvcen dump                  // режим из .mode
 //     su -c /data/local/tmp/xvcen dump external         // режим аргументом
-//     su -c /data/local/tmp/xvcen dump qx 12345         // режим + конкретный pid
+//     su -c /data/local/tmp/xvcen dump rt 12345         // режим + конкретный pid
 //
 // Зачем: офсеты чита привязаны к сборке игры, а обфускатор перекатывает их на
 // каждом обновлении. Дамп метаданных — первый шаг пересбора офсетов: его
@@ -239,7 +239,7 @@ static void parse_regions(const std::string& text, std::vector<Region>* out) {
 // области <1 МБ. Поэтому фильтра по имени/размеру больше нет — только
 // «читаемая» и «не меньше страницы»; приоритет задаёт region_score.
 //
-// include_closed (режим драйвера ft/qx/rt): протектор этой игры держит
+// include_closed (режим драйвера ft/rt): протектор этой игры держит
 // метадату в ЗАКРЫТЫХ страницах (---p): в карте читаемая заглушка-
 // страница, за ней ~51 МБ ---p, потом читаемый хвост — а в APK вместо
 // метадаты 4-КБ заглушка. Драйвер ядра читает ---p, поэтому в kernel-
@@ -1006,7 +1006,7 @@ static bool dump_blob(const Blob& b, const char* path, Log* log) {
     if (failed >= b.size) {
         remove(path);
         log->say("!! 0x%llx: страницы метаданных не читаются транспортом — "
-                 "попробуй другой режим (external/ft/qx/rt)",
+                 "попробуй другой режим (external/ft/rt)",
                  (unsigned long long)b.addr);
         return false;
     }
@@ -1035,7 +1035,6 @@ static int saved_backend() {
            (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
         s.pop_back();
     if (s == "kernel") return ESP_MEM_FT;
-    if (s == "qx") return ESP_MEM_QX;
     if (s == "rt") return ESP_MEM_RT;
     return ESP_MEM_EXTERNAL;
 }
@@ -1043,8 +1042,7 @@ static int saved_backend() {
 static const char* backend_name(int backend) {
     switch (backend) {
         case ESP_MEM_FT: return "FT-Драйвер";
-        case ESP_MEM_QX: return "QX-Драйвер";
-        case ESP_MEM_RT: return "RT-Драйвер";
+        case ESP_MEM_RT: return "RT-Dev";
         default: return "Прямое чтение";
     }
 }
@@ -1064,7 +1062,7 @@ static int Run(int argc, char* argv[]) {
             mode_arg = a;
         } else {
             printf("не понимаю аргумент: %s\n", a);
-            printf("использование: xvcen dump [external|ft|qx|rt] [pid]\n");
+            printf("использование: xvcen dump [external|ft|rt] [pid]\n");
             return 1;
         }
     }
@@ -1074,13 +1072,11 @@ static int Run(int argc, char* argv[]) {
             backend = ESP_MEM_EXTERNAL;
         else if (!strcmp(mode_arg, "ft") || !strcmp(mode_arg, "kernel"))
             backend = ESP_MEM_FT;
-        else if (!strcmp(mode_arg, "qx"))
-            backend = ESP_MEM_QX;
         else if (!strcmp(mode_arg, "rt"))
             backend = ESP_MEM_RT;
         if (backend < 0) {
             printf("неизвестный режим: %s "
-                   "(external | ft | qx | rt)\n", mode_arg);
+                   "(external | ft | rt)\n", mode_arg);
             return 1;
         }
     } else {
@@ -1207,7 +1203,7 @@ static int Run(int argc, char* argv[]) {
     // ---- скан --------------------------------------------------------------
     if (regions.empty()) parse_regions(maps_text, &regions);
     const bool kernel_backend =
-        backend == ESP_MEM_FT || backend == ESP_MEM_QX || backend == ESP_MEM_RT;
+        backend == ESP_MEM_FT || backend == ESP_MEM_RT;
     std::vector<Region> cand;
     std::uint64_t cand_bytes = 0;
     int closed_cnt = 0;
@@ -1323,7 +1319,7 @@ static int Run(int argc, char* argv[]) {
             log.say("   1) другой режим чтения: xvcen dump external");
         else
             log.say("   1) режимы драйвера видят страницы, закрытые для "
-                    "прямого чтения: xvcen dump ft | qx | rt");
+                    "прямого чтения: xvcen dump ft | rt");
         log.say("   2) подожди пару минут на сервере (метадата могла ещё не "
                 "расшифроваться) и перезапусти дамп");
         log.say("   3) пришли %s/dump.log и maps-%d.txt — по ним видно, "
