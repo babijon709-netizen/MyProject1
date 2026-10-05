@@ -40,7 +40,7 @@
 memio::Reader g_mem;
 
 // Способ доступа к памяти: экстернал (/proc/<pid>/mem), кернел FT (сокет
-// bing-класса), RT-Dev (/dev-узел с ioctl 0x801/0x802) или RT-Hook
+// bing-класса), RT-Dev (/dev/BYNb с ioctl 0x801/0x802) или RT-Hook
 // (перехваченный syscall ioctl 0x259/0x25a).
 // Выбирается один раз на старте (экран режима, mode_select.h) до первого
 // bind; сам g_mem о деталях не знает — разница целиком в memio::Transport.

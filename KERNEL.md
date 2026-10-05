@@ -36,7 +36,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
         ├── ProcfsTransport   «Прямое чтение»  /proc/<pid>/mem  (единственное
         │                                                   легальное место mem)
         ├── KernelTransport   «FT-Драйвер»     сокет bing/gongchuang (kernel_io.h)
-        ├── RtDevTransport    «RT-Dev»          случайный /dev-узел, ioctl 0x801/0x802
+        ├── RtDevTransport    «RT-Dev»          /dev/BYNb, ioctl 0x801/0x802
         └── RtHookTransport   «RT-Hook»         syscall ioctl(-1, 0x259/0x25a)
 ```
 
@@ -63,7 +63,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 |---|---|---|---|---|
 | Прямое чтение | — | pread/pwrite `/proc/<pid>/mem` | — | — |
 | FT | bing_rw / gongchuang (drivers.7z) | socket(сем.,4,0); команды getsockopt ИЛИ ioctl (поколение 5.10) | `DriverRwReq` 0x28: pid,pad,addr,size,user_buf,magic=0x1337 | auth 0x300, read 0x301, write 0x302; gong: attach 2, vm 4, pte 5/6 |
-| RT-Dev | RTkernel (`rt dev Драйвера root cheat.zip`) | char-устройство `/dev/<случайное имя>` + ioctl | `RtDevCopyMem` 0x20: pid,pad,addr,buffer,size (не через границу 4К — транспорт чанкует сам) | read 0x801, write 0x802; base 0x803 |
+| RT-Dev | RTkernel (`rt dev Драйвера root cheat.zip`) | fixed char-устройство `/dev/BYNb` + ioctl | `RtDevCopyMem` 0x20: pid,pad,addr,buffer,size (не через границу 4К — транспорт чанкует сам) | read 0x801, write 0x802; base 0x803 |
 | RT-Hook | hookdd/gynhdd (`RT-hook.7z`) | перехват syscall `ioctl`, без сокета и `/dev`-узла | `RtHookCopyMem` 0x20: pid,pad,addr,buffer,size (transport чанкует по 4К) | read 0x259, write 0x25a |
 
 Особенности, которые нельзя забыть:
@@ -74,10 +74,10 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
   (отвязка pid), СОКЕТЫ НЕ ЗАКРЫВАТЬ.
 - FT getsockopt: level = pid целевого процесса и он НЕ должен быть
   SOL_SOCKET, иначе команда уйдёт в generic-обработчик сокета (ENOPROTOOPT).
-- RT-Dev: модуль создаёт root-only char-узел со случайным именем. Транспорт
-  проверяет каждый подходящий `/dev`-кандидат пробой своей памяти: похожий
-  чужой char-device отбрасывается, поиск не обрывается. Подтверждённый fd
-  живёт до завершения процесса.
+- RT-Dev: во всех 23 модулях архива `init_module` создаёт root-only
+  char-узел с точным именем `/dev/BYNb`. Транспорт открывает только его и
+  подтверждает чтением/записью собственной памяти; подтверждённый fd живёт
+  до завершения процесса.
 - RT-Hook: модуль заменяет обработчик syscall `ioctl` на arm64. Транспорт
   вызывает `ioctl(-1, 0x259/0x25a, &req)`, не открывает ни сокет, ни `/dev`;
   наличие подтверждается пробой чтения собственной памяти. Не смешивать его

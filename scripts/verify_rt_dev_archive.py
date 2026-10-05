@@ -3,7 +3,7 @@
 
 The script is intentionally dependency-free: it reads the ELF64 section and
 symbol tables directly from each self-extracting .sh payload.  It proves that
-all modules expose the random char-device path and dispatch ioctl commands
+all modules expose the fixed /dev/BYNb char-device path and dispatch ioctl commands
 0x801/0x802/0x803 from the ioctl command argument (w1).
 """
 
@@ -29,6 +29,7 @@ REQUIRED_SYMBOLS = {
     "devicename",
 }
 REQUIRED_COMMANDS = {0x801, 0x802, 0x803}
+REQUIRED_DEVICE_NAME = b"BYNb\0"
 
 
 def c_string(data: bytes, offset: int) -> str:
@@ -98,6 +99,12 @@ def verify_module(name: str, wrapped: bytes) -> None:
     if missing_symbols:
         raise ValueError("missing symbols: " + ", ".join(sorted(missing_symbols)))
 
+    # init_module stores this literal in devicename, then uses it for
+    # alloc_chrdev_region, class_create and device_create. It is /dev/BYNb,
+    # not a random /dev name.
+    if REQUIRED_DEVICE_NAME not in data:
+        raise ValueError("RTkernel fixed device name BYNb is missing")
+
     # AArch64 SUBS WZR, W1, #imm is the ioctl dispatch range comparison used
     # by RTkernel. Checking the instruction form, not just a byte sequence,
     # prevents a command constant in debug data from producing a false pass.
@@ -147,7 +154,7 @@ def main() -> int:
         print("RT-Dev archive verification failed:", file=sys.stderr)
         print("\n".join(failures), file=sys.stderr)
         return 1
-    print(f"RT-Dev archive ABI verified: {len(modules)} modules, ioctl 0x801/0x802/0x803, COPY_MEMOBY char-device family.")
+    print(f"RT-Dev archive ABI verified: {len(modules)} modules, /dev/BYNb, ioctl 0x801/0x802/0x803, COPY_MEMOBY char-device family.")
     return 0
 
 

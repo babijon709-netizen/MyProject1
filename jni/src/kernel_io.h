@@ -61,12 +61,9 @@
 
 #pragma once
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <string>
-#include <sys/stat.h>
-#include <time.h>
 #include <sys/types.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -600,12 +597,11 @@ private:
     int  attached_pid_ = -1;   // pid, к которому прицеплен gong-сокет (op2)
 };
 
-// ---- класс 3: RT-Dev — /dev/<случайное имя>, ioctl 0x801/0x802 ---------
+// ---- класс 3: RT-Dev — /dev/BYNb, ioctl 0x801/0x802 ---------------------
 //
 // Пакет «rt dev Драйвера root cheat.zip» содержит RTkernel для ядер
 // 4.9–6.6. Статический разбор всех 23 модулей подтверждает единый ABI:
-// char-устройство с именем, которое init_module генерирует сам, и команды
-// 0x801/0x802 с COPY_MEMOBY (0x20):
+// fixed char-устройство /dev/BYNb и команды 0x801/0x802 с COPY_MEMOBY (0x20):
 //   u32 pid; pad; u64 addr; u64 buffer; u64 size.
 // 0x800 — OP_INIT_KEY, 0x803 — OP_MODULE_BASE; ни один не нужен Reader:
 // базы по-прежнему берём из /proc/<pid>/maps.
@@ -617,6 +613,7 @@ private:
 constexpr int kRtDevCmdRead        = 0x801;
 constexpr int kRtDevCmdWrite       = 0x802;
 constexpr int kRtDevCmdModuleBase  = 0x803;
+constexpr char kRtDevDevicePath[]  = "/dev/BYNb";
 
 #pragma pack(push, 1)
 struct RtDevCopyMem {
@@ -637,15 +634,15 @@ public:
     // драйвер переживает переподключения к игре.
     bool open(pid_t pid) override {
         if (pid <= 0) return false;
-        // До привязки кандидат обязан пройти R/W-пробу по собственной памяти.
-        // Открытый, но чужой /dev-узел никогда не становится транспортом игры.
+        // До привязки /dev/BYNb обязан пройти R/W-пробу по собственной памяти.
+        // Открытый, но не подтвердившийся узел никогда не становится транспортом игры.
         if (!verified_ && connect() < 0) return false;
         pid_ = (int)pid;
         return true;
     }
     void close() override { pid_ = -1; }
 
-    // Драйвер перезашит (имя устройства новое) — сбросить всё.
+    // Драйвер перешит или выгружен — сбросить открытый /dev/BYNb.
     void invalidate() {
         if (dev_fd_ >= 0) { ::close(dev_fd_); dev_fd_ = -1; }
         dev_path_.clear();
@@ -664,9 +661,8 @@ public:
     bool connected() const { return dev_fd_ >= 0; }
     const char* device_path() const { return dev_path_.c_str(); }
 
-    // Поднять устройство (найти + открыть + проверить пробой по своей
-    // памяти). При коллизии эвристики проверяет КАЖДЫЙ подходящий /dev-узел,
-    // а не останавливается на первом чужом char-device. Возвращает fd или -1.
+    // Поднять /dev/BYNb и проверить пробой по собственной памяти.
+    // Возвращает fd или -1.
     int connect() {
         if (dev_fd_ >= 0 && verified_) return dev_fd_;
         return classify().kind == CMD_READ ? dev_fd_ : -1;
@@ -674,46 +670,33 @@ public:
     // Устройство найдено и подтверждено пробой чтения.
     bool verified() const { return verified_; }
 
-    // Живая проба по СОБСТВЕННОЙ памяти. Если первый кандидат — чужой
-    // char-device с похожим случайным именем, он отбрасывается и поиск идёт
-    // дальше по /dev. Это важно: один чужой узел не должен скрывать RT-Dev.
+    // Живая проба по СОБСТВЕННОЙ памяти. Не ищем «похожее» случайное имя:
+    // во всех 23 модулях архива init_module передаёт ровно "BYNb" в
+    // alloc_chrdev_region, class_create и device_create.
     CmdProbe classify() {
+        CmdProbe r;
         if (dev_fd_ >= 0 && verified_) {
-            CmdProbe r;
             r.kind = CMD_READ;
             return r;
         }
-        return find_and_verify_device();
+        if (dev_fd_ < 0) {
+            const int fd = ::open(kRtDevDevicePath, O_RDWR | O_CLOEXEC);
+            if (fd < 0) { r.err = errno ? errno : ENOENT; return r; }
+            dev_fd_ = fd;
+            dev_path_ = kRtDevDevicePath;
+        }
+        r = classify_open_device();
+        if (r.kind == CMD_READ) return r;
+        const int err = r.err ? r.err : EPERM;
+        invalidate();
+        r.err = err;
+        errno = err;
+        return r;
     }
 
 private:
-    // Найти /dev-узел RT-Dev. Имя генерируется модулем, поэтому используем
-    // char-устройство, имя только из строчных букв, без '_','-',';', не
-    // gpiochip/std*, uid=gid=0, size 0, atime==ctime, год создания не 1970,
-    // длина имени <= 7. Это оставляет лишь случайное имя, которое создаёт модуль.
-    static bool rt_dev_candidate(const char* name, const struct stat& st) {
-        const size_t len = strlen(name);
-        if (len == 0 || len > 7) return false;
-        bool has_lower = false;
-        for (size_t i = 0; i < len; ++i) {
-            const char c = name[i];
-            if (c >= 'a' && c <= 'z') { has_lower = true; continue; }
-            return false;   // только строчные буквы
-        }
-        if (!has_lower) return false;
-        if (strstr(name, "gpiochip")) return false;
-        if (S_ISCHR(st.st_mode) == false && S_ISBLK(st.st_mode) == false) return false;
-        if (strchr(name, '_') || strchr(name, '-') || strchr(name, ':')) return false;
-        if (st.st_uid != 0 || st.st_gid != 0 || st.st_size != 0) return false;
-        if (st.st_atime != st.st_ctime) return false;
-        struct tm tmv;
-        localtime_r(&st.st_ctime, &tmv);
-        if (tmv.tm_year + 1900 == 1970) return false;
-        return true;
-    }
-
-    // Проба уже открытого кандидата. Не закрывает fd: find_and_verify_device
-    // решает, принять его или продолжить скан.
+    // Проба уже открытого /dev/BYNb. Сначала читаем паттерн; запись в scratch
+    // выполняется только если чтение действительно вернуло те же байты.
     CmdProbe classify_open_device() {
         CmdProbe r;
         if (dev_fd_ < 0) { r.err = EBADF; return r; }
@@ -722,9 +705,6 @@ private:
         const uint64_t pat0 = pat[0], pat1 = pat[1];
         const int save_pid = pid_;
         pid_ = (int)getpid();
-        // errno обнуляем перед пробой: если чужой драйвер вдруг вернёт
-        // нестандартное положительное значение, в диагностике не останется
-        // errno от предыдущего кандидата.
         errno = 0;
         if (rw(true, (uint64_t)(uintptr_t)pat, mirror, sizeof(pat)) == sizeof(pat) &&
             mirror[0] == pat0 && mirror[1] == pat1) {
@@ -743,62 +723,6 @@ private:
         r.err = errno ? errno : EPERM;
         verified_ = false;
         return r;
-    }
-
-    // Найти И подтвердить RT-Dev. Имена /dev генерируются случайно, поэтому
-    // одного stat/open недостаточно: на прошивке могут быть другие root-owned
-    // char-devices, которые проходят эвристику имени. Для каждого кандидата
-    // разрешён только read-тест; write выполняется лишь после точного R/W read
-    // совпадения паттерна собственной памяти.
-    CmdProbe find_and_verify_device() {
-        CmdProbe last;
-        int last_err = ENOENT;
-        if (dev_fd_ >= 0) {
-            last = classify_open_device();
-            if (last.kind == CMD_READ) return last;
-            if (last.err) last_err = last.err;
-            ::close(dev_fd_);
-            dev_fd_ = -1;
-            dev_path_.clear();
-            pid_ = -1;
-        }
-
-        DIR* dir = opendir("/dev");
-        if (!dir) {
-            last.err = errno ? errno : ENOENT;
-            return last;
-        }
-        struct dirent* e;
-        while ((e = readdir(dir)) != nullptr) {
-            if (e->d_name[0] == '.') continue;
-            char path[96];
-            snprintf(path, sizeof(path), "/dev/%s", e->d_name);
-            struct stat st;
-            if (stat(path, &st) != 0) continue;
-            if (!rt_dev_candidate(e->d_name, st)) continue;
-            const int fd = ::open(path, O_RDWR | O_CLOEXEC);
-            if (fd < 0) {
-                if (errno) last_err = errno;
-                continue;
-            }
-            dev_fd_ = fd;
-            dev_path_ = path;
-            verified_ = false;
-            const CmdProbe probe = classify_open_device();
-            if (probe.kind == CMD_READ) {
-                closedir(dir);
-                return probe;
-            }
-            if (probe.err) last_err = probe.err;
-            ::close(dev_fd_);
-            dev_fd_ = -1;
-            dev_path_.clear();
-            pid_ = -1;
-        }
-        closedir(dir);
-        last.err = last_err;
-        errno = last_err;
-        return last;
     }
 
     // Запрос с разбиением по границам страниц (драйвер копирует size байт
@@ -840,8 +764,8 @@ inline RtDevTransport& rt_dev_transport() {
     return t;
 }
 
-// RT-Dev доступен? (устройство находится и отвечает пробой по своей
-// памяти — для меню выбора и --check-driver).
+// RT-Dev доступен? (/dev/BYNb отвечает пробой по своей памяти — для меню
+// выбора и --check-driver).
 inline bool rt_dev_available() {
     RtDevTransport& t = rt_dev_transport();
     if (t.connected()) return t.verified() ? true : t.classify().kind == CMD_READ;
