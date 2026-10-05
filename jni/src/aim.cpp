@@ -1,4 +1,5 @@
 #include "aim.h"
+#include "silent_aim.h"
 #include "logfile.h"
 #include "main.h"                // displayInfo, native_window_screen_*
 #include "game.h"
@@ -48,6 +49,8 @@ struct AimTarget {
     float sx = 0.f, sy = 0.f;       // screen position (px)
     float dist = 0.f;               // pixel distance from crosshair
     float world_dist = 0.f;
+    float world[3] = {};            // точная мировая координата кости для silent-режима
+    bool  world_valid = false;
     int   bone = -1;                // слот точки прицела (0 голова, 1 шея, 2 грудь)
     float health = -1.f;            // здоровье цели (для лога и проверки смерти)
     bool  respawning = false;       // PlayerManager.respawning (для лога)
@@ -72,6 +75,9 @@ static void AimReleaseFinger(bool& fingerDown) {
 bool s_fingerDown = false;
 // Аим ведёт цель прямо сейчас (ставится в AimSelectTarget, снимается в AimBegin).
 bool g_aimActive = false;
+std::atomic<unsigned long long> g_aim_pulse_target{0};
+std::atomic<double> g_aim_pulse_at{0.0};
+std::atomic<double> g_aim_hold_at{0.0};
 
 // Запасной град/px — из чувствительности, выставленной в настройках клиента.
 //
@@ -473,6 +479,11 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             t.sx  = b.aim_pts[usedBone][0]; t.sy = b.aim_pts[usedBone][1];
             t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
                       std::isfinite(t.sx) && std::isfinite(t.sy);
+            t.world_valid = b.aim_world_valid[usedBone];
+            for (int i = 0; i < 3; ++i) {
+                t.world[i] = b.aim_world[usedBone][i];
+                t.world_valid = t.world_valid && std::isfinite(t.world[i]);
+            }
         } else {
             // По костям цель не нашлась — по просьбе 19.09 («аим полностью по
             // скелету») в цель такие игроки не идут вовсе: запасная точка от
@@ -566,7 +577,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // трубу касания, и цель за это время уходит. Мемори-лок пишет абсолютный
     // угол самой кости каждый такт — ему упреждать нечего (просьба 24.09:
     // «есть ли упреждение в мемори аиме, оно там не нужно»).
-    if (g_state.aim_mode != AIM_MODE_MEMORY) {
+    if (g_state.aim_mode == AIM_MODE_TOUCH) {
         float cy = 0.f, cp = 0.f;
         // Мусорный угол камеры (чтение сорвалось) не годится даже в
         // нормализацию: упреждение по нему уводит прицел, а раньше из-за него
@@ -641,6 +652,12 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                 (int)best.respawning, (int)best.death_flag, (double)best.world_dist,
                 (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
     pick.switched = (best.id != pick.lastId);
+    const double now = MonoNow();
+    if (pick.switched) {
+        g_aim_pulse_target.store(best.id, std::memory_order_relaxed);
+        g_aim_pulse_at.store(now, std::memory_order_relaxed);
+    }
+    g_aim_hold_at.store(now, std::memory_order_relaxed);
     pick.lastId = best.id; pick.lastBone = best.bone;
     return true;
 }
@@ -1569,13 +1586,49 @@ static void UpdateAimMemory(float dt) {
 }
 
 
+// ============================ Сайлент-аим ====================================
+static void UpdateAimSilent(float dt) {
+    static AimPick pick;
+    float sw = 0.f, sh = 0.f;
+    if (!AimBegin(dt, sw, sh)) {
+        pick.reset();
+        silent_aim::clear();
+        return;
+    }
+
+    AimTarget best;
+    float degPerPx = 0.f;
+    if (!AimSelectTarget(sw, sh, pick, best, degPerPx) || !best.world_valid) {
+        g_aimActive = false;
+        pick.reset();
+        silent_aim::clear();
+        return;
+    }
+
+    // Writer принимает только точную мировую координату кости: экранная точка
+    // и поправки touch/memory-режимов не должны менять направление выстрела.
+    if (!esp_silent_publish(best.id, best.world)) {
+        g_aimActive = false;
+        silent_aim::clear();
+    }
+}
+
+// Сюда управление приходит после меню и фрикама. Если в середине кадра режим
+// сменился, новый кадр не оставит writer с последним направлением до lease timeout.
+void AimEndFrame() {
+    const bool keep = g_state.aim_touch && g_state.aim_mode == AIM_MODE_SILENT &&
+                      g_aimActive && !g_state.freecam_on;
+    if (!keep) silent_aim::clear();
+}
+
 // Диспетчер: какой режим ведёт камеру в этом кадре.
 void UpdateAim(float dt) {
     ++s_frames;
     const int mode = g_state.aim_mode;
     AimLogTick(dt);
     if (mode == AIM_MODE_MEMORY) UpdateAimMemory(dt);
-    else                         UpdateAimTouch(dt);
+    else if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);
+    else                              UpdateAimTouch(dt);
 }
 
 // ============================ Автофарм =============================

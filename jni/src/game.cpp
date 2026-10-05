@@ -3718,6 +3718,11 @@ bool esp_silent_publish(uint64_t target, const float aim[3]) {
     return silent_aim::publish(c);
 }
 
+
+bool esp_silent_wants_no_spread() {
+    return silent_aim::stats().active;
+}
+
 // Unity Matrix4x4 is column-major in memory: m[col*4 + row].
 static float mat_get(const Mat4& matrix, int row, int column) {
     return matrix.m[(size_t)column * 4 + row];
