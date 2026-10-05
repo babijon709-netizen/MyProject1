@@ -31,12 +31,36 @@ rm -f /home/runner/work/MyProject1/MyProject1/obj/local/arm64-v8a/objs/xvcen/src
 [arm64-v8a] Compile++      : xvcen <= aim.cpp
 rm -f /home/runner/work/MyProject1/MyProject1/obj/local/arm64-v8a/objs/xvcen/src/aim.o
 /usr/local/lib/android/sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ -MMD -MP -MF /home/runner/work/MyProject1/MyProject1/obj/local/arm64-v8a/objs/xvcen/src/aim.o.d -target aarch64-none-linux-android24 -fdata-sections -ffunction-sections -fstack-protector-strong -funwind-tables -no-canonical-prefixes  --sysroot /usr/local/lib/android/sdk/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/sysroot -g -Wno-invalid-command-line-argument -Wno-unused-command-line-argument  -D_FORTIFY_SOURCE=2 -fno-exceptions -fno-rtti -fpic -O2 -DNDEBUG  -I/home/runner/work/MyProject1/MyProject1/jni/include -I/home/runner/work/MyProject1/MyProject1/jni/include/ImGui -I/home/runner/work/MyProject1/MyProject1/jni/include/ImGui/backends -I/home/runner/work/MyProject1/MyProject1/jni/src -I/home/runner/work/MyProject1/MyProject1/jni    -DANDROID -O3 -ffast-math -march=armv8-a+simd -fomit-frame-pointer -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden -DUSE_OPENGL -DIMGUI_IMPL_OPENGL_ES3 -DNDEBUG -fstack-protector-strong -fPIE -fno-unwind-tables -fno-asynchronous-unwind-tables -fstrict-aliasing -std=c11 -Wformat -Werror=format-security -O3 -ffast-math -march=armv8-a+simd -fomit-frame-pointer -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden -DUSE_OPENGL -DIMGUI_IMPL_OPENGL_ES3 -DNDEBUG -fstack-protector-strong -fPIE -fno-unwind-tables -fno-asynchronous-unwind-tables -fstrict-aliasing -std=gnu++17 -fexceptions -fno-rtti -fexceptions  -c  /home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp -o /home/runner/work/MyProject1/MyProject1/obj/local/arm64-v8a/objs/xvcen/src/aim.o
-/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:612:13: error: use of undeclared identifier 's_flightYaw'
-            s_flightYaw[i] = 0.f;
-            ^
-/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:613:13: error: use of undeclared identifier 's_flightPitch'
-            s_flightPitch[i] = 0.f;
-            ^
-2 errors generated.
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:8:26: error: use of undeclared identifier 'best'
+    float errMag = sqrtf(best.yaw * best.yaw + best.pitch * best.pitch);
+                         ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:8:37: error: use of undeclared identifier 'best'
+    float errMag = sqrtf(best.yaw * best.yaw + best.pitch * best.pitch);
+                                    ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:8:48: error: use of undeclared identifier 'best'
+    float errMag = sqrtf(best.yaw * best.yaw + best.pitch * best.pitch);
+                                               ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:8:61: error: use of undeclared identifier 'best'
+    float errMag = sqrtf(best.yaw * best.yaw + best.pitch * best.pitch);
+                                                            ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:10:5: error: expected unqualified-id
+    if (errMag > 2.0f) adaptiveFrac = 0.80f;
+    ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:11:5: error: expected unqualified-id
+    else if (errMag > 1.0f) adaptiveFrac = 0.70f;
+    ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:12:5: error: expected unqualified-id
+    else if (errMag > 0.5f) adaptiveFrac = 0.60f;
+    ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:14:23: error: use of undeclared identifier 'best'
+    float stepYaw   = best.yaw   * adaptiveFrac;
+                      ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:15:23: error: use of undeclared identifier 'best'
+    float stepPitch = best.pitch * adaptiveFrac;
+                      ^
+/home/runner/work/MyProject1/MyProject1/jni/src/aim.cpp:16:5: error: expected unqualified-id
+    {
+    ^
+10 errors generated.
 make: *** [/usr/local/lib/android/sdk/ndk/26.3.11579264/build/core/build-binary.mk:415: /home/runner/work/MyProject1/MyProject1/obj/local/arm64-v8a/objs/xvcen/src/aim.o] Error 1
 NDK-BUILD-EXIT-CODE=2
