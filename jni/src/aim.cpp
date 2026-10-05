@@ -135,7 +135,7 @@ double MonoNow() {
 }
 
 float AimSensitivityScale(bool& from_game) {
-    constexpr double kHoldSeconds = 1.5;    // чаще настройку руками не меняют
+    constexpr double kHoldSeconds = 2.0;    // чаще настройку руками не меняют
     constexpr float  kAdoptRatio  = 1.25f;  // мельче этого — не изменение
 
     static float  held           = 1.0f;
@@ -322,7 +322,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                                     s_bot_noesp_skipped;
         if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
             s_at = now;
-            LogLine("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
+            LogLine("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (без скелета %lu, кости не спроецировались %lu), вне экрана %lu, вне FOV %lu",
                     s_seen_boxes, s_seen_bots, s_bot_noesp_skipped, s_ally_skipped, s_dead_skipped,
                     s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
                     s_offscreen_skipped, s_out_of_fov);
@@ -451,6 +451,11 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     }
 
     if (!best.valid) {
+        pick.velYaw = 0.f;
+        pick.velPitch = 0.f;
+        pick.prevTgtYaw = 0.f;
+        pick.prevTgtPitch = 0.f;
+        pick.havePrev = false;
         if (why) {
             // Берём ту причину, которая в ЭТОМ кадре отсеяла больше всех:
             // счётчики накопительные, а нужен ответ про конкретный кадр.
@@ -551,12 +556,20 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // Состояние выбранной цели — чтобы по логу проверить признак смерти:
     // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
     // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
+    const bool switched = (best.id != pick.lastId);
+    if (switched) {
+        pick.velYaw = 0.f;
+        pick.velPitch = 0.f;
+        pick.prevTgtYaw = 0.f;
+        pick.prevTgtPitch = 0.f;
+        pick.havePrev = false;
+    }
     if (best.id != pick.lastId)
         LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d смерть=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
                 (unsigned long long)best.id, (double)best.health,
                 (int)best.respawning, (int)best.death_flag, (double)best.world_dist,
                 (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
-    pick.switched = (best.id != pick.lastId);
+    pick.switched = switched;
     // Дыхание уголков ESP (aim.h): на захвате перезапускаем фазу цикла, а пока
     // выбор жив — отмечаем удержание, по нему оверлей понимает «анимация
     // идёт» и крутит её в любой из трёх режимах аима.
@@ -594,6 +607,12 @@ static void UpdateAimTouch(float dt) {
     static float s_acquire = 1.f;
     static int   s_holdFrames = 0;
     static AimPick pick;
+    auto resetFlight = [&]() {
+        for (int i = 0; i < 8; ++i) {
+            s_flightYaw[i] = 0.f;
+            s_flightPitch[i] = 0.f;
+        }
+    };
 
     float sw = 0.f, sh = 0.f;
     if (!AimBegin(dt, sw, sh)) {
@@ -601,6 +620,7 @@ static void UpdateAimTouch(float dt) {
         s_haveLast = false; pick.reset();
         s_lostFrames = 0; s_holdFrames = 0;
         s_trackYaw.reset(); s_trackPitch.reset();
+        resetFlight();
         return;
     }
 
@@ -618,6 +638,7 @@ static void UpdateAimTouch(float dt) {
             AimReleaseFinger(s_fingerDown);
             s_haveLast = false; pick.reset();
             s_trackYaw.reset(); s_trackPitch.reset();
+            resetFlight();
         }
         return;
     }
@@ -625,6 +646,9 @@ static void UpdateAimTouch(float dt) {
     if (pick.switched) {
         s_haveLast = false;                      // do not learn gain across a target switch
         s_trackYaw.reset(); s_trackPitch.reset();  // и оценку коэффициента тоже
+        resetFlight();
+        pick.velYaw = 0.f;
+        pick.velPitch = 0.f;
     }
 
     // ---- оценка коэффициента по реакции прицела ----
@@ -949,6 +973,7 @@ static void UpdateAimTouch(float dt) {
     // всё равно занимает считанные кадры: при большой ошибке шаг и в треть
     // размера упирается в потолок.
     if (pick.switched) s_acquire = 0.f;
+    if (s_lostFrames > 5) s_acquire = 0.f;
     s_acquire += dt / 0.35f;
     if (s_acquire > 1.f) s_acquire = 1.f;
     k *= 0.3f + 0.7f * s_acquire;
@@ -1011,7 +1036,7 @@ static void UpdateAimTouch(float dt) {
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         // Палец отпущен — заказанное игра не отработает вовсе.
-        for (int i = 0; i < 8; ++i) { s_flightYaw[i] = 0.f; s_flightPitch[i] = 0.f; }
+        resetFlight();
         s_haveLast = false;
         // Перенос пальца — это не шаг прицела: замер по нему покажет мусор.
         s_trackYaw.reset(); s_trackPitch.reset();
@@ -1054,7 +1079,7 @@ static void AimLogTick(float dt) {
                 d.inactive, d.no_target);
     }
     if (g_state.aim_mode == AIM_MODE_MEMORY)
-        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d нетцели=%d нацели=%d чтение=%d",
+        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d него=%d нацель=%d",
                 aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
                 d.writes, d.fails, (double)d.mismatch, d.inactive, d.ads, d.ads_source,
                 d.no_target, d.on_target, d.read_fail);
@@ -1277,7 +1302,6 @@ void UpdateAim(float dt) {
 //
 // Полностью на синтетических тачах: три пальца (0 — джойстик движения,
 // 1 — камера, 2 — удар). Слой памяти (game.cpp) отдаёт точку прицела в
-// градусах от оси выстрела и точку подхода в градусах от оси камеры; здесь —
+// градусах от ��си выстрела и точку подхода в градусах от оси камеры; здесь —
 // только автоматы. Камерный палец пользуется тем же коэффициентом, который
 // выучил аимбот, а если своего нет — аккуратно probe'ит фиксированным.
-//
