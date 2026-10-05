@@ -637,7 +637,9 @@ public:
     // драйвер переживает переподключения к игре.
     bool open(pid_t pid) override {
         if (pid <= 0) return false;
-        if (!ensure_device()) return false;
+        // До привязки кандидат обязан пройти R/W-пробу по собственной памяти.
+        // Открытый, но чужой /dev-узел никогда не становится транспортом игры.
+        if (!verified_ && connect() < 0) return false;
         pid_ = (int)pid;
         return true;
     }
@@ -663,42 +665,25 @@ public:
     const char* device_path() const { return dev_path_.c_str(); }
 
     // Поднять устройство (найти + открыть + проверить пробой по своей
-    // памяти). Возвращает fd или -1.
+    // памяти). При коллизии эвристики проверяет КАЖДЫЙ подходящий /dev-узел,
+    // а не останавливается на первом чужом char-device. Возвращает fd или -1.
     int connect() {
-        if (!ensure_device()) return -1;
-        return dev_fd_;
+        if (dev_fd_ >= 0 && verified_) return dev_fd_;
+        return classify().kind == CMD_READ ? dev_fd_ : -1;
     }
     // Устройство найдено и подтверждено пробой чтения.
     bool verified() const { return verified_; }
 
-    // Живая проба по СОБСТВЕННОЙ памяти (как classify_cmd у bing): читаем
-    // паттерн и пишем в scratch. Подтверждает, что найденное устройство —
-    // действительно RT-Dev драйвер, а не чужой char-dev с похожим именем.
+    // Живая проба по СОБСТВЕННОЙ памяти. Если первый кандидат — чужой
+    // char-device с похожим случайным именем, он отбрасывается и поиск идёт
+    // дальше по /dev. Это важно: один чужой узел не должен скрывать RT-Dev.
     CmdProbe classify() {
-        CmdProbe r;
-        if (!ensure_device()) { r.err = errno ? errno : EIO; return r; }
-        uint64_t pat[2]    = {0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL};
-        uint64_t mirror[2] = {0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL};
-        const uint64_t pat0 = pat[0], pat1 = pat[1];
-        const int save_pid = pid_;
-        pid_ = (int)getpid();
-        if (rw(true, (uint64_t)(uintptr_t)pat, mirror, sizeof(pat)) == sizeof(pat) &&
-            mirror[0] == pat0 && mirror[1] == pat1) {
-            uint64_t scratch[2] = {1, 1};
-            uint64_t wsrc[2]    = {0xA5A55A5ADEADBEEFULL, 0x0BADC0DE0DDC0FFEULL};
-            if (rw(false, (uint64_t)(uintptr_t)scratch, wsrc, sizeof(scratch)) == sizeof(scratch) &&
-                scratch[0] == wsrc[0] && scratch[1] == wsrc[1]) {
-                r.kind = CMD_READ;   // читает и пишет — транспорт полный
-                verified_ = true;
-                pid_ = save_pid;
-                return r;
-            }
+        if (dev_fd_ >= 0 && verified_) {
+            CmdProbe r;
+            r.kind = CMD_READ;
+            return r;
         }
-        pid_ = save_pid;
-        r.err = errno ? errno : EPERM;
-        // Нашли устройство, но это не RT-Dev: больше не считаем его найденным.
-        invalidate();
-        return r;
+        return find_and_verify_device();
     }
 
 private:
@@ -727,13 +712,64 @@ private:
         return true;
     }
 
-    bool ensure_device() {
-        if (dev_fd_ >= 0) return true;
+    // Проба уже открытого кандидата. Не закрывает fd: find_and_verify_device
+    // решает, принять его или продолжить скан.
+    CmdProbe classify_open_device() {
+        CmdProbe r;
+        if (dev_fd_ < 0) { r.err = EBADF; return r; }
+        uint64_t pat[2]    = {0x1234567890ABCDEFULL, 0x0F1E2D3C4B5A6978ULL};
+        uint64_t mirror[2] = {0xAABBCCDD11223344ULL, 0x5566778899AABBCCULL};
+        const uint64_t pat0 = pat[0], pat1 = pat[1];
+        const int save_pid = pid_;
+        pid_ = (int)getpid();
+        // errno обнуляем перед пробой: если чужой драйвер вдруг вернёт
+        // нестандартное положительное значение, в диагностике не останется
+        // errno от предыдущего кандидата.
+        errno = 0;
+        if (rw(true, (uint64_t)(uintptr_t)pat, mirror, sizeof(pat)) == sizeof(pat) &&
+            mirror[0] == pat0 && mirror[1] == pat1) {
+            uint64_t scratch[2] = {1, 1};
+            uint64_t wsrc[2]    = {0xA5A55A5ADEADBEEFULL, 0x0BADC0DE0DDC0FFEULL};
+            errno = 0;
+            if (rw(false, (uint64_t)(uintptr_t)scratch, wsrc, sizeof(scratch)) == sizeof(scratch) &&
+                scratch[0] == wsrc[0] && scratch[1] == wsrc[1]) {
+                r.kind = CMD_READ;   // читает и пишет — транспорт полный
+                verified_ = true;
+                pid_ = save_pid;
+                return r;
+            }
+        }
+        pid_ = save_pid;
+        r.err = errno ? errno : EPERM;
+        verified_ = false;
+        return r;
+    }
+
+    // Найти И подтвердить RT-Dev. Имена /dev генерируются случайно, поэтому
+    // одного stat/open недостаточно: на прошивке могут быть другие root-owned
+    // char-devices, которые проходят эвристику имени. Для каждого кандидата
+    // разрешён только read-тест; write выполняется лишь после точного R/W read
+    // совпадения паттерна собственной памяти.
+    CmdProbe find_and_verify_device() {
+        CmdProbe last;
+        int last_err = ENOENT;
+        if (dev_fd_ >= 0) {
+            last = classify_open_device();
+            if (last.kind == CMD_READ) return last;
+            if (last.err) last_err = last.err;
+            ::close(dev_fd_);
+            dev_fd_ = -1;
+            dev_path_.clear();
+            pid_ = -1;
+        }
+
         DIR* dir = opendir("/dev");
-        if (!dir) { errno = ENOENT; return false; }
+        if (!dir) {
+            last.err = errno ? errno : ENOENT;
+            return last;
+        }
         struct dirent* e;
-        bool opened = false;
-        while (!opened && (e = readdir(dir)) != nullptr) {
+        while ((e = readdir(dir)) != nullptr) {
             if (e->d_name[0] == '.') continue;
             char path[96];
             snprintf(path, sizeof(path), "/dev/%s", e->d_name);
@@ -741,14 +777,28 @@ private:
             if (stat(path, &st) != 0) continue;
             if (!rt_dev_candidate(e->d_name, st)) continue;
             const int fd = ::open(path, O_RDWR | O_CLOEXEC);
-            if (fd < 0) continue;
+            if (fd < 0) {
+                if (errno) last_err = errno;
+                continue;
+            }
             dev_fd_ = fd;
             dev_path_ = path;
-            opened = true;
+            verified_ = false;
+            const CmdProbe probe = classify_open_device();
+            if (probe.kind == CMD_READ) {
+                closedir(dir);
+                return probe;
+            }
+            if (probe.err) last_err = probe.err;
+            ::close(dev_fd_);
+            dev_fd_ = -1;
+            dev_path_.clear();
+            pid_ = -1;
         }
         closedir(dir);
-        if (!opened) { errno = ENOENT; return false; }
-        return true;
+        last.err = last_err;
+        errno = last_err;
+        return last;
     }
 
     // Запрос с разбиением по границам страниц (драйвер копирует size байт

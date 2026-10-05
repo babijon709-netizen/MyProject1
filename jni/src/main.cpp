@@ -128,20 +128,19 @@ static int Run(bool full_scan) {
     bool rt_dev_ok = false;
     {
         memio::RtDevTransport& rt = memio::rt_dev_transport();
-        const int rfd = rt.connect();
-        if (rfd < 0) {
-            printf("RT-Dev         : узел не найден (случайное имя в /dev)\n");
+        // classify перебирает все подходящие случайные char-узлы: первый
+        // похожий /dev-кандидат может принадлежать другому драйверу.
+        const memio::CmdProbe rp = rt.classify();
+        if (rp.kind == memio::CMD_READ) {
+            printf("RT-Dev         : узел %s, fd %d\n", rt.device_path(), rt.device_fd());
+            printf("  чтение 0x801 / запись 0x802: OK (своя память)\n");
+            rt_dev_ok = true;
+        } else if (rp.err == ENOENT) {
+            printf("RT-Dev         : подходящий узел не найден (случайное имя в /dev)\n");
+        } else if (rp.err != 0) {
+            printf("RT-Dev         : кандидаты /dev не подтвердили ABI 0x801/0x802, errno %d\n", rp.err);
         } else {
-            printf("RT-Dev         : узел %s, fd %d\n", rt.device_path(), rfd);
-            const memio::CmdProbe rp = rt.classify();
-            if (rp.kind == memio::CMD_READ) {
-                printf("  чтение 0x801 / запись 0x802: OK (своя память)\n");
-                rt_dev_ok = true;
-            } else if (rp.err != 0) {
-                printf("  проба: отказ, errno %d (узел открыт, но это не RT-Dev или драйвер не отвечает)\n", rp.err);
-            } else {
-                printf("  проба: данные не двигались\n");
-            }
+            printf("RT-Dev         : кандидаты /dev не двигали данные\n");
         }
     }
 
