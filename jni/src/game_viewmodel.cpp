@@ -1,6 +1,7 @@
 #include "fps_memory.h"
 #include "weapon_tuning_memory.h"
 #include "weapon_speed_memory.h"
+#include "projectile_speed_memory.h"
 #include "loot_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
@@ -200,6 +201,23 @@ struct HeapMemory {
     bool named(uint64_t object, const char* name, const char* namespaze) {
         return object>=0x10000 && named_klass(memory.ptr(object),name,namespaze);
     }
+    // Projectile-speed writes are selected from several legitimate FPObject
+    // layouts. Unlike the permissive feature paths above, a candidate prefab
+    // must prove its exact class name before it can be written: unavailable
+    // metadata means no projectile-speed write, never a guessed field.
+    bool named_strict(uint64_t object, const char* name, const char* namespaze) {
+        if (object < 0x10000) return false;
+        const uint64_t klass = memory.ptr(object);
+        if (klass < 0x10000) return false;
+        const uint64_t np = memory.ptr(klass + go_active::IL2CPP_CLASS_NAME);
+        const uint64_t sp = memory.ptr(klass + go_active::IL2CPP_CLASS_NAMESPACE);
+        if (np < 0x10000 || sp < 0x10000) return false;
+        char n[96]{}, ns[96]{};
+        const size_t nl = std::strlen(name) + 1, sl = std::strlen(namespaze) + 1;
+        return nl <= sizeof(n) && sl <= sizeof(ns) &&
+            g_mem.read_quiet(np, n, nl) && g_mem.read_quiet(sp, ns, sl) &&
+            std::memcmp(n, name, nl) == 0 && std::memcmp(ns, namespaze, sl) == 0;
+    }
     // Calculator names rotate between builds (Ze/FJ/...). Its empty namespace
     // and both typed backlinks are checked by weapon_tuning before any write.
     bool calculator_class(uint64_t object) {
@@ -233,6 +251,7 @@ struct HeapMemory {
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 weapon_speed::Controller<HeapMemory> weapon_speeds(heap_memory);
+projectile_speed::Controller<HeapMemory> projectile_speeds(heap_memory);
 fast_loot::Controller<HeapMemory> loot(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
@@ -320,6 +339,8 @@ void esp_viewmodel_reset(bool restore) {
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
     if (!weapon_speeds.reset(restore && g_mem.bound()))
         LogLine("weapon speed: originals could not all be restored before disconnect; restart game");
+    if (!projectile_speeds.reset(restore && g_mem.bound()))
+        LogLine("projectile speed: original launch speed could not be restored before disconnect; restart game");
     loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
@@ -332,13 +353,14 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
-        weapon_speeds.reset(false); loot.reset();
+        weapon_speeds.reset(false); projectile_speeds.reset(false); loot.reset();
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         loot.status = settings.fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapon_speeds.fire = g_state.fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapon_speeds.reload = g_state.fast_reload ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        projectile_speeds.status = g_state.fast_projectiles ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
                              settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
@@ -355,7 +377,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || want_no_spread || weapons.has_state() ||
         g_state.fast_fire || g_state.fast_reload || weapon_speeds.has_state() ||
-        g_farmActive) {
+        g_state.fast_projectiles || projectile_speeds.has_state() || g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
             return candidate>=0x10000 && memory.is(candidate,"PlayerManager") &&
@@ -390,6 +412,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             weapon_speeds.fire=g_state.fast_fire||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             weapon_speeds.reload=g_state.fast_reload||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+            projectile_speeds.status=g_state.fast_projectiles||projectile_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             return;
         }
         local_source_failed=false;
@@ -401,7 +424,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     const unsigned weapon_flags = (settings.no_recoil ? 1u : 0u) |
                                   (want_no_spread ? 2u : 0u) |
                                   (g_state.fast_fire ? 4u : 0u) |
-                                  (g_state.fast_reload ? 8u : 0u);
+                                  (g_state.fast_reload ? 8u : 0u) |
+                                  (g_state.fast_projectiles ? 16u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -413,6 +437,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
         weapon_speeds.tick(epoch, g_il2cpp_base, player,
                            g_state.fast_fire, g_state.fast_reload);
+        projectile_speeds.tick(epoch, g_il2cpp_base, player, g_state.fast_projectiles);
     }
     {
         // Ступень, на которой оборвалась цепочка отдачи/разброса. Логируем
@@ -448,10 +473,11 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
         st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
         st.fast_loot != last_log.fast_loot || st.fast_fire != last_log.fast_fire ||
-        st.fast_reload != last_log.fast_reload) {
-        LogLine("viewmodel: fov=%d hands=%d; recoil=%d spread=%d loot=%d fire=%d reload=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
+        st.fast_reload != last_log.fast_reload || st.fast_projectiles != last_log.fast_projectiles) {
+        LogLine("viewmodel: fov=%d hands=%d; recoil=%d spread=%d loot=%d fire=%d reload=%d projectile=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
                 (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread,
-                (int)st.fast_loot, (int)st.fast_fire, (int)st.fast_reload);
+                (int)st.fast_loot, (int)st.fast_fire, (int)st.fast_reload,
+                (int)st.fast_projectiles);
         last_log = st;
     }
 }
@@ -464,6 +490,7 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     status.fast_loot = loot.status;
     status.fast_fire = weapon_speeds.fire;
     status.fast_reload = weapon_speeds.reload;
+    status.fast_projectiles = projectile_speeds.status;
     return status;
 }
 
