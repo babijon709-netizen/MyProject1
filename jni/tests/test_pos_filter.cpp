@@ -33,7 +33,8 @@ int main() {
         CHECK(step(s, o, p, true, 0.0), "first read draws");
         CHECK(dist(p, {10, 64, 10}) < 1e-5F, "first pos passthrough");
     }
-    // 2) Холд: сбои до секунды — бокс живёт (предсказание), больше — гаснет.
+    // 2) Холд: сбои до 2 секунд — бокс живёт (предсказание), больше — гаснет.
+    //    Это критична для игроков, которые временно "исчезают" из-за read-gap.
     {
         State s; Obs o;
         Vec3 p{10, 64, 10};
@@ -42,12 +43,13 @@ int main() {
         CHECK(step(s, o, q, false, 0.5), "hold 0.5s alive");
         CHECK(dist(q, {10, 64, 10}) < 1e-5F, "hold keeps last pos");
         CHECK(step(s, o, q, false, 0.9), "hold 0.9s alive");
-        CHECK(!step(s, o, q, false, 1.2), "hold dies after 1s");
+        CHECK(step(s, o, q, false, 1.5), "hold 1.5s still alive (extended to 2s)");
+        CHECK(!step(s, o, q, false, 2.5), "hold dies after 2s");
         // Умер = неизвестно где: следующий отсчёт принимаем как первый,
         // без подтверждения скачка (убежавший куда-то игрок не залипает
         // в «неподтверждённом» состоянии навсегда).
         Vec3 far{600, 64, 600};
-        CHECK(step(s, o, far, true, 1.25), "reborn first read draws");
+        CHECK(step(s, o, far, true, 2.55), "reborn first read draws");
         CHECK(dist(far, {600, 64, 600}) < 1e-4F, "reborn at new place");
     }
     // 3) Движение пешком принимается без подтверждений.
@@ -76,7 +78,8 @@ int main() {
         }
         CHECK(o.conf == 0, "junk never confirms");
     }
-    // 5) Телепорт: два отсчёта подряд в одной точке — подтверждение.
+    // 5) Телепорт: три отсчёта подряд в одной точке — подтверждение.
+    //    (Критично: требуется 3 повтора, а не 2, чтобы не гасить на шуме.)
     {
         State s; Obs o;
         Vec3 p{10, 64, 10};
@@ -86,7 +89,10 @@ int main() {
         CHECK(dist(m, {10, 64, 10}) < 1e-4F, "teleport frame1 holds");
         m = {400, 64, 400};  // фильтр перезаписал верхний кадр — подаём заново
         step(s, o, m, true, 0.066);
-        CHECK(dist(m, {400, 64, 400}) < 1e-4F, "teleport frame2 confirmed");
+        CHECK(dist(m, {10, 64, 10}) < 1e-4F, "teleport frame2 still holds (need 3)");
+        m = {400, 64, 400};
+        step(s, o, m, true, 0.099);
+        CHECK(dist(m, {400, 64, 400}) < 1e-4F, "teleport frame3 confirmed");
         CHECK(o.conf == 1, "teleport confirmed once");
     }
     // 6) Перелёт на коптере 100 м/с @30fps: шаг 3.3м, «та же точка» никогда —
@@ -126,7 +132,7 @@ int main() {
         Vec3 p{10, 64, 10};
         CHECK(step(s, o, p, true, 0.0), "seed");
         Vec3 q{};
-        CHECK(!step(s, o, q, false, 4.0), "gap kills box");
+        CHECK(!step(s, o, q, false, 4.0), "gap kills box after 2s hold");
         // Чтения вернулись: игрок уже далеко и летит прочь.
         Vec3 m{310, 64, 10};
         CHECK(step(s, o, m, true, 4.033), "resume restarts as first draw");

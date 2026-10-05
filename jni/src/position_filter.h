@@ -21,7 +21,7 @@ constexpr float  kPosExtrapolateLimit  = 1.5F; // потолок дорисов�
 constexpr float  kPosJumpSameSpot      = 1.5F; // «та же» подозрительная точка
 constexpr float  kTransportMaxSpeed    = 130.0F; // предел связного перелёта
 
-// Подтвержденная фильтром часть трека игрока.
+// Подтвережденная фильтром часть трека игрока.
 struct State {
     Vec3   drawn{};
     bool   has_drawn = false;
