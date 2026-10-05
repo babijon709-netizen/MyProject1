@@ -285,6 +285,9 @@ static bool RunModeSelect() {
                      : (picked == MODE_RT_HOOK) ? MODE_RT_HOOK
                                                 : MODE_EXTERNAL;
     if (picked >= 0) RememberMode(mode);
+    // Ошибка от нажатия на другую карточку могла появиться перед успешным
+    // выбором RT-Hook/RT-Dev/FT. Не переносим этот устаревший тост в игру.
+    if (picked >= 0 && mode != MODE_EXTERNAL) ClearToast();
     esp_set_mem_backend(mode == MODE_KERNEL ? ESP_MEM_FT
                         : mode == MODE_RT_DEV  ? ESP_MEM_RT_DEV
                         : mode == MODE_RT_HOOK ? ESP_MEM_RT_HOOK

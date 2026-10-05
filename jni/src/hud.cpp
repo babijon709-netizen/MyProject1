@@ -41,6 +41,10 @@ void ShowToast(const char* msg) {
 }
 
 
+void ClearToast() {
+    g_toast = ToastState{};
+}
+
 void DrawToast(float dt) {
     if (!g_toast.visible) return;
     g_toast.life += dt;
