@@ -1,4 +1,6 @@
 #include "game.h"
+#include "aim.h"
+#include "app_state.h"
 #include "player_esp_watchdog.h"
 #include "silent_aim.h"
 #include "viewmodel.h"
@@ -3671,9 +3673,6 @@ bool esp_silent_publish(uint64_t target, const float aim[3]) {
     c.handler_player_offset = EVENT_HANDLER_MANAGER_BACKREF;
     c.look_offset = EVENT_HANDLER_LOOK_DIRECTION;
     c.value_offset = SYNC_VALUE_OFFSET;
-    c.fp_manager_offset = PLAYER_FP_MANAGER;
-    c.weapon_offset = FPMANAGER_CURRENT_OBJECT;
-    c.weapon_player_offset = FPOBJECT_PLAYER_BACKREF;
     auto ptr = [](uint64_t address) {
         uint64_t value = 0;
         return rd_fresh(address, value) ? memio::untag(value) : uint64_t{0};
@@ -3681,15 +3680,10 @@ bool esp_silent_publish(uint64_t target, const float aim[3]) {
     c.handler = ptr(c.player + c.player_handler_offset);
     if (!c.handler || ptr(c.handler + c.handler_player_offset) != c.player) return fail();
     c.look = ptr(c.handler + c.look_offset);
-    c.fp_manager = ptr(c.player + c.fp_manager_offset);
-    if (!c.look || !c.fp_manager) return fail();
-    c.weapon = ptr(c.fp_manager + c.weapon_offset);
-    if (!c.weapon || ptr(c.weapon + c.weapon_player_offset) != c.player) return fail();
+    if (!c.look) return fail();
     c.player_class = ptr(c.player);
     c.handler_class = ptr(c.handler);
     c.look_class = ptr(c.look);
-    c.fp_manager_class = ptr(c.fp_manager);
-    c.weapon_class = ptr(c.weapon);
     c.target = target;
     c.eye[0] = g_cam_pos.x; c.eye[1] = g_cam_pos.y; c.eye[2] = g_cam_pos.z;
     for (int i = 0; i < 3; ++i) c.aim[i] = aim[i];
@@ -3702,11 +3696,11 @@ bool esp_silent_publish(uint64_t target, const float aim[3]) {
         const float inv=1.f/std::sqrt(len2);
         esp_mem_aim_write_fire_dir(direct[0]*inv,direct[1]*inv,direct[2]*inv);
     }
-    static uint64_t previous_player = 0, previous_weapon = 0;
+    static uint64_t previous_player = 0;
     static float previous_shot = 0.f;
     static double hot_until = 0.0;
-    if (previous_player != c.player || previous_weapon != c.weapon) {
-        previous_player = c.player; previous_weapon = c.weapon;
+    if (previous_player != c.player) {
+        previous_player = c.player;
         previous_shot = 0.f; hot_until = 0.0;
     }
     float shot = 0.f;
@@ -3721,7 +3715,11 @@ bool esp_silent_publish(uint64_t target, const float aim[3]) {
 
 
 bool esp_silent_wants_no_spread() {
-    return silent_aim::stats().active;
+    // Writer::active is deliberately target-scoped and falls to false as soon
+    // as AimSelectTarget finds no player in the FOV.  Weapon tuning is a mode
+    // setting, so bind it to the user's enabled silent mode instead.
+    return silent_aim::wants_no_spread(
+        g_state.aim_touch, g_state.aim_mode == AIM_MODE_SILENT, g_state.freecam_on);
 }
 
 // Unity Matrix4x4 is column-major in memory: m[col*4 + row].

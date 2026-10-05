@@ -464,10 +464,11 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z);
 // дальность луча. false — ось не нашлась (нет игрока/хендлера/привязки).
 bool esp_mem_aim_write_fire_dir(float x, float y, float z);
 
-// Publish a fully validated local-player/weapon snapshot to the independent
-// high-frequency silent writer. `aim` is the exact world-space bone point.
+// Publish a fully validated local-player/LookDirection snapshot to the
+// independent high-frequency silent writer. `aim` is the exact world-space bone point.
 bool esp_silent_publish(uint64_t target, const float aim[3]);
-// Silent requests object-data No Spread while it owns a fresh target.
+// Silent requests object-data No Spread while the user keeps silent mode enabled,
+// independently of whether a target is currently inside the aim FOV.
 bool esp_silent_wants_no_spread();
 
 // ---- Фрикам ---------------------------------------------------------------

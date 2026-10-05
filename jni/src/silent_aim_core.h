@@ -37,18 +37,18 @@ inline bool direction(const Command& c, float (&out)[3]) {
 inline bool valid_command(const Command& c) {
     if (c.pid <= 0 || !valid_pointer(c.target)) return false;
     for (uint64_t p : {c.player, c.handler, c.look, c.player_class,
-                       c.handler_class, c.look_class, c.fp_manager, c.weapon,
-                       c.fp_manager_class, c.weapon_class})
+                       c.handler_class, c.look_class})
         if (!valid_pointer(p)) return false;
     for (uint64_t o : {c.player_handler_offset, c.handler_player_offset,
-                       c.look_offset, c.value_offset, c.fp_manager_offset, c.weapon_offset,
-                       c.weapon_player_offset})
+                       c.look_offset, c.value_offset})
         if (o < 0x10 || o > 0x1000) return false;
     float dir[3];
     return direction(c, dir);
 }
 // read() обязан обходить кадровый кэш. Перед КАЖДОЙ записью повторно
-// проверяются class pointers, обратные ссылки игрока и текущее оружие.
+// проверяются class pointers и обратные ссылки PlayerEventHandler. Состояние
+// текущего FPObject намеренно не является guard: его layout зависит от типа
+// оружия, а LookDirection принадлежит игроку и переживает смену оружия.
 template<class Memory>
 bool guarded(Memory& mem, const Command& c) {
     auto equal = [&](uint64_t address, uint64_t expected) {
@@ -60,12 +60,7 @@ bool guarded(Memory& mem, const Command& c) {
            equal(c.handler, c.handler_class) &&
            equal(c.handler + c.handler_player_offset, c.player) &&
            equal(c.handler + c.look_offset, c.look) &&
-           equal(c.look, c.look_class) &&
-           equal(c.player + c.fp_manager_offset, c.fp_manager) &&
-           equal(c.fp_manager, c.fp_manager_class) &&
-           equal(c.fp_manager + c.weapon_offset, c.weapon) &&
-           equal(c.weapon, c.weapon_class) &&
-           equal(c.weapon + c.weapon_player_offset, c.player);
+           equal(c.look, c.look_class);
 }
 enum class Result { written, invalid, guard_failed, write_failed };
 template<class Memory>
