@@ -455,17 +455,20 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         // игроков с корректным скелетом, и прицел уезжал на него (19.09).
         if (b.dead) { ++s_dead_skipped; continue; }
         AimTarget t;
-        // Exact bone, with graceful fallback to the next-best bone.
-        // Slots: 0 head, 1 neck, 2 chest. Never fall back below the chest.
+        // Memory mode has an exact bone lock: it never substitutes a nearby
+        // joint when the selected slot is unavailable. A head/neck/chest swap
+        // is a visible angular jump at range, so a missing requested bone makes
+        // that target ineligible until that exact rig point is readable again.
+        const bool strictBoneLock = g_state.aim_mode == AIM_MODE_MEMORY;
+        // Other modes retain the old graceful fallback order.
         static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
         int usedBone = -1;
-        // Прилипчивость точки прицела. Слоты головы, шеи и груди разнесены на
-        // 0.2-0.3 м (это до полуградуса на дистанции), а читаются они не каждый
-        // кадр: раньше слот перескакивал между ними из кадра в кадр, и прицел
-        // мелко трясло в стороны. Пока цель та же и слот читается — держим его;
-        // цепочка запасных слотов работает заново только когда он пропал.
-        if (b.id != 0 && b.id == pick.lastId && pick.lastBone >= 0 && pick.lastBone < 3 &&
-            b.aim_valid[pick.lastBone]) {
+        if (strictBoneLock) {
+            if (b.aim_valid[wantBone]) usedBone = wantBone;
+        } else if (b.id != 0 && b.id == pick.lastId && pick.lastBone >= 0 && pick.lastBone < 3 &&
+                   b.aim_valid[pick.lastBone]) {
+            // Keep the readable point while this target remains selected: rig
+            // points are sampled independently and switching them causes jitter.
             usedBone = pick.lastBone;
         } else {
             for (int k = 0; k < 3; ++k) {
@@ -538,7 +541,11 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             case 2:  score = rangeTerm * 4.f + pixelTerm * 0.05f; break;
             default: score = pixelTerm + rangeTerm * 0.8f; break;
         }
-        if (sticky) score *= 0.35f;
+        // A memory lock is target-sticky as well as bone-sticky: while its
+        // exact selected bone is valid, no newly closer target may steal it.
+        // The lock is released only by an invalid/dead/out-of-range target.
+        if (strictBoneLock && sticky) score = -1.f;
+        else if (sticky) score *= 0.35f;
         if (score < bestScore) { bestScore = score; best = t; }
     }
 
@@ -1388,13 +1395,13 @@ static void AimLogTick(float dt) {
 // Знаки накопителя (замер в логах): [0] rotationX = минус тангаж (вверх —
 // меньше), [1] rotationY = рысканье (вправо — больше).
 
-// Плавный жёсткий лок: шаг всегда идёт к той же кости, но большой остаток
-// режется по скорости. По мере подхода шаг пропорционален остатку, а последние
-// 0.10° кладутся целиком — прицел приходит точно в кость без резкого первого
-// разворота и без бесконечного хвоста.
-static constexpr float kMemSettleDeg     = 0.10f;
-static constexpr float kMemFollowAt60Hz = 0.48f;
-static constexpr float kMemMaxSpeedDeg  = 108.0f;
+// Плавный жёсткий лок: контроллер держит выбранную кость, но не кладёт в
+// MouseLook полный шум одного снимка рига. Мёртвая зона меньше одного пикселя
+// на обычном FOV; за ней шаг плавно ограничен скоростью. Поэтому лок остаётся
+// на кости, а микроколебания анимации/чтения не превращаются в дёрганье камеры.
+static constexpr float kMemDeadbandDeg  = 0.035f;
+static constexpr float kMemFollowAt60Hz = 0.30f;
+static constexpr float kMemMaxSpeedDeg  = 72.0f;
 // ACK по накопителю: расхождение с нашей записью, в пределах которого игра
 // приняла значение. Это только диагностика отклика в меню.
 static constexpr float kMemAckEps = 0.10f;
@@ -1403,12 +1410,13 @@ static AimMemDiag s_memDiag;
 
 const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
-// Остаток -> гладкий шаг жёсткого лока. В зоне доводки возвращается весь
-// остаток, иначе — пропорциональный шаг с потолком скорости. Коэффициент
-// приведён к dt, поэтому характер лока не меняется вместе с FPS оверлея.
+// Остаток -> гладкий шаг жёсткого лока. Кость должна быть в пределах
+// kMemDeadbandDeg, а не перескакиваться каждым шумным измерением. За границей
+// шаг пропорционален остатку и ограничен угловой скоростью. Коэффициент
+// приведён к dt, поэтому поведение не меняется вместе с FPS оверлея.
 static float mem_axis_step(float err, float dt) {
     if (!std::isfinite(err)) return 0.f;
-    if (fabsf(err) <= kMemSettleDeg) return err;
+    if (fabsf(err) <= kMemDeadbandDeg) return 0.f;
     const float framesAt60 = dt * 60.f;
     const float gain = 1.f - powf(1.f - kMemFollowAt60Hz, framesAt60);
     const float maxStep = kMemMaxSpeedDeg * dt;

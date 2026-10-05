@@ -1002,17 +1002,13 @@ float TabContent(int tab, float dt, float cW) {
         // Диагностические строки («не применено» / «ожидание») убраны по
         // просьбе пользователя: применение видно в игре, подробности — в журнале.
         SHdr(XS("Темп оружия"));
-        CardBg(Layout::RowH * 3.f);
-        const bool oldFastFire = g_state.fast_fire, oldFastReload = g_state.fast_reload,
-                   oldFastProjectiles = g_state.fast_projectiles;
+        CardBg(Layout::RowH * 2.f);
+        const bool oldFastFire = g_state.fast_fire, oldFastReload = g_state.fast_reload;
         ToggleRow("##fastfire", XS("Быстрая стрельба"), &g_state.fast_fire,
                   g_state.a_fast_fire, false, true);
         ToggleRow("##fastreload", XS("Быстрая перезарядка"), &g_state.fast_reload,
-                  g_state.a_fast_reload, false, false);
-        ToggleRow("##fastprojectiles", XS("Быстрые снаряды"), &g_state.fast_projectiles,
-                  g_state.a_fast_projectiles, true, false);
-        if (oldFastFire != g_state.fast_fire || oldFastReload != g_state.fast_reload ||
-            oldFastProjectiles != g_state.fast_projectiles)
+                  g_state.a_fast_reload, true, false);
+        if (oldFastFire != g_state.fast_fire || oldFastReload != g_state.fast_reload)
             esp_viewmodel_tick(vm);
 
         SHdr(XS("Подбор"));
@@ -1831,7 +1827,6 @@ void RenderMenu() {
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_fast_fire, g_state.fast_fire, dt);
     Tick(g_state.a_fast_reload, g_state.fast_reload, dt);
-    Tick(g_state.a_fast_projectiles, g_state.fast_projectiles, dt);
     Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);
     Tick(g_state.a_fps_120, g_state.viewmodel.fps_limit == 120, dt);
     Tick(g_state.a_fps_144, g_state.viewmodel.fps_limit == 144, dt);

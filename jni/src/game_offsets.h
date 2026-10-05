@@ -301,18 +301,6 @@ inline constexpr std::uint64_t FPMANAGER_AIM_BLEND           = 0xA8;
 inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF       = 0xC0;
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING            = 0x120;
 
-// Shafted projectiles (dump11940 + libil2cpp): every supported thrown/physical
-// projectile weapon owns a ShaftedProjectile prefab.  m_LaunchSpeed at +0xA8
-// is consumed by the ballistic integrator on the spawned projectile.  These
-// are fields of the live first-person object, not library/code locations.
-inline constexpr std::uint64_t FPBOW_PROJECTILE_PREFAB          = 0x150;
-inline constexpr std::uint64_t FPCROSSBOW_PROJECTILE_PREFAB     = 0x148;
-inline constexpr std::uint64_t FPSNOWBALL_PROJECTILE_PREFAB     = 0x130;
-inline constexpr std::uint64_t FPROCKET_PROJECTILE_PREFAB       = 0x148;
-inline constexpr std::uint64_t FPEXPLOSIVE_PROJECTILE_PREFAB    = 0x130;
-inline constexpr std::uint64_t FPSPEAR_PROJECTILE_PREFAB        = 0x170;
-inline constexpr std::uint64_t SHAFTEDPROJECTILE_LAUNCH_SPEED   = 0xA8;
-
 // Максимальная дальность удара ближним орудием (топор/кирка/пила/копьё).
 // Из дампа 62a8534, класс Oxide.FPMelee (наследники: FPTool -> FPChainsaw,
 // FPSpear, FPBuildingHammer, FPTorch — имена читаемые, не ротируют):

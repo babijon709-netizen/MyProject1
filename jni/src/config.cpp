@@ -264,9 +264,10 @@ struct CfgBlob {
     //       bit 4 screen freecam button HIDDEN (inverted: old configs hold 0
     //       here, i.e. the button stays visible, as before), bit 5 scrap ESP,
     //       bit 6 fast fire, bit 7 fast reload, bit 8 house boxes HIDDEN
-    //       (inverted like bit 4: old configs hold 0, i.e. visible, as before),
-    //       bit 9 fast physical projectiles; the float mantissa holds 24 bits, so
-    //       this keeps the stable v4 record layout intact.
+    //       (inverted like bit 4: old configs hold 0, i.e. visible, as before).
+    //       Bit 9 belongs to a retired option: it is never written and is
+    //       deliberately ignored on load so older profiles keep their other
+    //       packed settings.
     //   y = marker draw distance (m),
     //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
     //   w = pickup colour packed as r*65536 + g*256 + b (exact in a float,
@@ -330,8 +331,7 @@ static void ConfigSaveToPath(const std::string& path) {
                           (g_state.fast_fire ? 64 : 0) | (g_state.fast_reload ? 128 : 0) |
                           // Инвертировано, как бит 4: старые конфиги держат 0,
                           // то есть ящики в домах видны — как до разделения.
-                          (g_state.esp_house_boxes ? 0 : 256) |
-                          (g_state.fast_projectiles ? 512 : 0);
+                          (g_state.esp_house_boxes ? 0 : 256);
         auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
         const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
                                    + ch(cfg::esp::pickup_col.y) * 256
@@ -465,7 +465,6 @@ void ConfigLoad(int idx, bool announce) {
         g_state.fast_fire = (flags & 64) != 0;
         g_state.fast_reload = (flags & 128) != 0;
         g_state.esp_house_boxes = (flags & 256) == 0;
-        g_state.fast_projectiles = (flags & 512) != 0;
         g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;
