@@ -172,14 +172,14 @@ void DrawToggle(ImDrawList* dl, float ax, float cy, float t) {
     const float tW = 58.f, tH = 32.f, pad = 4.f;
     const float tx = ax, ty = cy - tH * 0.5f;
     const ImVec4 track = C::Lerp4(C::Light::TrkOff, C::Dark::TrkOff);
-    dl->AddRectFilled({tx, ty}, {tx + tW, ty + tH}, C::Mix(track, C::Acc(), t), 7.f);
+    dl->AddRectFilled({tx, ty}, {tx + tW, ty + tH}, C::Mix(track, C::Acc(), t), tH * 0.5f);
     dl->AddRect({tx, ty}, {tx + tW, ty + tH},
-                C::UA(t > 0.5f ? C::AccDk() : C::Sep(), 0.75f), 7.f, 0, 1.f);
+                C::UA(t > 0.5f ? C::AccDk() : C::Sep(), 0.75f), tH * 0.5f, 0, 1.f);
 
     const float knobW = 22.f;
     const float kx = Lerpf(tx + pad, tx + tW - pad - knobW, t);
     dl->AddRectFilled({kx, ty + pad}, {kx + knobW, ty + tH - pad},
-                      t > 0.5f ? C::U(C::Bg()) : C::U(C::Txt()), 4.f);
+                      t > 0.5f ? C::U(C::Bg()) : C::U(C::Txt()), (tH - pad * 2.f) * 0.5f);
 }
 
 static void RenderToggleRowVisuals(ImDrawList* dl, ImFont* fn, float fs,
@@ -229,7 +229,7 @@ static void RenderSliderVisuals(ImDrawList* dl, ImFont* fn, float fs,
     const float badgeX = cX + cW - padX - badgeW;
     const float badgeY = rowY + 12.f;
     dl->AddRectFilled({badgeX, badgeY}, {badgeX + badgeW, badgeY + badgeH},
-                      C::UA(C::TrkOff(), 0.75f * alpha), 5.f);
+                      C::UA(C::TrkOff(), 0.75f * alpha), badgeH * 0.5f);
     dl->AddText(fn, valueFS, {badgeX + (badgeW - vsz.x) * 0.5f,
                               badgeY + (badgeH - vsz.y) * 0.5f},
                 C::UA(C::Acc(), alpha), valBuf);
@@ -247,10 +247,10 @@ static void RenderSliderVisuals(ImDrawList* dl, ImFont* fn, float fs,
     const float knobH = active ? 28.f : 22.f;
     dl->AddRectFilled({kx - knobW * 0.5f, tY - knobH * 0.5f},
                       {kx + knobW * 0.5f, tY + knobH * 0.5f},
-                      C::UA(C::Acc(), alpha), 4.f);
+                      C::UA(C::Acc(), alpha), knobW * 0.5f);
     dl->AddRect({kx - knobW * 0.5f, tY - knobH * 0.5f},
                 {kx + knobW * 0.5f, tY + knobH * 0.5f},
-                C::UA(C::Bg(), 0.55f * alpha), 4.f, 0, 1.f);
+                C::UA(C::Bg(), 0.55f * alpha), knobW * 0.5f, 0, 1.f);
 
     if (!last && showSep)
         dl->AddLine({cX + padX, rowY + rowH - 0.5f},
@@ -459,8 +459,8 @@ bool CollapsibleHeader(const char* id, const char* lbl, int secId) {
     const float side = 36.f;
     const float x0 = b1.x - padX - side;
     const float y0 = pos.y + (rowH - side) * 0.5f;
-    dl->AddRectFilled({x0, y0}, {x0 + side, y0 + side}, C::U(C::TrkOff()), 6.f);
-    dl->AddRect({x0, y0}, {x0 + side, y0 + side}, C::UA(C::Sep(), 0.85f), 6.f, 0, 1.f);
+    dl->AddRectFilled({x0, y0}, {x0 + side, y0 + side}, C::U(C::TrkOff()), R::Btn);
+    dl->AddRect({x0, y0}, {x0 + side, y0 + side}, C::UA(C::Sep(), 0.85f), R::Btn, 0, 1.f);
     const float cx = x0 + side * 0.5f, cy = y0 + side * 0.5f;
     dl->AddLine({cx - 5.f, cy - 7.f}, {cx + 3.f, cy}, C::U(C::Acc()), 2.4f);
     dl->AddLine({cx + 3.f, cy}, {cx - 5.f, cy + 7.f}, C::U(C::Acc()), 2.4f);
@@ -574,8 +574,8 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
         const float x0 = sheetX + sheetW - side - 16.f;
         const float y0 = sheetY + 27.f;
         const float cx2 = x0 + side * 0.5f, cy2 = y0 + side * 0.5f;
-        fg->AddRectFilled({x0, y0}, {x0 + side, y0 + side}, C::U(C::TrkOff()), 6.f);
-        fg->AddRect({x0, y0}, {x0 + side, y0 + side}, C::UA(C::Sep(), 0.9f), 6.f, 0, 1.f);
+        fg->AddRectFilled({x0, y0}, {x0 + side, y0 + side}, C::U(C::TrkOff()), R::Btn);
+        fg->AddRect({x0, y0}, {x0 + side, y0 + side}, C::UA(C::Sep(), 0.9f), R::Btn, 0, 1.f);
         const float cs = 6.f;
         fg->AddLine({cx2 - cs, cy2 - cs}, {cx2 + cs, cy2 + cs}, C::U(C::Dim()), 2.f);
         fg->AddLine({cx2 + cs, cy2 - cs}, {cx2 - cs, cy2 + cs}, C::U(C::Dim()), 2.f);
@@ -628,9 +628,11 @@ void DrawSheet(float dt, ImVec2 menuPos, float WW, float WH) {
         const float knobW = near ? 18.f : 14.f;
         const float knobH = near ? 28.f : 22.f;
         fg->AddRectFilled({kx - knobW * 0.5f, trkY - knobH * 0.5f},
-                          {kx + knobW * 0.5f, trkY + knobH * 0.5f}, C::U(C::Acc()), 4.f);
+                          {kx + knobW * 0.5f, trkY + knobH * 0.5f},
+                          C::U(C::Acc()), knobW * 0.5f);
         fg->AddRect({kx - knobW * 0.5f, trkY - knobH * 0.5f},
-                    {kx + knobW * 0.5f, trkY + knobH * 0.5f}, C::UA(C::Bg(), 0.55f), 4.f, 0, 1.f);
+                    {kx + knobW * 0.5f, trkY + knobH * 0.5f},
+                    C::UA(C::Bg(), 0.55f), knobW * 0.5f, 0, 1.f);
         if (near) { float dx = io.MousePos.x - trkX; *v = mn + Clamp01(dx / trkW) * (mx - mn); }
         char minB[16], maxB[16];
         snprintf(minB, 16, g_sheet.slFmt, mn); snprintf(maxB, 16, g_sheet.slFmt, mx);
@@ -753,13 +755,13 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
             Lerpf(C::TrkOff().x, C::Acc().x, fill),
             Lerpf(C::TrkOff().y, C::Acc().y, fill),
             Lerpf(C::TrkOff().z, C::Acc().z, fill), alpha};
-        fg->AddRectFilled({x0, y0}, {x0 + side, y0 + side}, C::U(radio), 6.f);
+        fg->AddRectFilled({x0, y0}, {x0 + side, y0 + side}, C::U(radio), side * 0.34f);
         fg->AddRect({x0, y0}, {x0 + side, y0 + side},
-                    C::UA(fill > 0.5f ? C::AccDk() : C::Sep(), alpha), 6.f, 0, 1.f);
+                    C::UA(fill > 0.5f ? C::AccDk() : C::Sep(), alpha), side * 0.34f, 0, 1.f);
         if (fill > 0.01f) {
             const float m = Lerpf(side * 0.5f, 7.f, fill);
             fg->AddRectFilled({x0 + m, y0 + m}, {x0 + side - m, y0 + side - m},
-                              C::UA(C::Bg(), fill * alpha), 2.f);
+                              C::UA(C::Bg(), fill * alpha), 3.f);
         }
 
         if (!last && g_state.ui_show_sep)
@@ -1089,8 +1091,9 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
         {
             float r,g,b; ImGui::ColorConvertHSVtoRGB(s_h, s_s, s_v, r, g, b);
             fg->AddRectFilled({X, prevY}, {X+W, prevY+prevH},
-                IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255), 10.f);
-            fg->AddRect({X, prevY}, {X+W, prevY+prevH}, IM_COL32(255,255,255,80), 10.f, 0, 1.2f);
+                IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255), prevH * 0.5f);
+            fg->AddRect({X, prevY}, {X+W, prevY+prevH},
+                        IM_COL32(255,255,255,80), prevH * 0.5f, 0, 1.2f);
         }
         // SV field — на всю ширину и высоту до полосы оттенка
         {
@@ -1194,8 +1197,8 @@ void DrawPopover(float dt, ImVec2 menuPos, float WW, float WH) {
         const float x0 = sX + sW - side - 16.f;
         const float y0 = sY + 25.f;
         const float bcx = x0 + side * 0.5f, bcy = y0 + side * 0.5f;
-        fg->AddRectFilled({x0, y0}, {x0 + side, y0 + side}, C::UA(C::TrkOff(), easeT), 7.f);
-        fg->AddRect({x0, y0}, {x0 + side, y0 + side}, C::UA(C::Sep(), 0.9f * easeT), 7.f, 0, 1.f);
+        fg->AddRectFilled({x0, y0}, {x0 + side, y0 + side}, C::UA(C::TrkOff(), easeT), R::Btn);
+        fg->AddRect({x0, y0}, {x0 + side, y0 + side}, C::UA(C::Sep(), 0.9f * easeT), R::Btn, 0, 1.f);
         const float cs = 8.f;
         fg->AddLine({bcx-cs, bcy-cs}, {bcx+cs, bcy+cs}, C::UA(C::Dim(), easeT), 2.5f);
         fg->AddLine({bcx+cs, bcy-cs}, {bcx-cs, bcy+cs}, C::UA(C::Dim(), easeT), 2.5f);

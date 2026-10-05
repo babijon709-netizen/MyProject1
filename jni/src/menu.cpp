@@ -22,10 +22,9 @@ struct TabRect { float sx; };
 static TabRect tab_rects[kTabCount];
 
 // ---- Акцент интерфейса: палитра стиля всего GUI ---------------------------
-// 0 — базовая охра (без оверрайда: отдельный оттенок для Light/Dark), 1..7 —
-// пресеты, kAccentCustom — свой цвет из g_state.ui_accent_rgb.
+// Нулевой пресет оставляет интерфейс монохромным.
 static const ImVec4 kAccentCols[] = {
-    {0.843f, 0.635f, 0.310f, 1.f},  // 0 охра (показывается, не применяется)
+    {0.900f, 0.900f, 0.900f, 1.f},  // 0 монохром
     {0.290f, 0.475f, 0.690f, 1.f},  // 1 синий
     {0.220f, 0.610f, 0.620f, 1.f},  // 2 бирюзовый
     {0.365f, 0.635f, 0.380f, 1.f},  // 3 зелёный
@@ -96,13 +95,13 @@ float TabContent(int tab, float dt, float cW) {
                 const float side = 28.f;
                 const float x0 = cX + cW - padX - side, y0 = cy - side * 0.5f;
                 dl->AddRectFilled({x0, y0}, {x0 + side, y0 + side},
-                                  C::Mix(C::TrkOff(), C::Acc(), anim), 6.f);
+                                  C::Mix(C::TrkOff(), C::Acc(), anim), side * 0.34f);
                 dl->AddRect({x0, y0}, {x0 + side, y0 + side},
-                            C::UA(on ? C::AccDk() : C::Sep(), 0.9f), 6.f, 0, 1.f);
+                            C::UA(on ? C::AccDk() : C::Sep(), 0.9f), side * 0.34f, 0, 1.f);
                 if (anim > 0.01f) {
                     const float m = Lerpf(side * 0.5f, 7.f, anim);
                     dl->AddRectFilled({x0 + m, y0 + m}, {x0 + side - m, y0 + side - m},
-                                      C::UA(C::Bg(), anim), 2.f);
+                                      C::UA(C::Bg(), anim), 3.f);
                 }
                 dl->AddText(fn, fs * 1.08f, {cX + padX, cy - fs * 1.08f * 0.5f},
                             C::UA(on ? C::Txt() : C::Dim(), 1.f), lbl);
@@ -143,13 +142,13 @@ float TabContent(int tab, float dt, float cW) {
                 const float side = 28.f;
                 const float x0 = cX + cW - padX - side, y0 = cy - side * 0.5f;
                 dl->AddRectFilled({x0, y0}, {x0 + side, y0 + side},
-                                  C::Mix(C::TrkOff(), C::Acc(), anim), 6.f);
+                                  C::Mix(C::TrkOff(), C::Acc(), anim), side * 0.34f);
                 dl->AddRect({x0, y0}, {x0 + side, y0 + side},
-                            C::UA(on ? C::AccDk() : C::Sep(), 0.9f), 6.f, 0, 1.f);
+                            C::UA(on ? C::AccDk() : C::Sep(), 0.9f), side * 0.34f, 0, 1.f);
                 if (anim > 0.01f) {
                     const float m = Lerpf(side * 0.5f, 7.f, anim);
                     dl->AddRectFilled({x0 + m, y0 + m}, {x0 + side - m, y0 + side - m},
-                                      C::UA(C::Bg(), anim), 2.f);
+                                      C::UA(C::Bg(), anim), 3.f);
                 }
                 dl->AddText(fn, fs * 1.08f, {cX + padX, cy - fs * 1.08f * 0.5f},
                             C::UA(on ? C::Txt() : C::Dim(), 1.f), lbl);
@@ -209,13 +208,13 @@ float TabContent(int tab, float dt, float cW) {
                 const float side = 28.f;
                 const float x0 = cX + cW - padX - side, y0 = cy - side * 0.5f;
                 dl->AddRectFilled({x0, y0}, {x0 + side, y0 + side},
-                                  C::Mix(C::TrkOff(), C::Acc(), anim), 6.f);
+                                  C::Mix(C::TrkOff(), C::Acc(), anim), side * 0.34f);
                 dl->AddRect({x0, y0}, {x0 + side, y0 + side},
-                            C::UA(on ? C::AccDk() : C::Sep(), 0.9f), 6.f, 0, 1.f);
+                            C::UA(on ? C::AccDk() : C::Sep(), 0.9f), side * 0.34f, 0, 1.f);
                 if (anim > 0.01f) {
                     const float m = Lerpf(side * 0.5f, 7.f, anim);
                     dl->AddRectFilled({x0 + m, y0 + m}, {x0 + side - m, y0 + side - m},
-                                      C::UA(C::Bg(), anim), 2.f);
+                                      C::UA(C::Bg(), anim), 3.f);
                 }
                 dl->AddText(fn, fs * 1.08f, {cX + padX, cy - fs * 1.08f * 0.5f},
                             C::UA(on ? C::Txt() : C::Dim(), 1.f), lbl);
@@ -518,8 +517,7 @@ float TabContent(int tab, float dt, float cW) {
             float nameFS = fs * 1.15f;
             float subFS  = fs * 0.78f;
             float textH  = fn->CalcTextSizeA(nameFS, FLT_MAX, 0, XS("A")).y;
-            float subH   = fn->CalcTextSizeA(subFS,  FLT_MAX, 0, XS("A")).y;
-            float topH   = ImMax(icSz, textH + 6.f + subH);
+            float topH   = ImMax(icSz, textH);
             float cardH  = padTop + topH + midGap + btnH2 + padBot;
 
             for (int ci = 0; ci < g_configCount; ci++) {
@@ -574,11 +572,10 @@ float TabContent(int tab, float dt, float cW) {
 
                 float nameAreaR = easedA > 0.01f ? (cx1 - bW * easedA - 10.f) : (cx1 - padH);
                 float nameX = icX + icSz + nameGap;
-                float nameY = rowCY - (textH + 6.f + subH) * 0.5f;
+                float nameY = rowCY - textH * 0.5f;
 
                 dl->PushClipRect({nameX, pos.y}, {nameAreaR, pos.y + cardH}, true);
                 dl->AddText(fn, nameFS, {nameX, nameY}, C::U(C::Txt()), g_configs[ci].name);
-                dl->AddText(fn, subFS, {nameX, nameY + textH + 6.f}, C::UA(C::Dim(), 0.7f), XS("config"));
                 dl->PopClipRect();
 
                 if (easedA > 0.01f) {
@@ -706,10 +703,7 @@ float TabContent(int tab, float dt, float cW) {
             ImGui::Dummy({avW, 0.f});
         }
 
-        SHdr(XS("Интерфейс"));
-        CardBg(Layout::RowH * 1);
-        if (ToggleRow("##ud2", XS("Тёмная тема"), &g_state.ui_dark_mode, g_state.a_ui_dark, true, true))
-            g_darkTheme = g_state.ui_dark_mode;
+        // Тема фиксирована в чёрном режиме; старый переключатель удалён.
 
         // ---- Акцент: палитра стиля всего GUI -------------------------------
         // Ряд кругов: 8 пресетов + свой цвет (тап открывает палитру, как точки
@@ -863,7 +857,7 @@ float TabContent(int tab, float dt, float cW) {
                 float mx = ox0 + (cardW - mw) * 0.5f;
                 float my = pos.y + 14.f;
                 ImU32 frameCol = C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.95f : 0.6f);
-                dl->AddRect({mx, my}, {mx + mw, my + mh}, frameCol, 6.f, 0, 2.f);
+                dl->AddRect({mx, my}, {mx + mw, my + mh}, frameCol, R::Btn, 0, 2.f);
                 if (opts[oi].left)
                     dl->AddRectFilled({mx + 3.f, my + 3.f}, {mx + 3.f + 16.f, my + mh - 3.f},
                                       C::UA(sel ? C::Acc() : C::Dim(), sel ? 0.85f : 0.4f), 4.f);
@@ -1027,10 +1021,10 @@ float TabContent(int tab, float dt, float cW) {
                     g_input.touchConsumed = true;
                 }
                 const bool on = (vm.fps_limit == limit);
-                dl->AddRectFilled({cX, cY}, {cX + chipW, cY + chipH}, C::U(C::Card()), 6.f);
+                dl->AddRectFilled({cX, cY}, {cX + chipW, cY + chipH}, C::U(C::Card()), R::Btn);
                 if (anim > 0.01f)
-                    dl->AddRectFilled({cX, cY}, {cX + chipW, cY + chipH}, C::UA(C::Acc(), 0.9f * anim), 6.f);
-                if (on) dl->AddRect({cX, cY}, {cX + chipW, cY + chipH}, C::UA(C::Acc(), 1.f), 6.f, 0, 1.6f);
+                    dl->AddRectFilled({cX, cY}, {cX + chipW, cY + chipH}, C::UA(C::Acc(), 0.9f * anim), R::Btn);
+                if (on) dl->AddRect({cX, cY}, {cX + chipW, cY + chipH}, C::UA(C::Acc(), 1.f), R::Btn, 0, 1.6f);
                 auto tsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, lbl);
                 dl->AddText(fn, fs, {cX + (chipW - tsz.x) * 0.5f, cY + (chipH - tsz.y) * 0.5f},
                             C::UA(on ? C::Txt() : C::Dim(), 1.f), lbl);
@@ -1611,6 +1605,8 @@ void RenderMenu() {
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
+    g_darkTheme = true;
+    g_state.ui_dark_mode = true;
     SyncAccentToTheme();   // акцент палитры -> тема (и дебаунс-сохранение)
 
     if (g_menu_orient != displayInfo.orientation || g_menu_dw != (int)displayInfo.width || g_menu_dh != (int)displayInfo.height) {
@@ -1659,7 +1655,6 @@ void RenderMenu() {
     Tick(g_state.a_aim_mode2,  g_state.aim_mode == AIM_MODE_SILENT, dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
-    Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
     Tick(g_state.a_farm_on,     g_state.farm_on,     dt);
     Tick(g_state.a_farm_wood,   g_state.farm_wood,   dt);
     Tick(g_state.a_farm_stone,  g_state.farm_stone,  dt);
@@ -1706,7 +1701,7 @@ void RenderMenu() {
 
         // Затемнение + рамка-акцент.
         fg->AddRectFilled({0, 0}, {dw, dh}, IM_COL32(0, 0, 0, 90));
-        fg->AddRect({4.f, 4.f}, {dw - 4.f, dh - 4.f}, C::UA(C::Acc(), 0.9f), 10.f, 0, 3.f);
+        fg->AddRect({4.f, 4.f}, {dw - 4.f, dh - 4.f}, C::UA(C::Acc(), 0.9f), R::Sheet, 0, 3.f);
 
         // Подпись, что тапать.
         auto* fn = ImGui::GetFont();
@@ -2042,9 +2037,9 @@ void RenderMenu() {
     {
         const ImVec2 bgP = g_win.pos;
         auto* bgDL = ImGui::GetWindowDrawList();
-        bgDL->AddRectFilled(bgP, {bgP.x + WW, bgP.y + WH}, C::U(C::Bg()), R::Card);
+        bgDL->AddRectFilled(bgP, {bgP.x + WW, bgP.y + WH}, C::U(C::Bg()), R::Sheet);
         bgDL->AddRect(bgP, {bgP.x + WW, bgP.y + WH}, C::UA(C::Sep(), 0.95f),
-                      R::Card, 0, 1.f);
+                      R::Sheet, 0, 1.f);
     }
 
     ImVec2 wp = g_win.pos;
@@ -2156,29 +2151,27 @@ void RenderMenu() {
         const ImVec2 lpPos = ImGui::GetWindowPos();
         auto* ldl = ImGui::GetWindowDrawList();
         ldl->AddRectFilled(lpPos, {lpPos.x + railW, lpPos.y + WH}, C::U(C::LeftBg()),
-                           R::Card, ImDrawFlags_RoundCornersLeft);
+                           R::Sheet, ImDrawFlags_RoundCornersLeft);
         ldl->AddLine({lpPos.x + railW, lpPos.y + 10.f},
                      {lpPos.x + railW, lpPos.y + WH - 10.f}, C::UA(C::Sep(), 0.9f), 1.f);
 
-        // Марка и статус вместо аватара и декоративного macOS-светофора.
-        const float brandY = lpPos.y + 22.f;
-        ldl->AddRectFilled({lpPos.x + 18.f, brandY}, {lpPos.x + 58.f, brandY + 40.f},
-                           C::U(C::Acc()), 7.f);
+        const float brandSide = 44.f;
+        const float brandX = lpPos.x + (railW - brandSide) * 0.5f;
+        const float brandY = lpPos.y + 18.f;
+        ldl->AddRectFilled({brandX, brandY}, {brandX + brandSide, brandY + brandSide},
+                           C::U(C::Acc()), brandSide * 0.32f);
         const char* mark = "B";
         const float markFS = ImGui::GetFontSize() * 1.28f;
         const ImVec2 markSz = ImGui::GetFont()->CalcTextSizeA(markFS, FLT_MAX, 0, mark);
         ldl->AddText(ImGui::GetFont(), markFS,
-                     {lpPos.x + 38.f - markSz.x * 0.5f, brandY + 20.f - markSz.y * 0.5f},
+                     {brandX + (brandSide - markSz.x) * 0.5f,
+                      brandY + (brandSide - markSz.y) * 0.5f},
                      C::U(C::LeftBg()), mark);
-        ldl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.96f,
-                     {lpPos.x + 70.f, brandY + 1.f}, C::U(C::Txt()), "BENZWARE");
-        ldl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.68f,
-                     {lpPos.x + 70.f, brandY + 23.f}, C::U(C::Dim()), "CONTROL DESK");
-        ldl->AddLine({lpPos.x + 18.f, lpPos.y + 82.f},
-                     {lpPos.x + railW - 18.f, lpPos.y + 82.f}, C::UA(C::Sep(), 0.8f), 1.f);
+        ldl->AddLine({lpPos.x + 18.f, lpPos.y + 78.f},
+                     {lpPos.x + railW - 18.f, lpPos.y + 78.f}, C::UA(C::Sep(), 0.8f), 1.f);
 
-        const float startY = 102.f;
-        const float footerH = 54.f;
+        const float startY = 90.f;
+        const float footerH = 18.f;
         const float tabH = ImMin(Layout::TabHV,
                                  ImMax(58.f, (WH - startY - footerH) / (float)kTabShown));
         for (int slot = 0; slot < kTabShown; ++slot) {
@@ -2207,12 +2200,6 @@ void RenderMenu() {
             DrawTabCell(ldl, id, lpPos.x, tab_rects[id].sx, railW, tabH, true);
         }
 
-        const float statusY = lpPos.y + WH - 31.f;
-        ldl->AddCircleFilled({lpPos.x + 23.f, statusY}, 4.f, C::U(C::Acc()), 12);
-        ldl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.68f,
-                     {lpPos.x + 34.f, statusY - ImGui::GetFontSize() * 0.34f},
-                     C::U(C::Dim()), "SESSION ACTIVE");
-
         ImGui::EndChild();
         ImGui::PopStyleColor();
     } else {
@@ -2222,7 +2209,7 @@ void RenderMenu() {
         const ImVec2 lpPos = ImGui::GetWindowPos();
         auto* ldl = ImGui::GetWindowDrawList();
         ldl->AddRectFilled(lpPos, {lpPos.x + WW, lpPos.y + botH}, C::U(C::LeftBg()),
-                           R::Card, ImDrawFlags_RoundCornersBottom);
+                           R::Sheet, ImDrawFlags_RoundCornersBottom);
         ldl->AddLine({lpPos.x + 12.f, lpPos.y}, {lpPos.x + WW - 12.f, lpPos.y},
                      C::UA(C::Sep(), 0.9f), 1.f);
 
@@ -2272,14 +2259,12 @@ void RenderMenu() {
         ImFont* font = ImGui::GetFont();
         const char* title = TabTitle(g_state.cur_tab);
         const float titleFS = ImGui::GetFontSize() * 1.42f;
-        const float metaFS = ImGui::GetFontSize() * 0.68f;
         const ImVec2 titleSz = font->CalcTextSizeA(titleFS, FLT_MAX, 0, title);
-        cdl->AddText(font, metaFS, {hp.x + 28.f, hp.y + 15.f},
-                     C::U(C::Dim()), "BENZWARE  /  CONTROL");
-        cdl->AddText(font, titleFS, {hp.x + 28.f, hp.y + 42.f - titleSz.y * 0.25f},
+        cdl->AddText(font, titleFS,
+                     {hp.x + 30.f, hp.y + (hdrH - titleSz.y) * 0.5f},
                      C::U(C::Txt()), title);
-        cdl->AddRectFilled({hp.x + 18.f, hp.y + 14.f},
-                           {hp.x + 21.f, hp.y + 70.f}, C::U(C::Acc()), 1.5f);
+        cdl->AddRectFilled({hp.x + 18.f, hp.y + 22.f},
+                           {hp.x + 22.f, hp.y + hdrH - 22.f}, C::U(C::Acc()), 2.f);
         cdl->AddLine({hp.x + 18.f, hp.y + hdrH - 1.f},
                      {hp.x + cW - 18.f, hp.y + hdrH - 1.f}, C::UA(C::Sep(), 0.85f), 1.f);
 
@@ -2386,7 +2371,7 @@ void RenderMenu() {
         auto* ofg = ImGui::GetForegroundDrawList();
         ImVec4 bgC = C::Bg();
         ofg->AddRectFilled(g_win.pos, {g_win.pos.x + WW, g_win.pos.y + WH},
-            IM_COL32(int(bgC.x*255), int(bgC.y*255), int(bgC.z*255), int(mA * 255)), R::Card);
+            IM_COL32(int(bgC.x*255), int(bgC.y*255), int(bgC.z*255), int(mA * 255)), R::Sheet);
     }
 }
 

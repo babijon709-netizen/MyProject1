@@ -190,26 +190,7 @@ void DrawWatermark(float dt) {
     float scrW = 0.f, scrH = 0.f;
     VisibleScreen(scrW, scrH);
 
-    // ---- Некликабельная пилюля с названием чита (слева сверху) ---------
-    // Тапы по ней не обрабатываются вовсе, так что она «прозрачна» для
-    // кликов и ничему не мешает.
-    {
-        const float fs = 34.f, padX = 22.f, padY = 13.f;
-        const char* name = XS("t.me/benzware");
-        auto nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
-        float bW = padX * 2.f + nSz.x;
-        float bH = padY * 2.f + nSz.y;
-        const float bX = 12.f, bY = 12.f;
-        fg->AddRectFilled({bX + 1.f, bY + 3.f}, {bX + bW + 1.f, bY + bH + 3.f},
-                          IM_COL32(0, 0, 0, 28), R::Card);
-        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.92f), R::Card);
-        fg->AddRect({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Sep(), 0.9f), R::Card, 0, 1.f);
-        fg->AddRectFilled({bX, bY}, {bX + 4.f, bY + bH}, C::UA(acc, 0.95f), 2.f);
-        fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(C::Txt(), 0.95f), name);
-
-    }
-
-    // ---- Пилюля-счётчик противников --------------------------------------
+    // ---- Счётчик противников ----------------------------------------------
     // Дефолт — верх по центру; двигается тапом в Опциях → Худ.
     // Показывает, сколько игроков видит ESP; тап по ней открывает/закрывает
     // меню.
@@ -268,7 +249,7 @@ void DrawWatermark(float dt) {
 
         const float dcy = bY + bH * 0.5f;
         const ImU32 enemyCol = C::U(acc);
-        const ImU32 botCol = IM_COL32(105, 150, 162, 255);
+        const ImU32 botCol = C::U(C::Dim());
         auto drawPersonIcon = [&](float x, ImU32 col, bool bot) {
             // Both glyphs use exactly the same 24x24 box. Only the visor
             // differentiates bots, so neither icon appears visually larger.

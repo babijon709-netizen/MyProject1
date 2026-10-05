@@ -104,8 +104,7 @@ static bool ModeButton(const char* id, float w, float h, const char* title,
                 C::U(style_on ? C::Txt() : C::Dim()), title);
 
     const float sx = p.x + w - 22.f, sy = p.y + 18.f;
-    dl->AddRectFilled({sx - 5.f, sy - 5.f}, {sx + 5.f, sy + 5.f},
-                      C::U(style_on ? C::Acc() : C::Dim()), 2.f);
+    dl->AddCircleFilled({sx, sy}, 5.f, C::U(style_on ? C::Acc() : C::Dim()), 16);
     return tapped;
 }
 
@@ -170,7 +169,7 @@ static bool RunModeSelect() {
             const float btnH = fs * 3.4f;
             const float panelW = ImMin(vw - 32.f, 690.f);
             const float btnW = (panelW - 64.f - gap) * 0.5f;
-            const float panelH = 90.f + tfs + 28.f + btnH * 2.f + gap + 34.f;
+            const float panelH = 72.f + tfs + 24.f + btnH * 2.f + gap + 30.f;
             const float panelX = (vw - panelW) * 0.5f;
             const float panelY = (vh - panelH) * 0.5f + slide;
 
@@ -184,18 +183,15 @@ static bool RunModeSelect() {
             dl->AddRectFilled({panelX, panelY}, {panelX + 5.f, panelY + panelH},
                               C::UA(C::Acc(), t), 2.f);
 
-            const float metaFS = fs * 0.70f;
-            dl->AddText(fn, metaFS, {panelX + 32.f, panelY + 22.f},
-                        C::UA(C::Dim(), t), "BENZWARE  /  STARTUP");
-            dl->AddText(fn, tfs, {panelX + 32.f, panelY + 48.f},
+            dl->AddText(fn, tfs, {panelX + 32.f, panelY + 30.f},
                         C::UA(C::Txt(), t), title);
-            dl->AddLine({panelX + 32.f, panelY + 82.f + ts.y},
-                        {panelX + panelW - 32.f, panelY + 82.f + ts.y},
+            dl->AddLine({panelX + 32.f, panelY + 54.f + ts.y},
+                        {panelX + panelW - 32.f, panelY + 54.f + ts.y},
                         C::UA(C::Sep(), 0.85f * t), 1.f);
 
             const float rowW = btnW * 2.f + gap;
             const float bx = panelX + (panelW - rowW) * 0.5f;
-            const float by = panelY + 104.f + ts.y;
+            const float by = panelY + 76.f + ts.y;
             const float by2 = by + btnH + gap;
 
             ImGui::SetCursorScreenPos({bx, by});
