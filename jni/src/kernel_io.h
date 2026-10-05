@@ -599,28 +599,27 @@ private:
     int  attached_pid_ = -1;   // pid, к которому прицеплен gong-сокет (op2)
 };
 
-// ---- класс 3: QX (wanbai) — /dev/<имя>, ioctl 0x801/0x802/0x803 ------------
+// ---- класс 3: RT-Dev (RT【Dev】Driver) — /dev/<имя>, ioctl 0x801/0x802/0x803 ------------
 //
-// Драйверы «QX Perfect core» (пакет QX Perfect core v5): char-устройство в
-// /dev с СЛУЧАЙНЫМ именем (5-6 строчных букв — init_module сам генерирует
-// get_random_u32, скрывается list_del+kobject_del), протокол по эталонному
-// читу (wanbai.hpp) и дизассемблу dispatch_ioctl:
+// Драйверы «RT-Dev» (пакет «rt dev Драйвера root cheat.zip», канал @RTdrivers):
+// char-устройство в /dev со СЛУЧАЙНЫМ именем (6 символов, алфавит
+// "BYNBBYNBBYNBBYNBABCDEFG" — init_module генерирует get_random_u32, регистрирует
+// через alloc_chrdev_region + cdev_add + device_create в mem_tool_class):
 //   0x801 чтение  {u32 pid; u32 pad; u64 addr; u64 buffer; u64 size} — 0x20;
 //   0x802 запись  — та же структура;
 //   0x803 база модуля {pid; char* name; u64 base} (нами не используется:
 //   базы берём из /proc/<pid>/maps, как раньше);
-//   0x800/0x804 — пустышки (возврат 0), ключа НЕТ: эталонный чит работает
-//   без него, диспетчер проверяет только 0x801..0x805.
+//   0x800/0x804 — пустышки (возврат 0).
 // ВАЖНО: read/write_process_memory транслируют ОДНУ страницу и копируют size
 // байт без проверки границы — запросы режем по границам 4К сами.
-// Ошибка команды — возврат -1 (errno 1/EPERM), как у bing-класса.
+// Ошибка команды — возврат -1 (errno 1/EPERM).
 
-constexpr int kQxCmdRead        = 0x801;
-constexpr int kQxCmdWrite       = 0x802;
-constexpr int kQxCmdModuleBase  = 0x803;
+constexpr int kRtDevCmdRead        = 0x801;
+constexpr int kRtDevCmdWrite       = 0x802;
+constexpr int kRtDevCmdModuleBase  = 0x803;
 
 #pragma pack(push, 1)
-struct QxCopyMem {
+struct RtDevCopyMem {
     uint32_t pid;      // +0x00: целевой процесс
     uint32_t pad;      // +0x04
     uint64_t addr;     // +0x08: адрес в памяти игры
@@ -628,11 +627,11 @@ struct QxCopyMem {
     uint64_t size;     // +0x18: сколько байт (не через границу 4К!)
 };
 #pragma pack(pop)
-static_assert(sizeof(QxCopyMem) == 0x20, "размер запроса QX изменился");
+static_assert(sizeof(RtDevCopyMem) == 0x20, "размер запроса RT-Dev изменился");
 
-class QxTransport : public Transport {
+class RtDevTransport : public Transport {
 public:
-    const char* name() const override { return "qx (драйвер)"; }
+    const char* name() const override { return "rt-dev (драйвер)"; }
 
     // Устройство открывается один раз и живёт, пока живёт процесс чита:
     // драйвер переживает переподключения к игре.
@@ -672,9 +671,9 @@ public:
     // Устройство найдено и подтверждено пробой чтения.
     bool verified() const { return verified_; }
 
-    // Живая проба по СОБСТВЕННОЙ памяти (как classify_cmd у bing): читаем
-    // паттерн и пишем в scratch. Подтверждает, что найденное устройство —
-    // действительно QX-драйвер, а не чужой char-dev с похожим именем.
+    // Живая проба по СОБСТВЕННОЙ памяти: читаем паттерн и пишем в scratch.
+    // Подтверждает, что найденное устройство — действительно RT-Dev драйвер,
+    // а не чужой char-dev с похожим именем.
     CmdProbe classify() {
         CmdProbe r;
         if (!ensure_device()) { r.err = errno ? errno : EIO; return r; }
@@ -697,44 +696,41 @@ public:
         }
         pid_ = save_pid;
         r.err = errno ? errno : EPERM;
-        // Нашли устройство, но это не QX: больше не считаем его найденным.
+        // Нашли устройство, но это не RT-Dev: сбрасываем и ищем дальше.
         invalidate();
         return r;
     }
 
 private:
-    // Найти /dev-узел QX. Известные имена + эвристика эталонного чита:
-    // char-устройство, имя только из строчных букв, без '_','-',';', не
-    // gpiochip/std*, uid=gid=0, size 0, atime==ctime, год создания не 1970,
-    // длина имени <= 7. Драйвер сам генерит себе такое имя при загрузке.
-    static bool qx_candidate(const char* name, const struct stat& st) {
-        static const char* kKnown[] = {"wanbai", "CheckMe", "Ckanri", "lanran", "video188"};
+    // Найти /dev-узел RT-Dev. Известные имена + эвристика драйвера:
+    // char-устройство, имя 4..10 символов из букв алфавита,
+    // не системные узлы, uid=gid=0.
+    static bool rt_dev_candidate(const char* name, const struct stat& st) {
+        static const char* kKnown[] = {"wanbai", "CheckMe", "Ckanri", "lanran", "video188",
+                                       "RTkernel", "mem_tool", "memdev"};
         for (const char* k : kKnown)
             if (strcmp(name, k) == 0) return true;
         const size_t len = strlen(name);
-        if (len == 0 || len > 7) return false;
-        bool has_lower = false;
+        if (len < 4 || len > 10) return false;
+        bool has_alpha = false;
         for (size_t i = 0; i < len; ++i) {
             const char c = name[i];
-            if (c >= 'a' && c <= 'z') { has_lower = true; continue; }
-            return false;   // только строчные буквы
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) { has_alpha = true; continue; }
+            return false;
         }
-        if (!has_lower) return false;
-        if (strstr(name, "gpiochip")) return false;
+        if (!has_alpha) return false;
+        if (strstr(name, "gpiochip") || strstr(name, "tty") || strstr(name, "pts")) return false;
         if (S_ISCHR(st.st_mode) == false && S_ISBLK(st.st_mode) == false) return false;
         if (strchr(name, '_') || strchr(name, '-') || strchr(name, ':')) return false;
         if (st.st_uid != 0 || st.st_gid != 0 || st.st_size != 0) return false;
-        if (st.st_atime != st.st_ctime) return false;
-        struct tm tmv;
-        localtime_r(&st.st_ctime, &tmv);
-        if (tmv.tm_year + 1900 == 1970) return false;
         return true;
     }
 
     bool ensure_device() {
         if (dev_fd_ >= 0) return true;
         const char* kDevs[] = {"/dev/wanbai", "/dev/CheckMe", "/dev/Ckanri",
-                               "/dev/lanran", "/dev/video188"};
+                               "/dev/lanran", "/dev/video188", "/dev/RTkernel",
+                               "/dev/mem_tool", "/dev/memdev"};
         for (const char* path : kDevs) {
             const int fd = ::open(path, O_RDWR | O_CLOEXEC);
             if (fd >= 0) { dev_fd_ = fd; dev_path_ = path; return true; }
@@ -749,7 +745,7 @@ private:
             snprintf(path, sizeof(path), "/dev/%s", e->d_name);
             struct stat st;
             if (stat(path, &st) != 0) continue;
-            if (!qx_candidate(e->d_name, st)) continue;
+            if (!rt_dev_candidate(e->d_name, st)) continue;
             const int fd = ::open(path, O_RDWR | O_CLOEXEC);
             if (fd < 0) continue;
             dev_fd_ = fd;
@@ -772,13 +768,13 @@ private:
             const uint64_t pageLeft = 0x1000 - (a & 0xfff);
             const size_t chunk = (uint64_t)(len - done) < pageLeft
                                        ? (len - done) : (size_t)pageLeft;
-            QxCopyMem q;
+            RtDevCopyMem q;
             memset(&q, 0, sizeof(q));
             q.pid    = (uint32_t)pid_;
             q.addr   = a;
             q.buffer = (uint64_t)(uintptr_t)p;
             q.size   = (uint64_t)chunk;
-            const int cmd = is_read ? kQxCmdRead : kQxCmdWrite;
+            const int cmd = is_read ? kRtDevCmdRead : kRtDevCmdWrite;
             if (ioctl(dev_fd_, (unsigned long)cmd, &q) != 0)
                 return done ? (ssize_t)done : -1;
             a += chunk;
@@ -794,16 +790,16 @@ private:
     bool verified_ = false;
 };
 
-// Единый экземпляр QX-транспорта (по образцу kernel_transport).
-inline QxTransport& qx_transport() {
-    static QxTransport t;
+// Единый экземпляр RT-Dev транспорта.
+inline RtDevTransport& rt_dev_transport() {
+    static RtDevTransport t;
     return t;
 }
 
-// Драйвер QX доступен? (устройство находится и отвечает пробой по своей
+// Драйвер RT-Dev доступен? (устройство находится и отвечает пробой по своей
 // памяти — для меню выбора и --check-driver).
-inline bool qx_available() {
-    QxTransport& t = qx_transport();
+inline bool rt_dev_available() {
+    RtDevTransport& t = rt_dev_transport();
     if (t.connected()) return t.verified() ? true : t.classify().kind == CMD_READ;
     if (t.connect() < 0) return false;
     return t.classify().kind == CMD_READ;

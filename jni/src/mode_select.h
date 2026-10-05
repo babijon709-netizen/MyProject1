@@ -43,7 +43,7 @@ namespace modesel {
 enum Mode {
     MODE_EXTERNAL = 0,   // /proc/<pid>/mem — «Прямое чтение»
     MODE_KERNEL   = 1,   // сокет драйвера bing-класса — «FT-Драйвер»
-    MODE_QX       = 2,   // /dev-узел драйвера QX — «QX-Драйвер»
+    MODE_RT_DEV   = 2,   // /dev-узел драйвера RT-Dev — «RT-Dev»
     MODE_RT       = 3,   // хук syscall ioctl (RT-hook) — «RT-Драйвер»
 };
 
@@ -56,7 +56,7 @@ static std::string ModePath() {
 static void RememberMode(Mode m) {
     mkdir(CfgDir(), 0777);
     std::ofstream f(ModePath(), std::ios::trunc);
-    if (f) f << (m == MODE_KERNEL ? "kernel" : m == MODE_QX ? "qx"
+    if (f) f << (m == MODE_KERNEL ? "kernel" : m == MODE_RT_DEV ? "rt_dev"
                        : m == MODE_RT ? "rt" : "external");
 }
 
@@ -110,8 +110,8 @@ static bool RunModeSelect() {
     bool drv = false;          // FT-драйвер отвечает на пробу семейства
     int  fam = -1;             // номер семейства сокета FT-драйвера
     drv = memio::driver_available(&fam);
-    bool qx = memio::qx_available();   // QX-драйвер найден и отвечает
-    bool rt = memio::rt_available();   // RT-драйвер: хук ioctl отвечает
+    bool rt_dev = memio::rt_dev_available(); // RT-Dev драйвер найден и отвечает
+    bool rt = memio::rt_available();         // RT-драйвер: хук ioctl отвечает
 
     float fade = 0.f;          // появление 0..1
     int   picked = -1;         // -1 — ещё не выбрали
@@ -211,29 +211,29 @@ static bool RunModeSelect() {
             }
 
             ImGui::SetCursorScreenPos({bx, by2});
-            if (ModeButton("##mode_qx", btnW, btnH,
-                           XS("QX-Драйвер"), qx, true, fs)) {
-                // Тап по QX-Драйверу. Порядок тот же, что у FT:
+            if (ModeButton("##mode_rt_dev", btnW, btnH,
+                           XS("RT-Dev"), rt_dev, true, fs)) {
+                // Тап по RT-Dev Драйверу. Порядок:
                 //   1) не root — узел драйвера открывается только привилегированным;
                 //   2) не найден — рескан с чистого листа (прошить .sh можно и
                 //      после запуска чита, имя узла при этом новое);
                 //   3) отвечает — режим принят, настоящий экзамен — привязка
-                //      к игре (bind читает ELF-заголовок libil2cpp через QX).
+                //      к игре (bind читает ELF-заголовок libil2cpp через RT-Dev).
                 if (geteuid() != 0) {
                     PlaySound(SND_CLICK);
-                    ShowToast(XS("QX: нет root — запусти чит от su"));
-                } else if (!qx) {
-                    memio::qx_transport().invalidate();
-                    qx = memio::qx_available();
-                    if (qx) {
-                        picked = MODE_QX;
+                    ShowToast(XS("RT-Dev: нет root — запусти чит от su"));
+                } else if (!rt_dev) {
+                    memio::rt_dev_transport().invalidate();
+                    rt_dev = memio::rt_dev_available();
+                    if (rt_dev) {
+                        picked = MODE_RT_DEV;
                         PlaySound(SND_SUCCESS);
                     } else {
                         PlaySound(SND_CLICK);
-                        ShowToast(XS("QX не найден — прошей .sh своей версии ядра"));
+                        ShowToast(XS("RT-Dev не найден — прошей .sh своей версии ядра"));
                     }
                 } else {
-                    picked = MODE_QX;
+                    picked = MODE_RT_DEV;
                     PlaySound(SND_SUCCESS);
                 }
             }
@@ -282,12 +282,12 @@ static bool RunModeSelect() {
     // Достаточно одного вызова до первого bind — весь код чтения выше по
     // стеку работает через memio::Transport и про режимы не знает (mem_io.h).
     const Mode mode = (picked == MODE_KERNEL) ? MODE_KERNEL
-                     : (picked == MODE_QX)     ? MODE_QX
+                     : (picked == MODE_RT_DEV) ? MODE_RT_DEV
                      : (picked == MODE_RT)     ? MODE_RT
                                                : MODE_EXTERNAL;
     if (picked >= 0) RememberMode(mode);
     esp_set_mem_backend(mode == MODE_KERNEL ? ESP_MEM_FT
-                        : mode == MODE_QX   ? ESP_MEM_QX
+                        : mode == MODE_RT_DEV ? ESP_MEM_RT_DEV
                         : mode == MODE_RT   ? ESP_MEM_RT
                                             : ESP_MEM_EXTERNAL);
     return picked >= 0;

@@ -1034,8 +1034,8 @@ static int saved_backend() {
     while (!s.empty() &&
            (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
         s.pop_back();
-    if (s == "kernel") return ESP_MEM_FT;
-    if (s == "qx") return ESP_MEM_QX;
+    if (s == "kernel" || s == "ft") return ESP_MEM_FT;
+    if (s == "rt_dev" || s == "rt-dev" || s == "qx") return ESP_MEM_RT_DEV;
     if (s == "rt") return ESP_MEM_RT;
     return ESP_MEM_EXTERNAL;
 }
@@ -1043,7 +1043,7 @@ static int saved_backend() {
 static const char* backend_name(int backend) {
     switch (backend) {
         case ESP_MEM_FT: return "FT-Драйвер";
-        case ESP_MEM_QX: return "QX-Драйвер";
+        case ESP_MEM_RT_DEV: return "RT-Dev";
         case ESP_MEM_RT: return "RT-Драйвер";
         default: return "Прямое чтение";
     }
@@ -1064,7 +1064,7 @@ static int Run(int argc, char* argv[]) {
             mode_arg = a;
         } else {
             printf("не понимаю аргумент: %s\n", a);
-            printf("использование: xvcen dump [external|ft|qx|rt] [pid]\n");
+            printf("использование: xvcen dump [external|ft|rt_dev|rt] [pid]\n");
             return 1;
         }
     }
@@ -1074,13 +1074,13 @@ static int Run(int argc, char* argv[]) {
             backend = ESP_MEM_EXTERNAL;
         else if (!strcmp(mode_arg, "ft") || !strcmp(mode_arg, "kernel"))
             backend = ESP_MEM_FT;
-        else if (!strcmp(mode_arg, "qx"))
-            backend = ESP_MEM_QX;
+        else if (!strcmp(mode_arg, "rt_dev") || !strcmp(mode_arg, "rt-dev") || !strcmp(mode_arg, "qx"))
+            backend = ESP_MEM_RT_DEV;
         else if (!strcmp(mode_arg, "rt"))
             backend = ESP_MEM_RT;
         if (backend < 0) {
             printf("неизвестный режим: %s "
-                   "(external | ft | qx | rt)\n", mode_arg);
+                   "(external | ft | rt_dev | rt)\n", mode_arg);
             return 1;
         }
     } else {
@@ -1207,7 +1207,7 @@ static int Run(int argc, char* argv[]) {
     // ---- скан --------------------------------------------------------------
     if (regions.empty()) parse_regions(maps_text, &regions);
     const bool kernel_backend =
-        backend == ESP_MEM_FT || backend == ESP_MEM_QX || backend == ESP_MEM_RT;
+        backend == ESP_MEM_FT || backend == ESP_MEM_RT_DEV || backend == ESP_MEM_RT;
     std::vector<Region> cand;
     std::uint64_t cand_bytes = 0;
     int closed_cnt = 0;

@@ -49,7 +49,7 @@ void esp_set_mem_backend(int backend) {
     g_mem_backend = backend;
     memio::Transport* t = &memio::procfs_transport();
     if (backend == ESP_MEM_FT) t = &memio::kernel_transport();
-    else if (backend == ESP_MEM_QX) t = &memio::qx_transport();
+    else if (backend == ESP_MEM_RT_DEV) t = &memio::rt_dev_transport();
     else if (backend == ESP_MEM_RT) t = &memio::rt_transport();
     g_mem.set_transport(t);
 }
