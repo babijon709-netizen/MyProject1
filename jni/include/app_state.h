@@ -93,7 +93,7 @@ struct AppState {
     // 1..7 = пресеты, 8 = свой цвет из ui_accent_rgb. Хранится в .accent
     // рядом с конфигами, как язык: стиль GUI глобален, а не часть профиля.
     int   ui_accent_idx = 0;
-    ImVec4 ui_accent_rgb = {0.545f, 0.486f, 1.000f, 1.0f};
+    ImVec4 ui_accent_rgb = {0.412f, 0.557f, 0.765f, 1.0f};
     // Положение панели вкладок: true = слева (по умолчанию), false = снизу.
     bool  ui_panel_left = true;
 

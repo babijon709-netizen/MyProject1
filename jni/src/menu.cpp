@@ -65,19 +65,20 @@ struct TabRect { float sx; };
 static TabRect tab_rects[kTabCount];
 
 // ---- Акцент интерфейса: палитра стиля всего GUI ---------------------------
-// 0 — классический фиолет (без оверрайда: Light/Dark как раньше), 1..7 —
-// пресеты, kAccentCustom — свой цвет из g_state.ui_accent_rgb (тап открывает
-// ту же палитру, что точки цвета в ESP). Цвета яркие середины — читаются и на
-// светлой, и на тёмной теме: оверрайд один на обе.
+// 0 — стандартная сталь (без оверрайда: Light/Dark как раньше), 1..7 —
+// приглушённые пресеты под графитовую тему, kAccentCustom — свой цвет из
+// g_state.ui_accent_rgb (тап открывает ту же палитру, что точки цвета в ESP).
+// Цвета прибранной насыщенности — читаются и на светлой, и на тёмной теме:
+// оверрайд один на обе.
 static const ImVec4 kAccentCols[] = {
-    {0.545f, 0.486f, 1.000f, 1.f},  // 0 фиолет (показывается, не применяется)
-    {0.250f, 0.450f, 1.000f, 1.f},  // 1 синий
-    {0.100f, 0.750f, 0.900f, 1.f},  // 2 голубой
-    {0.200f, 0.750f, 0.350f, 1.f},  // 3 зелёный
-    {0.950f, 0.750f, 0.150f, 1.f},  // 4 жёлтый
-    {1.000f, 0.550f, 0.150f, 1.f},  // 5 оранжевый
-    {0.950f, 0.250f, 0.300f, 1.f},  // 6 красный
-    {1.000f, 0.450f, 0.700f, 1.f},  // 7 розовый
+    {0.412f, 0.557f, 0.765f, 1.f},  // 0 сталь (показывается, не применяется)
+    {0.545f, 0.596f, 0.669f, 1.f},  // 1 сланец
+    {0.435f, 0.612f, 0.553f, 1.f},  // 2 шалфей
+    {0.502f, 0.580f, 0.404f, 1.f},  // 3 олива
+    {0.729f, 0.620f, 0.408f, 1.f},  // 4 песок
+    {0.745f, 0.443f, 0.365f, 1.f},  // 5 кирпич
+    {0.674f, 0.400f, 0.455f, 1.f},  // 6 мальва
+    {0.553f, 0.486f, 0.671f, 1.f},  // 7 серо-лавандовый
 };
 static constexpr int kAccentCustom = 8;
 static constexpr int kAccentCount = 9;   // 8 пресетов + свой
@@ -496,8 +497,10 @@ float TabContent(int tab, float dt, float cW) {
 
             float cy2 = pos.y + btnH * 0.5f;
             float icX = cardX0 + 28.f + 20.f;
-            dl->AddCircleFilled({icX, cy2}, 20.f, C::UA(C::Acc(), 0.15f), 32);
-            dl->AddCircle({icX, cy2}, 20.f, C::UA(C::Acc(), 0.7f), 32, 1.5f);
+            dl->AddRectFilled({icX - 20.f, cy2 - 20.f}, {icX + 20.f, cy2 + 20.f},
+                C::UA(C::Acc(), 0.15f), 3.f);
+            dl->AddRect({icX - 20.f, cy2 - 20.f}, {icX + 20.f, cy2 + 20.f},
+                C::UA(C::Acc(), 0.7f), 3.f, 0, 1.5f);
             dl->AddLine({icX - 9.f, cy2}, {icX + 9.f, cy2}, C::U(C::Acc()), 3.f);
             dl->AddLine({icX, cy2 - 9.f}, {icX, cy2 + 9.f}, C::U(C::Acc()), 3.f);
 
@@ -576,12 +579,10 @@ float TabContent(int tab, float dt, float cW) {
                 if (g_tabIcons[4]) {
                     dl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[4],
                         {icX, icY}, {icX + icSz, icY + icSz},
-                        {0,0}, {1,1}, IM_COL32(255,255,255,255), 12.f);
+                        {0,0}, {1,1}, IM_COL32(255,255,255,255), 4.f);
                 } else {
-                    float icR = 14.f;
-                    ImU32 icBg = g_darkTheme
-                        ? IM_COL32(120, 105, 240, 255)
-                        : IM_COL32(108, 92, 231, 255);
+                    float icR = 3.f;
+                    ImU32 icBg = C::U(C::Acc());
                     dl->AddRectFilled({icX, icY}, {icX + icSz, icY + icSz}, icBg, icR);
                     float lh = icSz * 0.20f;
                     float lx = icCX - lh * 0.45f, ly = rowCY + lh * 0.42f;
@@ -612,9 +613,9 @@ float TabContent(int tab, float dt, float cW) {
                     float a   = easedA;
 
                     dl->AddRectFilled({bX, bY2}, {bX + bW, bY2 + bH},
-                        C::UA(ac, (g_darkTheme ? 0.20f : 0.10f) * a), bH * 0.5f);
+                        C::UA(ac, (g_darkTheme ? 0.20f : 0.10f) * a), 2.f);
                     dl->AddRect({bX, bY2}, {bX + bW, bY2 + bH},
-                        C::UA(ac, 0.55f * a), bH * 0.5f, 0, 1.3f);
+                        C::UA(ac, 0.55f * a), 2.f, 0, 1.3f);
                     dl->AddCircleFilled({bX + bPadX + dotR, bY2 + bH*0.5f}, dotR, C::UA(ac, 0.95f * a), 16);
                     dl->AddText(fn, subFS,
                         {bX + bPadX + dotR*2.f + 5.f, bY2 + bPadY},
@@ -1218,12 +1219,11 @@ static const float kAvatarR    = 87.75f; // радиус кружка (диам�
 static const float kAvatarPad  = 20.f;   // отступ по бокам внутри панели
 static const float kAvatarPadT = 12.f;   // от верхнего края окна
 
-// «Светофор»: три кружка по 20 px с зазором 6.7 — та же пропорция, что в
-// macOS (12 px при системном шрифте 13), в 1.5 раза меньше прежних 30/10.
-static const float kTLD   = 20.f;        // диаметр кружка светофора
-static const float kTLGap = 6.7f;        // зазор между кружками
-static const float kTLPad = 12.f;        // отступ светофора от краёв окна
-static const int   kTLN   = 3;           // красный, жёлтый, зелёный
+// Декор в углу: три квадрата по 20 px с зазором 6.7.
+static const float kTLD   = 20.f;        // сторона квадрата
+static const float kTLGap = 6.7f;        // зазор между квадратами
+static const float kTLPad = 12.f;        // отступ декора от краёв окна
+static const int   kTLN   = 3;           // два серых + стальной
 
 // Ширина светофора целиком.
 static float TrafficLightW(float d, float gap) { return d * kTLN + gap * (kTLN - 1); }
@@ -1268,10 +1268,10 @@ static float AvatarBottom(float winY, float R) {
     return winY + kTLPad + kTLD + kAvatarPadT + R * 2.f;
 }
 
-// --- Светофор ===============================================================
-// Кружки: 0 — красная, 1 — жёлтая, 2 — зелёная. Это ДЕКОР (просьба игрока:
-// «он как декоративный дизайн»): тапов и действий у кружков нет, поэтому нет и
-// InvisibleButton'ов — окно за них таскается как за обычную шапку.
+// --- Декор «три квадрата» ===================================================
+// Квадраты: 0 и 1 — графитовые, 2 — стальной. Это ДЕКОР (просьба игрока:
+// «он как декоративный дизайн»): тапов и действий у квадратов нет, поэтому
+// нет и InvisibleButton'ов — окно за них таскается как за обычную шапку.
 enum TrafficLightId { TL_CLOSE = 0, TL_MIN, TL_ZOOM };
 
 // Прямоугольник i-й кнопки (квадрат со стороной d + 8 — палец толще кружка).
@@ -1284,12 +1284,12 @@ static void TrafficLightRect(ImVec2 winPos, float d, float gap, int i, ImVec2& m
     mx = {cx + h, cy + h};
 }
 
-// Цвета macOS: закрыть, свернуть, развернуть.
+// Нейтральные графитовые тона (декор): два серых + стальной.
 static ImU32 TrafficLightColor(int i) {
     switch (i) {
-        case TL_CLOSE: return IM_COL32(255,  95,  87, 255);
-        case TL_MIN:   return IM_COL32(254, 188,  46, 255);
-        default:       return IM_COL32( 40, 200,  64, 255);
+        case TL_CLOSE: return IM_COL32(122, 126, 132, 255);
+        case TL_MIN:   return IM_COL32(162, 167, 174, 255);
+        default:       return IM_COL32(105, 142, 195, 255);
     }
 }
 
@@ -1303,10 +1303,10 @@ static float MenuHeaderH(bool) { return Layout::HeaderH; }
 // кружком аватарки. Кружка там больше нет, и светофор переехал в угол.)
 static ImVec2 TrafficLightPos(ImVec2 winPos, bool) { return winPos; }
 
-// Нарисовать светофор. Тапы не обрабатываются: это декор, действия закрыть /
-// свернуть / развернуть убраны вместе с ним (меню открывается и закрывается
-// тапом по пилюле «Противники» сверху, окно таскается за шапку и растягивается
-// за правый нижний угол).
+// Нарисовать три квадратика в углу. Тапы не обрабатываются: это декор,
+// действия закрыть / свернуть / развернуть убраны вместе со «светофором»
+// (меню открывается и закрывается тапом по пилюле «Противники» сверху, окно
+// таскается за шапку и растягивается за правый нижний угол).
 static void TrafficLight(ImVec2 winPos, float railW) {
     float d = 0.f, gap = 0.f;
     TrafficLightMetrics(railW, d, gap);
@@ -1316,9 +1316,11 @@ static void TrafficLight(ImVec2 winPos, float railW) {
         ImVec2 mn, mx;
         TrafficLightRect(winPos, d, gap, i, mn, mx);
         const ImVec2 c{(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f};
-        // Как в macOS: цветной кружок с чуть заметной тёмной кромкой.
-        fg->AddCircleFilled(c, d * 0.5f, TrafficLightColor(i), 32);
-        fg->AddCircle(c, d * 0.5f, IM_COL32(0, 0, 0, 45), 32, 1.5f);
+        // Графитовые квадраты со слабой тёмной кромкой.
+        fg->AddRectFilled({c.x - d * 0.5f, c.y - d * 0.5f}, {c.x + d * 0.5f, c.y + d * 0.5f},
+                          TrafficLightColor(i), 2.f);
+        fg->AddRect({c.x - d * 0.5f, c.y - d * 0.5f}, {c.x + d * 0.5f, c.y + d * 0.5f},
+                    IM_COL32(0, 0, 0, 45), 2.f, 0, 1.5f);
     }
 }
 
@@ -1893,7 +1895,7 @@ void RenderMenu() {
         float px0 = (dw - ImMax(tsz.x, ssz.x)) * 0.5f - 26.f;
         float px1 = (dw + ImMax(tsz.x, ssz.x)) * 0.5f + 26.f;
         fg->AddRectFilled({px0, ty - 18.f}, {px1, ty + tsz.y + 10.f + ssz.y + 18.f},
-                          C::UA(C::Card(), 0.92f), 18.f);
+                          C::UA(C::Card(), 0.92f), 6.f);
         fg->AddText(fn, tfs, {(dw - tsz.x) * 0.5f, ty}, C::U(C::Txt()), title);
         fg->AddText(fn, tfs * 0.62f, {(dw - ssz.x) * 0.5f, ty + tsz.y + 10.f}, C::U(C::Dim()), sub);
 
@@ -1957,8 +1959,8 @@ void RenderMenu() {
             if (hg.bW > 1.f && dw > hg.bW + 16.f && dh > hg.bH + 16.f) {
                 float px = ImClamp(fx * dw - hg.bW * 0.5f, 8.f, dw - hg.bW - 8.f);
                 float py = ImClamp(fy * dh - hg.bH * 0.5f, 8.f, dh - hg.bH - 8.f);
-                fg->AddRectFilled({px, py}, {px + hg.bW, py + hg.bH}, C::UA(C::Card(), 0.85f), 46.f);
-                fg->AddRect({px, py}, {px + hg.bW, py + hg.bH}, C::UA(C::Acc(), 0.9f), 46.f, 0, 2.5f);
+                fg->AddRectFilled({px, py}, {px + hg.bW, py + hg.bH}, C::UA(C::Card(), 0.85f), 8.f);
+                fg->AddRect({px, py}, {px + hg.bW, py + hg.bH}, C::UA(C::Acc(), 0.9f), 8.f, 0, 2.5f);
             }
         }
 
@@ -2318,7 +2320,7 @@ void RenderMenu() {
             float gx0 = icoX, gy0 = icoY;
             float cell = icoW * 0.44f, gap2 = icoW - cell * 2.f;
             ImU32 gcol = C::UA(C::Acc(), active ? 1.f : 0.55f);
-            float rr = cell * 0.3f;
+            float rr = 2.f;
             fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
             fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + icoW, gy0 + cell}, gcol, rr);
             fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + icoW}, gcol, rr);
@@ -2328,12 +2330,12 @@ void RenderMenu() {
             ImVec2 iMin = {icoX, icoY};
             ImVec2 iMax = {icoX + icoW, icoY + icoH};
             fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
-                {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
+                {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 4.f);
         } else {
-            // Заглушка: скруглённый квадрат с первой буквой вкладки.
+            // Заглушка: квадрат с первой буквой вкладки.
             ImVec2 iMin = {icoX, icoY};
             ImVec2 iMax = {icoX + icoW, icoY + icoH};
-            fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 9.f);
+            fdl->AddRectFilled(iMin, iMax, C::UA(C::Acc(), active ? 0.9f : 0.35f), 3.f);
             char letter[8] = {};
             int gl = 0;
             letter[gl++] = tabNames(i)[0];

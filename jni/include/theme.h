@@ -8,49 +8,52 @@
 // g_darkTheme — целевое состояние (меню/конфиг), g_themeT — сглаженный
 // переход 0..1, g_menuFadeIn — затухание меню при входе.
 namespace R {
-    static constexpr float Card  = 24.f;
-    static constexpr float Pill  = 16.f;
-    static constexpr float Sheet = 26.f;
-    static constexpr float Btn   = 18.f;
+    // «Корпоративные» радиусы: углы 6 px на поверхностях, 4 px на контролах.
+    // Никаких пилюль — стиль «сухой графит».
+    static constexpr float Card  = 6.f;
+    static constexpr float Pill  = 6.f;
+    static constexpr float Sheet = 6.f;
+    static constexpr float Btn   = 4.f;
 }
 
-// Тёмная тема по умолчанию — лучше сочетается с фиолетовым акцентом
+// Тёмная тема по умолчанию — лучше сочетается со стальным акцентом
 // и не слепит поверх игры; светлая включается в Настройках как раньше.
 extern bool  g_darkTheme;
 extern float g_themeT;
 extern float g_menuFadeIn;
 // Акцент на выбор пользователя (палитра в «Опциях»): включён — весь GUI
-// красится им вместо фиолетового; выключен — классический Light/Dark.
+// красится им вместо стального; выключен — классический Light/Dark.
 extern ImVec4 g_accent;
 extern bool   g_accentOn;
 
 namespace C {
-    // "Graphite & Violet": спокойный графитовый фон + фиолетовый акцент.
-    // Light — мягкий светло-серый с лёгким лавандовым оттенком,
-    // Dark  — глубокий сине-графитовый (почти чёрный), карточки чуть светлее.
+    // «Graphite & Steel»: нейтральный графит без сине-фиолетовой подсветки
+    // + приглушённый стальной синий акцент. Light — холодный светло-серый,
+    // Dark — плотный нейтральный графит (почти чёрный), карточки на ступень
+    // светлее.
     namespace Light {
-        static constexpr ImVec4 Bg     = {0.929f, 0.933f, 0.953f, 1};
-        static constexpr ImVec4 LeftBg = {0.957f, 0.957f, 0.973f, 1};
+        static constexpr ImVec4 Bg     = {0.945f, 0.949f, 0.953f, 1};
+        static constexpr ImVec4 LeftBg = {0.925f, 0.929f, 0.933f, 1};
         static constexpr ImVec4 Card   = {1.000f, 1.000f, 1.000f, 1};
-        static constexpr ImVec4 Acc    = {0.424f, 0.361f, 0.906f, 1};
-        static constexpr ImVec4 AccDk  = {0.333f, 0.275f, 0.784f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.271f, 0.227f, 1};
-        static constexpr ImVec4 Txt    = {0.078f, 0.082f, 0.102f, 1};
-        static constexpr ImVec4 Dim    = {0.541f, 0.553f, 0.596f, 1};
-        static constexpr ImVec4 TrkOff = {0.788f, 0.796f, 0.839f, 1};
-        static constexpr ImVec4 Sep    = {0.851f, 0.859f, 0.898f, 1};
+        static constexpr ImVec4 Acc    = {0.290f, 0.443f, 0.667f, 1};
+        static constexpr ImVec4 AccDk  = {0.227f, 0.353f, 0.541f, 1};
+        static constexpr ImVec4 Red    = {0.760f, 0.278f, 0.224f, 1};
+        static constexpr ImVec4 Txt    = {0.114f, 0.118f, 0.125f, 1};
+        static constexpr ImVec4 Dim    = {0.463f, 0.478f, 0.494f, 1};
+        static constexpr ImVec4 TrkOff = {0.812f, 0.820f, 0.827f, 1};
+        static constexpr ImVec4 Sep    = {0.859f, 0.867f, 0.875f, 1};
     }
     namespace Dark {
-        static constexpr ImVec4 Bg     = {0.063f, 0.071f, 0.094f, 1};
-        static constexpr ImVec4 LeftBg = {0.047f, 0.055f, 0.075f, 1};
-        static constexpr ImVec4 Card   = {0.106f, 0.118f, 0.153f, 1};
-        static constexpr ImVec4 Acc    = {0.545f, 0.486f, 1.000f, 1};
-        static constexpr ImVec4 AccDk  = {0.424f, 0.361f, 0.906f, 1};
-        static constexpr ImVec4 Red    = {1.000f, 0.361f, 0.322f, 1};
-        static constexpr ImVec4 Txt    = {0.949f, 0.953f, 0.969f, 1};
-        static constexpr ImVec4 Dim    = {0.604f, 0.616f, 0.663f, 1};
-        static constexpr ImVec4 TrkOff = {0.180f, 0.196f, 0.251f, 1};
-        static constexpr ImVec4 Sep    = {0.196f, 0.212f, 0.271f, 1};
+        static constexpr ImVec4 Bg     = {0.086f, 0.090f, 0.094f, 1};
+        static constexpr ImVec4 LeftBg = {0.067f, 0.071f, 0.075f, 1};
+        static constexpr ImVec4 Card   = {0.129f, 0.133f, 0.141f, 1};
+        static constexpr ImVec4 Acc    = {0.412f, 0.557f, 0.765f, 1};
+        static constexpr ImVec4 AccDk  = {0.304f, 0.427f, 0.604f, 1};
+        static constexpr ImVec4 Red    = {0.796f, 0.325f, 0.278f, 1};
+        static constexpr ImVec4 Txt    = {0.902f, 0.906f, 0.910f, 1};
+        static constexpr ImVec4 Dim    = {0.541f, 0.557f, 0.576f, 1};
+        static constexpr ImVec4 TrkOff = {0.212f, 0.220f, 0.231f, 1};
+        static constexpr ImVec4 Sep    = {0.220f, 0.227f, 0.239f, 1};
     }
 
     static inline ImVec4 Lerp4(ImVec4 a, ImVec4 b) {

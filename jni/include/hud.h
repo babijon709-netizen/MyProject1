@@ -22,6 +22,6 @@ const HudCounterGeom& HudCounterLast();
 // дефолтное положение (доли экрана = центр кнопки). Размер фиксирован,
 // поэтому калибровка в меню рисует превью по тем же константам.
 constexpr float kFcBtnSide = 100.f;
-constexpr float kFcBtnRadius = 26.f;
+constexpr float kFcBtnRadius = 6.f;
 constexpr float kFcBtnDefX = 0.90f;
 constexpr float kFcBtnDefY = 0.50f;
