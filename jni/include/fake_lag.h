@@ -6,13 +6,13 @@ namespace fake_lag {
 
 enum class Status { Off, Waiting, Active, Failed };
 
-// Updates the session-scoped fake-lag controller. Calls are cheap when the
-// settings and target process are unchanged; iptables work runs off-thread.
+// Applies the original INPUT UDP toggle cycle. The PID is retained in the API
+// for the existing call site but the firewall rule intentionally is not UID-scoped.
 void update(bool enabled, int percent, pid_t game_pid);
 void shutdown();
 Status status();
 inline int clamp_percent(int percent) {
-    return percent < 10 ? 10 : (percent > 70 ? 70 : percent);
+    return percent < 1 ? 1 : (percent > 100 ? 100 : percent);
 }
 
 } // namespace fake_lag

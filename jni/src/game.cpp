@@ -8457,13 +8457,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             auto tracked = g_player_track.find(s_transforms[index]);
             if (tracked == g_player_track.end()) continue;
             std::string uid(tracked->second.uid);
-            if (uid.empty()) {
-                // No userID on this object: the display name identifies the
-                // account just as well, and it is already cached.
-                auto text = g_player_text.find(s_transforms[index]);
-                if (text != g_player_text.end() && text->second.has_name && text->second.name[0])
-                    uid.assign(text->second.name, strnlen(text->second.name, sizeof(text->second.name)));
-            }
+            // Names are not unique. Suppressing by a shared/default name made
+            // newly spawned enemies disappear until one of the copies moved.
             if (uid.empty()) continue;
             auto found = chosen.find(uid);
             if (found == chosen.end()) { chosen.emplace(uid, index); continue; }
@@ -8496,7 +8491,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (other == index || !position_ok[other] || suppressed[other]) continue;
                 if (other == local_entity_index) continue;
                 if (player_mount_engaged(s_transforms[other])) continue;
-                if (vec3_horiz2(positions[other], mount) < 1.8F * 1.8F)
+                // A leftover is effectively at the exact boarding point. The
+                // old 1.8 m radius also removed real enemies fighting nearby.
+                if (vec3_horiz2(positions[other], mount) < 0.45F * 0.45F)
                     suppressed[other] = 1;
             }
         }
@@ -8544,14 +8541,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!std::isfinite(height) || height < 2.0F) { skip_reason[i] = 'H'; continue; }
         float cx = (sf.x + sh2.x) * 0.5F;
         float cy = (sf.y + sh2.y) * 0.5F;
+        float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
+        float half_h = height * 0.5F;
         const float screen_margin = std::max(sw, sh) * 0.25F;
-        if (cx < -screen_margin || cx > sw + screen_margin ||
-            cy < -screen_margin || cy > sh + screen_margin) {
+        // Test the box edges, not only its centre. At 5-10 m a player can
+        // cover much of the viewport while the centre is already past the old
+        // margin, which made close ESP vanish despite still intersecting it.
+        if (cx + half_w < -screen_margin || cx - half_w > sw + screen_margin ||
+            cy + half_h < -screen_margin || cy - half_h > sh + screen_margin) {
             skip_reason[i] = 'O';
             continue;
         }
-        float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
-        float half_h = height * 0.5F;
 
         constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
         const Vec3 world_corners[8] = {

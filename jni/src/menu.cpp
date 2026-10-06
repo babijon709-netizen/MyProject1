@@ -1018,7 +1018,7 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##fakelag", XS("FakeLag"), &g_state.fake_lag,
                   g_state.a_fake_lag, false, true);
         SliderRow("##fakelagpct", XS("Интенсивность"), &g_state.fake_lag_percent,
-                  10.f, 70.f, XS("%.0f%%"), true, false, g_state.sl_fake_lag, dt);
+                  1.f, 100.f, XS("%.0f%%"), true, false, g_state.sl_fake_lag, dt);
 
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);
@@ -1140,6 +1140,9 @@ float TabContent(int tab, float dt, float cW) {
                 menu_open = false;
             }
         }
+
+        // Keep the next section below all three custom freecam button rows.
+        ImGui::Dummy({1.f, 16.f});
 
         // Всегда день: время суток каждую секунду возвращается в полдень.
         SHdr(XS("Мир"));
