@@ -1,2 +1,217 @@
-// Лог выключен. Реализации — inline в logfile.h.
 #include "logfile.h"
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <vector>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <thread>
+#include <time.h>
+#include <unistd.h>
+
+namespace {
+
+constexpr const char* kPrimaryDir = "/storage/emulated/0/Download";
+constexpr const char* kPrimaryPath = "/storage/emulated/0/Download/xvcen.log";
+constexpr const char* kFallbackDir = "/storage/emulated/0/benzware";
+constexpr const char* kFallbackPath = "/storage/emulated/0/benzware/xvcen.log";
+constexpr long kMaxLogBytes = 16L * 1024L * 1024L;
+
+std::mutex g_log_mutex;
+std::condition_variable g_log_cv;
+FILE* g_log_file = nullptr;
+std::string g_log_path;
+std::deque<std::string> g_log_queue;
+bool g_writer_run = false;
+unsigned g_log_dropped = 0;
+std::thread g_writer;
+std::atomic<int> g_stage{kStageNone};
+std::atomic<unsigned long> g_frame{0};
+std::atomic<long long> g_beat_ns{0};
+std::atomic<bool> g_watchdog_run{false};
+std::thread g_watchdog;
+
+long long monotonic_ns() {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+const char* stage_name(int stage) {
+    switch (stage) {
+        case kStageFrameBegin: return "frame-begin";
+        case kStageEsp: return "esp";
+        case kStageAimSelect: return "aim-select";
+        case kStageAimRead: return "aim-read";
+        case kStageAimWrite: return "aim-write";
+        case kStageAimTouch: return "aim-touch";
+        case kStageFarm: return "farm";
+        case kStageMenu: return "menu";
+        case kStageFreecam: return "freecam";
+        case kStageFrameEnd: return "frame-end";
+        default: return "none";
+    }
+}
+
+void write_line_locked(const char* text) {
+    if (!g_log_file || !text) return;
+    timespec ts{};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    tm local{};
+    localtime_r(&ts.tv_sec, &local);
+    const long tid = (long)syscall(SYS_gettid);
+    std::fprintf(g_log_file, "%02d:%02d:%02d.%03ld [t%ld] %s\n",
+                 local.tm_hour, local.tm_min, local.tm_sec,
+                 ts.tv_nsec / 1000000L, tid, text);
+}
+
+void writer_loop() {
+    std::unique_lock<std::mutex> lock(g_log_mutex);
+    while (g_writer_run || !g_log_queue.empty()) {
+        g_log_cv.wait_for(lock, std::chrono::milliseconds(250), [] {
+            return !g_writer_run || !g_log_queue.empty();
+        });
+        std::vector<std::string> batch;
+        batch.reserve(g_log_queue.size() + (g_log_dropped ? 1 : 0));
+        while (!g_log_queue.empty()) {
+            batch.push_back(std::move(g_log_queue.front()));
+            g_log_queue.pop_front();
+        }
+        const unsigned dropped = g_log_dropped;
+        g_log_dropped = 0;
+        lock.unlock();
+        for (const std::string& line : batch) write_line_locked(line.c_str());
+        if (dropped) {
+            char message[96];
+            std::snprintf(message, sizeof(message), "лог: отброшено %u строк из-за переполнения очереди", dropped);
+            write_line_locked(message);
+        }
+        if (g_log_file && (!batch.empty() || dropped)) std::fflush(g_log_file);
+        lock.lock();
+        if (g_log_file && std::ftell(g_log_file) >= kMaxLogBytes) {
+            std::fclose(g_log_file);
+            g_log_file = nullptr;
+            const std::string old_path = g_log_path + ".old";
+            unlink(old_path.c_str());
+            rename(g_log_path.c_str(), old_path.c_str());
+            g_log_file = std::fopen(g_log_path.c_str(), "w");
+            if (g_log_file) {
+                chmod(g_log_path.c_str(), 0666);
+                setvbuf(g_log_file, nullptr, _IOFBF, 64 * 1024);
+                write_line_locked("лог продолжен после ротации 16 МБ; предыдущая часть в xvcen.log.old");
+                std::fflush(g_log_file);
+            }
+        }
+    }
+}
+
+} // namespace
+
+void LogOpen() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    if (g_log_file) return;
+
+    mkdir(kPrimaryDir, 0777);
+    g_log_file = std::fopen(kPrimaryPath, "w");
+    if (g_log_file) {
+        g_log_path = kPrimaryPath;
+    } else {
+        mkdir(kFallbackDir, 0777);
+        g_log_file = std::fopen(kFallbackPath, "w");
+        if (g_log_file) g_log_path = kFallbackPath;
+    }
+    if (!g_log_file) return;
+
+    chmod(g_log_path.c_str(), 0666);
+    setvbuf(g_log_file, nullptr, _IOFBF, 64 * 1024);
+    g_beat_ns.store(monotonic_ns(), std::memory_order_relaxed);
+    write_line_locked("лог открыт");
+    write_line_locked((std::string("файл: ") + g_log_path).c_str());
+    std::fflush(g_log_file);
+    g_writer_run = true;
+    g_writer = std::thread(writer_loop);
+}
+
+void LogClose() {
+    g_watchdog_run.store(false, std::memory_order_release);
+    if (g_watchdog.joinable()) g_watchdog.join();
+
+    LogLine("лог закрыт");
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_writer_run = false;
+    }
+    g_log_cv.notify_all();
+    if (g_writer.joinable()) g_writer.join();
+
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    if (!g_log_file) return;
+    std::fflush(g_log_file);
+    std::fclose(g_log_file);
+    g_log_file = nullptr;
+    g_log_path.clear();
+    g_log_queue.clear();
+}
+
+void LogLine(const char* format, ...) {
+    if (!format) return;
+    char message[2048];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        if (!g_log_file || !g_writer_run) return;
+        if (g_log_queue.size() >= 4096) {
+            ++g_log_dropped;
+            return;
+        }
+        g_log_queue.emplace_back(message);
+    }
+    g_log_cv.notify_one();
+}
+
+void LogStage(int stage) {
+    if (stage < kStageNone || stage >= kStageCount) stage = kStageNone;
+    g_stage.store(stage, std::memory_order_relaxed);
+}
+
+void LogFrameBeat(unsigned long frame) {
+    g_frame.store(frame, std::memory_order_relaxed);
+    g_beat_ns.store(monotonic_ns(), std::memory_order_release);
+}
+
+void LogWatchdogStart() {
+    bool expected = false;
+    if (!g_watchdog_run.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;
+    g_beat_ns.store(monotonic_ns(), std::memory_order_release);
+    g_watchdog = std::thread([] {
+        long long last_report_ns = 0;
+        while (g_watchdog_run.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (!g_watchdog_run.load(std::memory_order_acquire)) break;
+            const long long now_ns = monotonic_ns();
+            const long long age_ns = now_ns - g_beat_ns.load(std::memory_order_acquire);
+            if (age_ns >= 2000000000LL &&
+                (last_report_ns == 0 || now_ns - last_report_ns >= 2000000000LL)) {
+                LogLine("WATCHDOG: кадр %lu не завершён %.1fс, стадия=%s(%d)",
+                        g_frame.load(std::memory_order_relaxed),
+                        (double)age_ns / 1e9,
+                        stage_name(g_stage.load(std::memory_order_relaxed)),
+                        g_stage.load(std::memory_order_relaxed));
+                last_report_ns = now_ns;
+            } else if (age_ns < 2000000000LL) {
+                last_report_ns = 0;
+            }
+        }
+    });
+}

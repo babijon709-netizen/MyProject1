@@ -1,5 +1,6 @@
 #pragma once
-// Лог выключен: вызовы остаются в коде как no-op, файл не пишется.
+
+#include <cstdarg>
 
 enum LogStageId {
     kStageNone = 0,
@@ -16,9 +17,11 @@ enum LogStageId {
     kStageCount
 };
 
-inline void LogOpen() {}
-inline void LogClose() {}
-inline void LogStage(int) {}
-inline void LogFrameBeat(unsigned long) {}
-inline void LogWatchdogStart() {}
-#define LogLine(...) ((void)0)
+// The primary destination is /storage/emulated/0/Download/xvcen.log.
+// A private shared-storage fallback is used only when Download is unavailable.
+void LogOpen();
+void LogClose();
+void LogStage(int stage);
+void LogFrameBeat(unsigned long frame);
+void LogWatchdogStart();
+void LogLine(const char* format, ...) __attribute__((format(printf, 1, 2)));
