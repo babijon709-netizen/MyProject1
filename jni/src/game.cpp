@@ -4255,7 +4255,10 @@ static std::vector<uint64_t> read_configured_player_transforms(bool* player_list
                 const uint64_t player = rd_ptr(
                     items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
                 if (!player || player == local_source) continue;
-                if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) continue;
+                // The containing registry is already validated and its
+                // pointer/count are rechecked below. A failed class read must
+                // not make one live player disappear from an otherwise stable
+                // snapshot.
                 bool duplicate = false;
                 for (uint64_t known : snapshot) duplicate |= known == player;
                 if (!duplicate) snapshot.push_back(player);
@@ -7946,44 +7949,25 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
     bool player_list_ok = false;
     std::vector<uint64_t> refreshed = read_configured_player_transforms(&player_list_ok);
-    // Keep a plain player snapshot with a grace period. A stable list adds new
-    // objects immediately; a temporarily unreadable or incomplete list cannot
-    // remove an already known player. Five seconds of confirmed absence is
-    // required before an address is retired.
+    // A stable registry snapshot is authoritative: players absent from it
+    // have left and disappear immediately. If the registry itself is
+    // unreadable, player_list_ok is false and the previous snapshot is kept.
     if (player_list_ok) {
-        for (uint64_t player : refreshed) {
-            if (!player) continue;
-            bool known = false;
-            for (uint64_t current : s_transforms) {
-                if (current == player) { known = true; break; }
-            }
-            if (!known) s_transforms.push_back(player);
-            g_frame_transforms_lost.erase(player);
-        }
-
-        for (auto it = s_transforms.begin(); it != s_transforms.end();) {
+        for (uint64_t previous : s_transforms) {
             bool present = false;
             for (uint64_t player : refreshed) {
-                if (player == *it) { present = true; break; }
+                if (player == previous) { present = true; break; }
             }
-            if (present) {
-                ++it;
-                continue;
-            }
-            int& misses = g_frame_transforms_lost[*it];
-            if (++misses > 300) {
-                g_player_track.erase(*it);
-                g_player_aux.erase(*it);
-                g_player_text.erase(*it);
-                g_mount_latch.erase(*it);
-                g_skeletons.erase(*it);
-                g_frame_transforms_lost.erase(*it);
-                it = s_transforms.erase(it);
-            } else {
-                ++it;
-            }
+            if (present) continue;
+            g_player_track.erase(previous);
+            g_player_aux.erase(previous);
+            g_player_text.erase(previous);
+            g_mount_latch.erase(previous);
+            g_skeletons.erase(previous);
+            g_frame_transforms_lost.erase(previous);
         }
-        g_frame_transforms_empty_streak = refreshed.empty()
+        s_transforms = std::move(refreshed);
+        g_frame_transforms_empty_streak = s_transforms.empty()
             ? g_frame_transforms_empty_streak + 1 : 0;
     }
     if (s_transforms.empty()) {
