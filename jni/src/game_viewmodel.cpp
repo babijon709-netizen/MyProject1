@@ -321,7 +321,6 @@ bool viewmodel_write_heap(uint64_t address, const void* data, std::size_t size) 
 
 void esp_viewmodel_reset(bool restore) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
-    esp_reset_headshot_body(restore && g_mem.bound());
     controller.reset(restore && g_mem.bound());
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))

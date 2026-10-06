@@ -41,7 +41,6 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         // читались вовсе — тогда аим уходил на запасной расчёт по росту, а
         // признак смерти по позе вообще нечем было мерить.
         esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
-        esp_set_headshot_body(g_state.viewmodel.headshot_body);
         esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
                                 g_state.esp_loot, g_state.esp_pickup,
                                 g_state.esp_vehicles, g_state.esp_bots,
@@ -79,7 +78,6 @@ void DrawEspOverlay() {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
     if (!g_esp_attached) return;
-    esp_set_headshot_body(g_state.viewmodel.headshot_body);
 
     if (g_state.aim_touch && g_state.aim_special) {
         float fovR = AimFovRadiusPx(sw, sh);
@@ -90,7 +88,7 @@ void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes && !g_state.viewmodel.headshot_body) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
