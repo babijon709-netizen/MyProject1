@@ -1,8 +1,8 @@
 #pragma once
 #include <cstdint>
 
-// Release profile, build 11945.
-// Source: dump11945.7z (dump.cs + libil2cpp.so), 31704 types.
+// Release profile, build 11946.
+// Source: dump11946.7z (dump.cs + libil2cpp.so), 31704 types.
 // Managed fields are resolved from dump.cs; TypeInfo RVAs are inner slots from
 // AArch64 adrp/ldr references and R_AARCH64_RELATIVE addends.
 
@@ -80,14 +80,14 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // мусор 0xa000b409/0xa000b3fd (это «таблица типов v2» протектора S16 из
 // малых целых, НЕ слоты классов). Перекрёстное подтверждение: PM-PLH = 0x30,
 // как и в прошлом рабочем билде (0xD9C5310/0xD9C52E0).
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDCC45F8; // release 11945: outer 0xD9755E0 -> R_AARCH64_RELATIVE addend; PlayerManager self slot
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDCFACB8; // release 11946: outer 0xD9AB580 -> R_AARCH64_RELATIVE addend; PlayerManager self slot
 // Cysharp.Threading.Tasks.PlayerLoopHelper; re-derived from this release ELF.
-inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDCC45C8; // release 11945: outer 0xD974480 -> addend
+inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDCFAC88; // release 11946: outer 0xD9AA3E0 -> addend
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_ACTIVE_LIST = 0x08; // activePlayerList
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
 
-// Managed-object layouts verified for release 11945.
+// Managed-object layouts verified for release 11946.
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS_OFFSET = 0xB8;
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS = 0x30;
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS = 0x38;
@@ -122,7 +122,7 @@ inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = 0x18;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDCBF840; // release 11945: outer 0xD974308 -> addend
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDCF6068; // release 11946: outer 0xD9A96F8 -> addend
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
@@ -424,7 +424,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDCC3860; // release 11945: outer 0xD9742F8 -> addend
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDCF9F40; // release 11946: outer 0xD9A9638 -> addend
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x30;  // было 0x28; перед spawned вставлен handlers(+0x28)
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -486,8 +486,8 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 // за ~16 шагов (~0.3 с @60fps). Остальное окно — запас на следующий билд:
 // сканер крутится циклично и валидирует кандидатов по полной структуре
 // (статик List<Self> + Cycle + sane-дата), так что ложных срабатываний нет.
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDCC0000;
-inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDCE0000; // release slot region
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDD00000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDD20000; // release 11946 qY slot: 0xDD02158
 inline constexpr std::uint64_t TOD_SKY_CYCLE      = 0x40; // TOD_Sky.Cycle
 inline constexpr std::uint64_t TOD_CYCLE_HOUR     = 0x10; // TOD_CycleParameters.Hour
 inline constexpr std::uint64_t TOD_CYCLE_DAY      = 0x14;
