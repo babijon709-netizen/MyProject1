@@ -893,11 +893,15 @@ static bool validate_player_list(uint64_t list, uint64_t player_class) {
         return class_looks_alive(rd_ptr(list));
     }
     int32_t checked = 0;
-    for (int32_t index = 0; index < count && checked < 4; ++index) {
+    for (int32_t index = 0; index < count && index < 8; ++index) {
         uint64_t player = rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
         if (!player) continue;
-        if (rd_ptr(player) != player_class) return false;
-        ++checked;
+        // One unreadable or half-destroyed entry must not invalidate the whole
+        // registry. The stable snapshot below validates every accepted object
+        // again and simply skips entries whose class does not match.
+        uint64_t klass = rd_ptr(player);
+        if (klass != player_class) continue;
+        if (++checked >= 2) break;
     }
     return checked > 0;
 }
@@ -7323,6 +7327,11 @@ static int      g_frame_transforms_empty_streak = 0;
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
 static int      g_frame_publish_fail_streak = 0;
+// True when the current esp_get_boxes result ended on an unreadable/transient
+// path. The renderer may briefly retain the previous boxes instead of flashing
+// an empty frame. A readable empty player registry is not transient.
+static bool     g_box_frame_transient = true;
+bool esp_box_frame_transient() { return g_box_frame_transient; }
 // Independent from camera/marker publication: successful ore frames must not
 // conceal a dead player list or position pipeline.
 static PlayerEspWatchdog g_player_esp_watchdog;
@@ -7475,36 +7484,32 @@ bool publish_camera_only_frame(float sw, float sh) {
     return true;
 }
 
-static void reset_player_pipeline_resolvers() {
-    // Keep camera, attachment and the confirmed local player intact. Viewmodel,
-    // weapon speed and FOV all depend on that identity; clearing it because a
-    // remote-player position failed made unrelated features blink together.
-    // Only the independently recoverable player-list/box state is rebuilt.
+static void reset_player_pipeline_resolvers(bool deep) {
+    // Refresh only the resolver anchors. The last confirmed population and its
+    // position tracks are the fallback that prevents read storms from becoming
+    // visible flicker; clearing them every 1.5 seconds was self-sabotage.
     g_player_manager_static_fields = 0;
-    g_player_position_offset = PLAYER_POSITION;
-    g_player_position_validated = false;
-    g_use_direct_player_position = true;
     g_local_position_fail_streak = 0;
-    g_population_snapshot.clear();
-    s_adopt_cand.clear();
-    s_adopt_ident_streak = 0;
-    g_frame_transforms.clear();
-    g_frame_transforms_lost.clear();
-    g_player_aux.clear();
-    g_player_text.clear();
-    g_player_track.clear();
-    g_player_track_pick.clear();
-    g_mount_latch.clear();
-    g_skeletons.clear();
-    g_body_caches_dirty = true;
+    if (deep) {
+        // After a sustained failure, retry the managed position source without
+        // discarding drawable snapshots. A successful frame will update all
+        // dependent caches naturally.
+        g_player_position_offset = PLAYER_POSITION;
+        g_player_position_validated = false;
+        g_use_direct_player_position = true;
+        g_direct_position_fail_streak = 0;
+        g_direct_position_recheck = 0;
+    }
 }
 
 static void note_player_pipeline_health(bool player_data_ok) {
     const PlayerEspWatchdogAction action =
         g_player_esp_watchdog.observe(player_data_ok, mono_seconds());
     if (action.reset_resolvers) {
-        reset_player_pipeline_resolvers();
-        LogLine("визуал: player pipeline не отвечает — сброшены resolver-кэши");
+        reset_player_pipeline_resolvers(action.deep_recovery);
+        LogLine(action.deep_recovery
+                    ? "визуал: player pipeline не отвечает — глубокий reset resolver-якорей без удаления ESP-снапшота"
+                    : "визуал: player pipeline не отвечает — обновляю resolver-якорь без удаления ESP-снапшота");
     }
     if (action.deep_recovery) {
         // A live camera/local-memory pipeline proves that the process binding is
@@ -7693,6 +7698,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
+    g_box_frame_transient = true;
     std::vector<EspBox> result;
     auto transient_return = [&](int tag) {
         watch_boxes(result, (size_t)-1, nullptr, tag);
@@ -7706,8 +7712,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // whole ESP until the app is restarted.
     if (++g_frame_publish_fail_streak > 240) {
         g_frame_publish_fail_streak = 0;
-        g_frame_transforms.clear();
-        reset_world_caches();
+        // A camera publication gap does not prove that the player population
+        // changed. The old recovery cleared every player/position cache here,
+        // turning a temporary camera EIO burst into a long full ESP outage.
+        // Retry only camera/matrix state and keep the last confirmed players.
+        g_matrix_configuration_validated = false;
+        g_camera_matrix_physical_match = false;
+        s_fv_guard = {};
         // ESP recovery must never tear down an otherwise healthy attachment:
         // viewmodel/FOV/weapon controllers share it. Process replacement and
         // sustained memory-read failure are handled independently in process.cpp.
@@ -7825,18 +7836,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         g_frame_transforms_empty_streak = 0;
     } else {
-        // Death tears the managed player list down before the replacement is
-        // published.  Keep the last population instead of turning one empty
-        // read into an empty ESP frame.  Reads through destroyed objects fail
-        // safely and are time-bounded by filter_player_position; a confirmed
-        // non-overlapping replacement is adopted by the logic above.
-        // Но держать мёртвое население вечно нельзя: если список пуст уже
-        // десяток секунд, мир действительно уехал, и старые указатели только
-        // мешают заново выучить раскладку/смещение позиции (old_source чистил
-        // их через 10 кадров — здесь порог мягче, чтобы не рвать респаун).
-        if (++g_frame_transforms_empty_streak > 600 && !s_transforms.empty()) {
-            s_transforms.clear();
-            reset_world_caches();
+        // A failed resolver is not an empty world. Some kernels return EIO in
+        // bursts for heap/static reads while the attachment itself remains
+        // alive. Clearing the last population after a timeout turned such a
+        // burst into minutes without ESP because every position/text cache was
+        // discarded with it. Keep the last confirmed objects on unreadable
+        // frames; destroyed objects fail safely and the next stable snapshot
+        // replaces them. Only a readable, confirmed empty registry may age the
+        // old population out.
+        if (player_list_ok) {
+            if (++g_frame_transforms_empty_streak > 120 && !s_transforms.empty()) {
+                s_transforms.clear();
+                reset_world_caches();
+            }
+        } else {
+            g_frame_transforms_empty_streak = 0;
         }
     }
     if (s_transforms.empty()) {
@@ -7846,6 +7860,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         note_player_pipeline_health(player_list_ok);
         publish_camera_only_frame(sw, sh);
         append_bot_boxes(result); // боты — и без игроков
+        g_box_frame_transient = !player_list_ok;
         return transient_return(1);
     }
 
@@ -8649,6 +8664,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     append_bot_boxes(result);
+    g_box_frame_transient = false;
     watch_boxes(result, local_entity_index, &skip_reason, 0);
     return result;
 }

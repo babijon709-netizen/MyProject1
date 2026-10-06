@@ -33,8 +33,8 @@ int main() {
         CHECK(step(s, o, p, true, 0.0), "first read draws");
         CHECK(dist(p, {10, 64, 10}) < 1e-5F, "first pos passthrough");
     }
-    // 2) Холд: сбои до 2 секунд — бокс живёт (предсказание), больше — гаснет.
-    //    Это критична для игроков, которые временно "исчезают" из-за read-gap.
+    // 2) Холд: сбои до 5 секунд — бокс живёт (предсказание), больше — гаснет.
+    //    Это критично для устройств с длинными сериями EIO/read-gap.
     {
         State s; Obs o;
         Vec3 p{10, 64, 10};
@@ -43,13 +43,14 @@ int main() {
         CHECK(step(s, o, q, false, 0.5), "hold 0.5s alive");
         CHECK(dist(q, {10, 64, 10}) < 1e-5F, "hold keeps last pos");
         CHECK(step(s, o, q, false, 0.9), "hold 0.9s alive");
-        CHECK(step(s, o, q, false, 1.5), "hold 1.5s still alive (extended to 2s)");
-        CHECK(!step(s, o, q, false, 2.5), "hold dies after 2s");
+        CHECK(step(s, o, q, false, 1.5), "hold 1.5s still alive");
+        CHECK(step(s, o, q, false, 4.9), "hold 4.9s still alive");
+        CHECK(!step(s, o, q, false, 5.5), "hold dies after 5s");
         // Умер = неизвестно где: следующий отсчёт принимаем как первый,
         // без подтверждения скачка (убежавший куда-то игрок не залипает
         // в «неподтверждённом» состоянии навсегда).
         Vec3 far{600, 64, 600};
-        CHECK(step(s, o, far, true, 2.55), "reborn first read draws");
+        CHECK(step(s, o, far, true, 5.55), "reborn first read draws");
         CHECK(dist(far, {600, 64, 600}) < 1e-4F, "reborn at new place");
     }
     // 3) Движение пешком принимается без подтверждений.
@@ -132,17 +133,17 @@ int main() {
         Vec3 p{10, 64, 10};
         CHECK(step(s, o, p, true, 0.0), "seed");
         Vec3 q{};
-        CHECK(!step(s, o, q, false, 4.0), "gap kills box after 2s hold");
+        CHECK(!step(s, o, q, false, 6.0), "gap kills box after 5s hold");
         // Чтения вернулись: игрок уже далеко и летит прочь.
         Vec3 m{310, 64, 10};
-        CHECK(step(s, o, m, true, 4.033), "resume restarts as first draw");
+        CHECK(step(s, o, m, true, 6.033), "resume restarts as first draw");
         CHECK(dist(m, {310, 64, 10}) < 1e-4F, "resume at real new place");
         m = {313.3F, 64, 10.6F};
-        CHECK(step(s, o, m, true, 4.066), "resume frame2");
+        CHECK(step(s, o, m, true, 6.066), "resume frame2");
         m = {316.6F, 64, 11.2F};
-        CHECK(step(s, o, m, true, 4.099), "resume frame3");
+        CHECK(step(s, o, m, true, 6.099), "resume frame3");
         m = {319.9F, 64, 11.8F};
-        CHECK(step(s, o, m, true, 4.132), "resume frame4");
+        CHECK(step(s, o, m, true, 6.132), "resume frame4");
         CHECK(o.conf >= 1, "resume confirmed");
         CHECK(dist(m, {319.9F, 64, 11.8F}) < 1e-4F, "resume follows real pos");
     }

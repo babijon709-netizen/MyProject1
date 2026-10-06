@@ -13,7 +13,7 @@ namespace posfilter {
 // Значения подобраны под верхние скорости игры: бег ~8, машина ~50,
 // коптер до ~120 м/с. Мусорный отсчёт скачет случайно по карте, а игрок —
 // никогда быстрее транспорта.
-constexpr double kPosHoldSeconds      = 2.0;   // холд без успешного чтения (время, не кадры!)
+constexpr double kPosHoldSeconds      = 5.0;   // холд без успешного чтения (время, не кадры!)
 constexpr int    kPosJumpConfirmFrames = 3;    // нужен повтор в несколько кадров, чтобы не гасить ESP на шуме
 constexpr float  kPosJumpMeters        = 1.5F; // базовый допуск, метры
 constexpr float  kPosJumpSpeed         = 28.0F;// плюс м/с на секунду простоя

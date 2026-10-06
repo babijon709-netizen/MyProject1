@@ -10,6 +10,7 @@
 #include "overlay_geometry.h"
 #include <cfloat>
 #include <cmath>
+#include <utility>
 #include <time.h>
 
 // Radius (px) of the aim FOV circle. Original logic: cfg::aim::fov is an
@@ -64,7 +65,20 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_aim_lead(leadUser > leadAuto ? leadUser : leadAuto);
         esp_set_screen_stretch(g_state.screen_stretch_x);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
-        s_boxes = esp_get_boxes((int)sw, (int)sh);
+        std::vector<EspBox> next = esp_get_boxes((int)sw, (int)sh);
+        static double last_healthy_at = -1e9;
+        timespec ts{};
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+        const bool transient = esp_box_frame_transient();
+        // Single-frame camera/list read gaps used to publish an empty vector,
+        // producing rapid full-screen ESP flicker on noisier kernels. Keep the
+        // previous screen snapshot only for a short visual debounce window;
+        // a confirmed healthy empty frame still clears it immediately.
+        if (!transient || s_boxes.empty() || now - last_healthy_at > 0.35) {
+            s_boxes = std::move(next);
+            if (!transient) last_healthy_at = now;
+        }
     }
     return s_boxes;
 }
