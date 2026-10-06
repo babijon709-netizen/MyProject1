@@ -263,6 +263,18 @@ std::atomic<bool> g_frame_done{true};
 InputState g_input;
 AppState g_state;
 
+static void ArmShutdownDeadline() {
+    static std::atomic<bool> armed{false};
+    if (armed.exchange(true)) return;
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(8));
+        // A kernel transport call can be uninterruptible. Once the visible
+        // Surface is gone and critical cleanup had its deadline, terminate the
+        // process instead of leaving background workers alive for a minute.
+        _exit(0);
+    }).detach();
+}
+
 int main(int argc, char* argv[]) {
     // Проверка драйвера из терминала (Termux/adb): su -c ./xvcen --check-driver
     // (базовая) или --scan-driver (полный скан кодов команд) — без GUI,
@@ -345,16 +357,21 @@ int main(int argc, char* argv[]) {
         // Приложение закрыли, не выбрав режим: выходим тем же порядком,
         // что и обычный выход (привязки и чит-конвейеров ещё нет — их
         // остановка здесь пустая, но последовательность та же).
-        silent_aim::shutdown();
+        // Remove the Surface first so a slow worker shutdown cannot leave a
+        // frozen overlay covering the screen.
+        Blur::Free();
+        shutdown();
+        Touch_Close();
+        ArmShutdownDeadline();
         fake_lag::shutdown();
+        silent_aim::shutdown();
         esp_freecam_set(false);
         stop_attach_thread();
         esp_viewmodel_reset(true);
         process_detach();
-        Blur::Free();
         CfgWatchFree();
         AudioFree();
-        shutdown(); Touch_Close(); return 0;
+        _exit(0);
     }
     start_attach_thread();
     LoadTabIcons();
@@ -466,10 +483,17 @@ int main(int argc, char* argv[]) {
         }
         g_frame_done.store(true);
     }
-    // Remove network rules while the log is still available for diagnostics.
-    fake_lag::shutdown();
-    LogClose();
+    // Destroy the visible Surface before joining any worker. Some transport,
+    // writer or root-command shutdowns can take time; they must run after the
+    // overlay has already disappeared from the screen.
+    Blur::Free();
+    shutdown();
+    Touch_Close();
+    ArmShutdownDeadline();
     while (!g_frame_done.load()) {}
+    // Remove network rules first: unlike the remaining process-local resources,
+    // firewall state must not survive a forced shutdown deadline.
+    fake_lag::shutdown();
     // Сначала останавливаем фонового writer: во время восстановления камеры и
     // object-data он уже не должен менять ось выстрела.
     silent_aim::shutdown();
@@ -479,8 +503,8 @@ int main(int argc, char* argv[]) {
     stop_attach_thread();
     esp_viewmodel_reset(true);
     process_detach();
-    Blur::Free();
     CfgWatchFree();
     AudioFree();
-    shutdown(); Touch_Close(); return 0;
+    LogClose();
+    _exit(0);
 }
