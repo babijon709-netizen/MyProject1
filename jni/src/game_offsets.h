@@ -29,9 +29,15 @@ namespace game_offsets {
 // and TOD_Sky is ZD. Names are breadcrumbs only; match fields POSITIONALLY
 // (offset + type + neighbours) when processing the next dump.
 
-// Native Unity Camera (via Camera::m_CachedPtr) — from libunity.so (dump2)
-// get_worldToCameraMatrix_Injected @ 0x5ac514 → helper 0xe1fe08 returns cam+0x70
-// get_projectionMatrix_Injected    @ 0x5ac53c → helper 0xe1fe6c returns cam+0xB0
+// Native Unity Camera (via Camera::m_CachedPtr) — verified by instruction
+// patterns in libunity.so (release repo binary AND beta build 11943, the
+// two .note.unity blobs are byte-identical: 6000.3.18f1_5ebeb53e4c07):
+//   UpdateMatrices: stp q0,q1,[cam,#0x70]; str x9,[cam,#0xb0];
+//                   strb wzr,[cam,#0x502]; copy-fn reads [x0,#0x70/#0xb0]
+//   set_aspect:     str s0,[cam,#0x4e0]; strh w8,[cam,#0x500]
+//   fov/near/far:   ldr/str s?,[cam,#0x170/#0x454/#0x458]
+// (the old raw-VA anchors 0x5ac514/0xe1fe08/0xe1fe6c land inside unrelated
+// code of the current binaries — do not reuse; use instruction patterns.)
 // IMPORTANT: +0x70 / +0xB0 are LAZY caches (dirty flags @ +0x502 / +0x500).
 // External process_vm_readv does NOT run the getters, so +0x70 goes stale when the
 // camera moves — that is the ESP "drifts with camera" bug. Prefer rebuilding view
@@ -393,14 +399,18 @@ inline constexpr std::uint64_t RAGDOLL_BONES_ARRAY         = 0x88;
 inline constexpr std::uint64_t RAGDOLL_BODYPART_TRANSFORM  = 0x10;
 inline constexpr std::uint64_t IL2CPP_ARRAY_LENGTH         = 0x18;
 
-// Native Unity object layout — reversed from libunity.so in this repo:
-//   Transform::get_childCount_Injected -> ldr w0, [x0, #0x58]
+// Native Unity object layout — verified by instruction patterns in BOTH
+// release repo libunity.so and beta build 11943 libunity.so:
+//   Transform::get_childCount_Injected -> ldr w0, [x0, #0x58]  (stub, identical)
+//   hierarchy copy fn                  -> ldr x9,[hier,#0x18] matrices,
+//                                         ldr x8,[hier,#0x20] indices (4-byte idx, stride 0x30)
 //   Transform::GetChild helper         -> ldr x8, [x0, #0x48]; ldr x0, [x8, w1, uxtw #3]
 //   Component::get_gameObject_Injected -> ldr x0, [x0, #0x20]
 //   GameObject::get_transform_Injected -> ldr x8, [x0, #0x20]; ldr x19, [x8, #8]
 inline constexpr std::uint64_t TRANSFORM_CHILDREN_ARRAY   = 0x48; // Transform** (direct pointers)
 inline constexpr std::uint64_t TRANSFORM_CHILD_COUNT      = 0x58; // int32
-// Native Transform hierarchy storage for the supported release libunity.
+// Native Transform hierarchy storage for the supported release libunity
+// (+0x18/+0x20 instruction-verified also in beta build, same Unity version).
 inline constexpr std::uint64_t TRANSFORM_HIERARCHY_DATA    = 0x38;
 inline constexpr std::uint64_t TRANSFORM_HIERARCHY_INDEX   = 0x40;
 inline constexpr std::uint64_t TRANSFORM_HIERARCHY_MATRICES = 0x18;

@@ -43,8 +43,42 @@ GKO (hitObject 0x18/RaycastHit 0x48), TOD (_Cycle_ 0x40, 67/67 полей),
 |---|---:|---:|---|
 | `INVDATA_PLAYER_MODEL_INFO` | `0x20` | `0x18` | в релиз перед playerModelInfo вставлено поле `Vale...` (+0x18); в бете его нет |
 
-Native Unity-оффсеты (Camera/Transform/GameObject) у беты не проверялись —
-в архиве нет `libunity.so`; оставлены релизные значения из `game_offsets.h`.
+Native Unity-оффсеты (Camera/Transform/GameObject): **проверены по beta
+`libunity.so`** (отдельный архив, 25030624 Б, sha256
+`753a6b7db404a3d03d8f267baf222b17dca7a7a126552f151b207fd3a9a3893a`).
+Релизная и бета-библиотеки собраны из одного Unity — `.note.unity`
+идентична побайтово в обоих (`6000.3.18f1_5ebeb53e4c07`), dynsym/dynstr
+тех же размеров. Код функций с используемыми оффсетами побайтово
+одинаков в обоих билдах (отличаются только цели bl/b/cbz/adrp и сдвиги
+секций: .text β на +0x40 байт относительно релизного в большей части
+тела, отдельные регионы +0x10C…+0x134; ~69% всех 32-байтных окон .text
+совпадают при согласованных сдвигах). Контрольные инструкции, сверенные
+в обоих файлах:
+
+| Оффсет | Контроль | Билды |
+|---|---|---|
+| cam+0x70 view | `stp q0,q1,[x19,#0x70]` в UpdateMatrices + copy-fn `ldp q?,[x0,#0x70]` | оба, код идентичен |
+| cam+0xB0 proj | `str x9,[x19,#0xb0]` (head row) + copy-fn `ldp q2,q3,[x0,#0xb0]` | оба |
+| cam+0x502 viewDirty | `strb wzr,[x19,#0x502]`, `ldrb w8,[x0,#0x502]` | оба (6/6 hits) |
+| cam+0x500 projDirty | `strh w8,[x0,#0x500]` в set_aspect | оба |
+| cam+0x4E0 aspect | `str s0,[x0,#0x4e0]` | оба |
+| cam+0x170 fov | `ldr s9,[x19,#0x170]` / `ldr s1,[x0,#0x170]` / `str s9,[x19,#0x170]` | оба, 17/17 hits коррелируют |
+| cam+0x454/0x458 near/far | парные `ldr s? ,[x?,#0x454/#0x458]` (10+ пар) | оба |
+| transform+0x58 childCount | icall-заглушка `bl resolve; ldr w0,[x0,#0x58]; ret` | оба (3/3 hits) |
+| hierarchy matrices +0x18 / indices +0x20 | `ldr x9,[x20,#0x18]` … `ldr x8,[x20,#0x20]; ldr w8,[x8,x19,lsl#2]`, stride 0x30 | оба |
+| indexed child access | `ldr x?,[x?,w?,uxtw#3]` — 3460 вхождений | счёт одинаков в обоих |
+
+Старые VA-якоря из комментариев `game_offsets.h` (0x5ac514/0xe1fe08/…)
+к этой паре бинарей не привязаны — попадали в середину чужого кода;
+для следующей сверки пользоваться инструкционными паттернами выше, не VA.
+
+Не верифицированы инструкциями (нет отдельного писателя/читателя в окне,
+карятся тем же изоморфным кодом и тем же билдом движка): cam+0xF0
+(worldToClip), cam+0x5C8 (prevViewProj), cam+0x20, transform children
+@0x48, hierarchy data/index @0x38/@0x40, component/go @0x20, pair @0x08,
+go name @0x48. Риск по ним тот же, что и у релиза (одна и та же сборка
+UnityPlayer), отдельной валидации не требует.
+
 Enum'ы (`Oxide.FPTool.ToolPurpose` 1/2/4, `ServerPlayersAnalytics.EntityType`
 0..25 incl. Rat=25) — идентичны, общие в `game_offsets.h`.
 

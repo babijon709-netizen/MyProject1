@@ -18,9 +18,26 @@
 //   PlayerEventHandler = maY (rel pLh); nicklabel = dL (rel Xq);
 //   voicePlayer = mgn (rel prF); TOD_Sky = YQ (rel ZD), YQ::.cctor@0x682c2b8;
 //   activity-классы pLv/pLx -> maU/mar; view-цепочка lL/lQ -> eR/eI.
+//
+// Native libunity.so беты (25030624 Б, отдельный архив): тот же Unity
+// 6000.3.18f1_5ebeb53e4c07 (.note.unity идентична релизной побайтово).
+// Функции с любыми native-оффсетами — побайтово одинаковые с релизом
+// (различия только в abсолютных target'ах bl/b/adrp и сдвиге секций);
+// сдвиги регионов вплоть до +0x134, глобально ~69% .text совпадает
+// окнами по 32 байта при согласованных сдвигах. Контрольные точки
+// сверены в ОБОИХ билдах: cam+0x70 (stp q0,q1 / copy-fn), cam+0xB0,
+// dirty @0x500/@0x502 (strh/strb), aspect @0x4E0, fov @0x170,
+// near/far @0x454/@0x458, childCount @0x58 (icall-заглушка),
+// hierarchy matrices @0x18 / indices @0x20 (stride 0x30, index 4 байта).
+// Не верифицированы инструкциями, но лежат в том же изоморфном коде:
+// cam+0xF0 (worldToClip), cam+0x5C8 (prevViewProj), cam+0x20,
+// transform children @0x48, hierarchy data/index @0x38/@0x40,
+// component/go @0x20, pair @0x08, go name @0x48.
 
 namespace game_offsets_beta {
 
+// Native Camera: оффсеты инструкционно подтверждены в beta libunity.so
+// (см. комментарий выше; подробности в reversing/OFFSETS_DUMP11943BETA_2026-10-06.md).
 inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = 0xB0;
 inline constexpr std::uint64_t CAMERA_VIEW_MATRIX = 0x70;
 inline constexpr std::uint64_t CAMERA_WORLD_TO_CLIP = 0xF0;
