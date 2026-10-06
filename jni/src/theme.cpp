@@ -7,7 +7,9 @@ ImVec4 g_accent = {0.545f, 0.486f, 1.000f, 1};
 bool   g_accentOn = false;
 
 void ApplyTheme() {
+#if IMGUI_VERSION_NUM >= 19100
     ImGui::GetIO().ConfigDebugHighlightIdConflicts = false;
+#endif
     auto& s = ImGui::GetStyle();
     s.WindowRounding = 24; s.ChildRounding  = 20; s.FrameRounding = 16;
     s.GrabRounding   = 16; s.PopupRounding  = 16; s.TabRounding   = 16;
