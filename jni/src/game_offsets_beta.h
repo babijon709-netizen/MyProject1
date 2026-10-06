@@ -1,9 +1,9 @@
 #pragma once
 #include "game_offsets.h"
 
-// Beta profile, build 11943.
-// Source: dumpbeta11943.7z (dump.cs + libil2cpp.so), 31791 types.
-// Managed layouts used by the reader match release 11945; metadata slots differ.
+// Beta profile, snapshot 2026-10-06.
+// Source: betadump061026.7z (dump.cs + libil2cpp.so), 31791 types.
+// Managed layouts used by the reader match release 11946; metadata slots differ.
 
 namespace game_offsets_beta {
 inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = game_offsets::CAMERA_PROJECTION_MATRIX;
@@ -24,8 +24,8 @@ inline constexpr float PLAYER_HEIGHT = game_offsets::PLAYER_HEIGHT;
 inline constexpr float PLAYER_BOX_WIDTH_RATIO = game_offsets::PLAYER_BOX_WIDTH_RATIO;
 inline constexpr float MIN_PLAYER_DISTANCE = game_offsets::MIN_PLAYER_DISTANCE;
 inline constexpr float MAX_PLAYER_DISTANCE = game_offsets::MAX_PLAYER_DISTANCE;
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDD732B8;
-inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDD73280;
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDD732B8; // outer 0xDA1FDF0; PlayerManager self slot
+inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDD73280; // outer 0xDA1EC60
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_ACTIVE_LIST = game_offsets::PLAYER_MANAGER_STATIC_FIELDS_ACTIVE_LIST;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = game_offsets::PLAYER_MANAGER_STATIC_FIELDS_LIST;
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS_OFFSET = game_offsets::IL2CPP_CLASS_STATIC_FIELDS_OFFSET;
@@ -59,7 +59,7 @@ inline constexpr std::uint64_t WEAPONRECOIL_WEAPON_CONFIG = game_offsets::WEAPON
 inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = game_offsets::RECOILCONFIG_MIN_RECOIL;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = game_offsets::DISPERSIONCONFIG_MIN_DISPERSION;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = game_offsets::DISPERSIONCONFIG_MAX_DISPERSION;
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDD6E5F8;
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDD6E5F8; // outer 0xDA1DF30
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD = game_offsets::GAME_CONTROLLER_LOCAL_PLAYER_FIELD;
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = game_offsets::GAME_CONTROLLER_CAMERA_MANAGER_FIELD;
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD = game_offsets::CAMERA_MANAGER_CAMERA_FIELD;
@@ -177,7 +177,7 @@ inline constexpr std::uint64_t GAMEOBJECT_NAME_GUESS = game_offsets::GAMEOBJECT_
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS = game_offsets::IL2CPP_LIST_ITEMS;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE = game_offsets::IL2CPP_LIST_SIZE;
 inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = game_offsets::IL2CPP_ARRAY_FIRST_ELEMENT;
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDD725C8;
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDD725C8; // outer 0xDA1DF18
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED = game_offsets::NETWORK_CLIENT_SPAWNED;
 inline constexpr std::uint64_t DICT_ENTRIES = game_offsets::DICT_ENTRIES;
 inline constexpr std::uint64_t DICT_COUNT = game_offsets::DICT_COUNT;
@@ -190,8 +190,8 @@ inline constexpr std::uint64_t PMK_HEALTH = game_offsets::PMK_HEALTH;
 inline constexpr std::uint64_t ARP_LATEST_VALUE = game_offsets::ARP_LATEST_VALUE;
 inline constexpr std::uint64_t HEALTH_VALUE = game_offsets::HEALTH_VALUE;
 inline constexpr std::uint64_t VITALS_MAX_HEALTH = game_offsets::VITALS_MAX_HEALTH;
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDD60000;
-inline constexpr std::uint64_t TOD_SCAN_RVA_END = 0xDDE0000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDD70000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_END = 0xDD90000; // YQ self slot: 0xDD789D8
 inline constexpr std::uint64_t TOD_SKY_CYCLE = game_offsets::TOD_SKY_CYCLE;
 inline constexpr std::uint64_t TOD_CYCLE_HOUR = game_offsets::TOD_CYCLE_HOUR;
 inline constexpr std::uint64_t TOD_CYCLE_DAY = game_offsets::TOD_CYCLE_DAY;
