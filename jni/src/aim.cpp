@@ -224,11 +224,11 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     // он водил бы камеру прямо под пальцем пользователя.
     // Во фрикаме аим молчит: камера улетела от тела, а точка прицела считается
     // от глаза персонажа — доворачивать камеру по ней было бы некуда.
-    bool active = g_state.aim_touch && g_esp_attached && !menuOpen &&
+    bool active = g_state.aim_touch && g_esp_attached.load(std::memory_order_acquire) && !menuOpen &&
                   g_calibMode == 0 && !g_state.freecam_on;
 
     // "Только с прицелом": only steer while the local player is ADS.
-    if (g_state.aim_scope_only && g_esp_attached) {
+    if (g_state.aim_scope_only && g_esp_attached.load(std::memory_order_acquire)) {
         s_adsState = esp_local_player_is_aiming() ? 1 : 0;
         s_adsSource = esp_local_aim_source();
         if (active && !s_adsState) active = false;
@@ -241,7 +241,7 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
         // как «потерялся MouseLook», хотя проверка объекта даже не запускалась.
         if (why) {
             if (!g_state.aim_touch)                  *why = 1;
-            else if (!g_esp_attached)                *why = 2;
+            else if (!g_esp_attached.load(std::memory_order_acquire)) *why = 2;
             else if (menuOpen)                       *why = 3;
             else if (g_calibMode != 0)               *why = 4;
             else if (g_state.freecam_on)             *why = 6;

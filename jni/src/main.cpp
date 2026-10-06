@@ -409,6 +409,7 @@ int main(int argc, char* argv[]) {
         LogStage(kStageFreecam);
         UpdateFreecam(ImGui::GetIO().DeltaTime);   // фрикам: полёт камеры
         AimEndFrame(); // закрыть lease, если меню/фрикам выключили сайлент позднее
+        esp_mem_frame_end();
         slowMark();   // 5: после фрикама
         LogStage(kStageFrameEnd);
         drawEnd();

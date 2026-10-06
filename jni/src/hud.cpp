@@ -211,7 +211,7 @@ void DrawWatermark(float dt) {
     // меню.
     {
         int enemies = 0;
-        if (g_esp_attached) {
+        if (g_esp_attached.load(std::memory_order_acquire)) {
             // Обновляем снимок кадра (кэшируется на кадр) и берём число
             // игроков вокруг на все 360° — не только тех, кто попал на экран.
             FrameBoxes(scrW, scrH);
@@ -219,7 +219,7 @@ void DrawWatermark(float dt) {
         }
 
         const float fs = 40.f, pad = 18.f, bR = 46.f;
-        const int bots = g_esp_attached ? esp_nearby_bot_count() : 0;
+        const int bots = g_esp_attached.load(std::memory_order_acquire) ? esp_nearby_bot_count() : 0;
         char enemyBuf[16], botBuf[16];
         snprintf(enemyBuf, sizeof(enemyBuf), "%d", enemies);
         snprintf(botBuf, sizeof(botBuf), "%d", bots);

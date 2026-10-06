@@ -373,12 +373,26 @@ public:
         return true;
     }
 
-    // Проверка «привязка ещё жива»: читаем ELF-заголовок по адресу пробы. Один
-    // syscall; нужна, чтобы заметить, что доступ отобрали или процесс перезапустился
-    // с тем же pid, — иначе чит молча стоит с привязкой, которая ничего не читает.
+    // Проверка «привязка ещё жива»: читаем ELF-заголовок по адресу пробы.
+    // Временный EIO/таймаут транспорта не должен требовать полного detach и
+    // повторного поиска игры: pid и probe уже известны. Поэтому после неудачи
+    // один раз заново открываем выбранный транспорт и повторяем ту же пробу.
+    // Это особенно важно для ядерных драйверов, которые могут кратко потерять
+    // узел/сокет под нагрузкой и вернуться через несколько секунд.
     bool verify() {
-        if (!bound() || !probe_addr_) return false;
-        return probe_readable();
+        if (!probe_addr_ || pid_.load() <= 0) return false;
+        if (bound() && probe_readable()) return true;
+        close_mem();
+        if (!open_mem()) return false;
+        if (probe_readable()) {
+            reopens_.fetch_add(1, std::memory_order_relaxed);
+#ifdef MEMIO_STATS
+            ++reopens;
+#endif
+            return true;
+        }
+        close_mem();
+        return false;
     }
 
 #ifdef MEMIO_STATS

@@ -18,13 +18,15 @@
 static const char* const kTargetPackage = "com.catsbit.oxidesurvivalisland";
 
 pid_t g_target_pid = -1;
-bool  g_esp_attached = false;
+std::atomic<bool> g_esp_attached{false};
 std::atomic<bool> g_attach_scanned{false};
 // Official package or a renamed/cloned package candidate. Both still pass
 // esp_init's release TypeInfo validation before attachment is accepted.
 static bool g_target_by_package = true;
+// Number of consecutive failed liveness probes. Kept for diagnostics/reset on
+// a real process exit; a failed probe alone must not detach a still-running
+// game, because selected kernel transports can recover their fd/socket later.
 static int g_alive_check_failures = 0;
-static constexpr int kAliveCheckFailureLimit = 3;
 static std::thread g_attach_thread;
 static std::atomic<bool> g_attach_running{false};
 
@@ -141,7 +143,7 @@ void start_attach_thread() {
     g_attach_running.store(true);
     g_attach_thread = std::thread([]() {
         while (g_attach_running.load()) {
-            if (!g_esp_attached) {
+            if (!g_esp_attached.load(std::memory_order_acquire)) {
                 pid_t attached_pid = -1;
                 const pid_t official = find_game_pid();
                 g_attach_scanned.store(true);
@@ -163,27 +165,27 @@ void start_attach_thread() {
                 }
                 if (attached_pid > 0) {
                     g_target_pid = attached_pid;
-                    g_esp_attached = true;
+                    g_esp_attached.store(true, std::memory_order_release);
                     g_alive_check_failures = 0;
                 }
             } else {
                 const bool same_process = pid_still_game(g_target_pid);
-                bool memory_alive = true;
-                if (same_process) {
-                    if (esp_alive_check()) g_alive_check_failures = 0;
-                    else {
-                        ++g_alive_check_failures;
-                        memory_alive = g_alive_check_failures < kAliveCheckFailureLimit;
-                    }
-                }
-                if (!same_process || !memory_alive) {
-                    // Process death is immediate; isolated /proc/<pid>/mem EIO
-                    // failures are tolerated. They are common under load and
-                    // must not make every memory feature blink off together.
+                if (!same_process) {
+                    // Process death is final: all cached managed addresses now
+                    // belong to another lifetime and must be discarded.
                     esp_reset();
-                    g_esp_attached = false;
+                    g_esp_attached.store(false, std::memory_order_release);
                     g_target_pid = -1;
                     g_alive_check_failures = 0;
+                } else if (esp_alive_check()) {
+                    g_alive_check_failures = 0;
+                } else {
+                    // Do not detach from a live process merely because its
+                    // memory transport missed several probes. Reader::verify()
+                    // reopens the selected transport on every later probe; once
+                    // a temporarily lost driver/fd returns, ESP resumes without
+                    // the multi-minute process/class reattach cycle.
+                    ++g_alive_check_failures;
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
@@ -197,7 +199,7 @@ void stop_attach_thread() {
 }
 void process_detach() {
     esp_reset();
-    g_esp_attached = false;
+    g_esp_attached.store(false, std::memory_order_release);
     g_target_pid = -1;
     g_alive_check_failures = 0;
 }

@@ -10,9 +10,12 @@ struct PlayerEspWatchdogAction {
 
 class PlayerEspWatchdog {
 public:
-    static constexpr double kResolverResetSeconds = 0.75;
-    static constexpr double kResetRepeatSeconds = 1.50;
-    static constexpr double kDeepRecoverySeconds = 5.0;
+    // Один-два медленных снапшота PlayerManager — обычный read-gap на
+    // загруженных устройствах, не смена мира. Ранний reset очищал живые
+    // треки прямо во время кадра и сам создавал заметное мигание ESP.
+    static constexpr double kResolverResetSeconds = 3.0;
+    static constexpr double kResetRepeatSeconds = 3.0;
+    static constexpr double kDeepRecoverySeconds = 9.0;
 
     PlayerEspWatchdogAction observe(bool player_data_ok, double now) {
         if (player_data_ok) {

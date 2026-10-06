@@ -285,7 +285,7 @@ static void UpdateFarmInner(float dt) {
     esp_farm_set_range(g_state.farm_range);
 
     const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
-    if (mask == 0 || !g_esp_attached) {
+    if (mask == 0 || !g_esp_attached.load(std::memory_order_acquire)) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
         g_farmHpPct = -1.f; g_farmSpotLife = -1.f; g_farmBlocked = false;

@@ -5,8 +5,10 @@
 #include <sys/types.h>
 #include <atomic>
 
-extern pid_t g_target_pid;      // -1 пока не привязались
-extern bool  g_esp_attached;    // память игры читается
+extern pid_t g_target_pid;               // -1 пока не привязались
+// Пишется потоком привязки и читается рендером/аимом: обычный bool здесь
+// давал data race и на части устройств превращался в случайные blank-кадры.
+extern std::atomic<bool> g_esp_attached;
 // Поток привязки хотя бы раз прошёл поиск игры (индикация «игра не найдена»
 // в main.cpp не срабатывает до первого скана).
 extern std::atomic<bool> g_attach_scanned;

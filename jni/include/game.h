@@ -110,8 +110,11 @@ enum EspAttachState {
 bool          esp_init(pid_t pid, bool package_verified_release = false);
 void          esp_reset();
 EspAttachState esp_attach_state();
-// Начало кадра: сброс кэша блоков памяти игры (см. mem_io.h).
+// Границы кадра памяти: render-поток держит выбранный транспорт на всём
+// кадре, поэтому фоновая проверка/перепривязка не может закрыть fd/драйвер
+// посреди чтения ESP. begin также сбрасывает кэш блоков (см. mem_io.h).
 void          esp_mem_frame_begin();
+void          esp_mem_frame_end();
 // Способ доступа к памяти игры. Выбирается один раз на старте, ДО первого
 // bind (экран режима mode_select.h); дальнейший код чтения
 // транспорт-агностичен и про режимы не знает.
@@ -159,12 +162,6 @@ void        esp_set_marker_max_distance(float metres);// Markers for the current
 std::vector<EspMarker> esp_get_markers();
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.
 void        esp_set_aim_bones_enabled(bool enabled);
-// Temporarily classify verified remote body HitBoxes as Head through the live
-// managed KCC data. Values are restored when disabled or despawned.
-void        esp_set_headshot_body(bool enabled);
-// Clears tracked remote HitBoxes at scene/process teardown. restore=true only
-// while the selected memory transport is still bound to the same game.
-void        esp_reset_headshot_body(bool restore);
 // Bot aim feed: world positions of recognised bots, refreshed (scan +
 // throttled re-reads) even when bot markers are not drawn — so the aimbot
 // keeps working on bots after their ESP is switched off.
@@ -173,6 +170,10 @@ void esp_set_bot_aim_enabled(bool enabled);
 void esp_bot_aim_maintain();
 std::vector<BotAimEnt> esp_bot_aim_list();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
+// True only when the latest player snapshot completed. The renderer may retain
+// its previous presentation briefly when this is false, instead of flashing an
+// empty overlay during a transient memory/camera read gap.
+bool        esp_player_frame_valid();
 
 // Players near the local player as of the last esp_get_boxes() call, in all
 // directions (360 degrees) — NOT limited to the ones visible on screen.

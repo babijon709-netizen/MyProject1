@@ -41,7 +41,6 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         // читались вовсе — тогда аим уходил на запасной расчёт по росту, а
         // признак смерти по позе вообще нечем было мерить.
         esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
-        esp_set_headshot_body(g_state.viewmodel.headshot_body);
         esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
                                 g_state.esp_loot, g_state.esp_pickup,
                                 g_state.esp_vehicles, g_state.esp_bots,
@@ -78,8 +77,7 @@ void DrawEspOverlay() {
     const float sh = static_cast<float>(overlay.scene_height);
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
-    if (!g_esp_attached) return;
-    esp_set_headshot_body(g_state.viewmodel.headshot_body);
+    if (!g_esp_attached.load(std::memory_order_acquire)) return;
 
     if (g_state.aim_touch && g_state.aim_special) {
         float fovR = AimFovRadiusPx(sw, sh);
@@ -90,9 +88,32 @@ void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes && !g_state.viewmodel.headshot_body) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes) return;
 
-    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
+    const std::vector<EspBox>& current_boxes = FrameBoxes(sw, sh);
+    // A complete player snapshot can legitimately be empty (alone on a
+    // server, every player off-screen), so it clears the presentation cache.
+    // Only an explicitly failed snapshot reuses the last rendered players.
+    // This prevents a temporary camera/list read gap from visibly flashing all
+    // player visuals off on slower devices, while never feeding stale boxes to
+    // the aimbot: FrameBoxes itself still returns current_boxes.
+    static std::vector<EspBox> s_presented_players;
+    static double s_presented_at = -1e9;
+    constexpr double kPresentationHoldSeconds = 0.75;
+    const double presentation_now = ImGui::GetTime();
+    const bool player_frame_valid = esp_player_frame_valid();
+    if (player_frame_valid) {
+        s_presented_players.clear();
+        for (const EspBox& box : current_boxes)
+            if (!box.is_bot) s_presented_players.push_back(box);
+        s_presented_at = presentation_now;
+    }
+    const bool use_presented_players = !player_frame_valid &&
+        !s_presented_players.empty() && presentation_now >= s_presented_at &&
+        presentation_now - s_presented_at <= kPresentationHoldSeconds;
+    const std::vector<EspBox>& boxes = use_presented_players
+        ? s_presented_players : current_boxes;
+
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},

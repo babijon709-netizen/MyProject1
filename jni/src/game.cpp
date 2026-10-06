@@ -5,7 +5,6 @@
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
-#include "headshot_hitbox_memory.h"
 #include "mem_io.h"                // чтение/запись памяти игры: транспорт + кэш блоков
 #include "kernel_io.h"             // кернел-транспорт (сокет ядерного драйвера)
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
@@ -41,6 +40,10 @@
 // доступа пробой по ELF-заголовку и кэш блоков на кадр. Здесь только обёртки,
 // которыми пользуется весь остальной код чтения.
 memio::Reader g_mem;
+// The render frame owns this gate while it traverses game memory. Attach
+// recovery and the silent writer use the same gate, so they cannot reopen a
+// selected fd/socket while another thread is inside a transport request.
+static std::recursive_mutex g_mem_session_mutex;
 
 // Способ доступа к памяти: экстернал (/proc/<pid>/mem), кернел FT (сокет
 // bing-класса), RT-Dev (/dev/[A-GNY]{1,6} с ioctl 0x801/0x802) или RT-Hook
@@ -50,6 +53,7 @@ memio::Reader g_mem;
 static int g_mem_backend = ESP_MEM_EXTERNAL;
 
 void esp_set_mem_backend(int backend) {
+    std::lock_guard<std::recursive_mutex> guard(g_mem_session_mutex);
     g_mem_backend = backend;
     memio::Transport* t = &memio::procfs_transport();
     if (backend == ESP_MEM_FT) t = &memio::kernel_transport();
@@ -70,12 +74,15 @@ int esp_mem_last_errno() { return g_mem.last_error(); }
 // прямой доступ к памяти закрыт. Чтение — read_quiet (мимо кадрового кэша
 // рендер-потока, как у viewmodel), запись — обычный путь Reader.
 bool esp_silent_target(int pid) {
+    std::lock_guard<std::recursive_mutex> guard(g_mem_session_mutex);
     return g_mem.bound() && g_mem.pid() == pid;
 }
 bool esp_silent_read(uint64_t addr, void* out, size_t len) {
+    std::lock_guard<std::recursive_mutex> guard(g_mem_session_mutex);
     return g_mem.bound() && g_mem.read_quiet(addr, out, len);
 }
 bool esp_silent_write(uint64_t addr, const void* in, size_t len) {
+    std::lock_guard<std::recursive_mutex> guard(g_mem_session_mutex);
     return g_mem.bound() && g_mem.write(addr, in, len);
 }
 
@@ -913,6 +920,14 @@ static bool player_list_contains(uint64_t list, uint64_t player) {
             return true;
     }
     return false;
+}
+
+// During death the game can temporarily remove the local PlayerManager from
+// the network list while its respawn flag and camera remain valid. Do not lose
+// that identity just because the list is in this intentional transition.
+static bool player_is_respawning_now(uint64_t player) {
+    uint8_t respawning = 0;
+    return player && rd_exact(player + PLAYER_MANAGER_RESPAWNING, respawning) && respawning != 0;
 }
 
 static constexpr uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
@@ -4194,8 +4209,14 @@ static std::vector<uint64_t> read_configured_player_transforms(bool* player_list
         // and dropping him here was what killed markers/farm solo: the frame
         // below never got a local position. Only treat him as stale when the
         // list actually has entries that he is missing from.
+        //
+        // Death is another intentional exception: Mirror removes the local
+        // PlayerManager before the respawn camera/list has stabilised, while
+        // its respawning flag still identifies the same session. Keeping it
+        // preserves the prior remote population through the death screen.
+        const bool local_respawning = player_is_respawning_now(local_player);
         int32_t list_count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (list_count > 0) {
+        if (list_count > 0 && !local_respawning) {
             if (local_player == g_local_player) g_local_player = 0;
             local_player = 0;
         }
@@ -4343,41 +4364,6 @@ struct PlayerAux {
     int      weapon_retry = 0;
 };
 static std::unordered_map<uint64_t, PlayerAux> g_player_aux;
-
-// Remote HitBox edits share the exact managed-heap gate used by viewmodel. No
-// new transport, fd or library patch is introduced here; g_mem remains the
-// sole selected memory path in every kernel mode.
-struct HeadshotHeapMemory {
-    template<class T> bool read(uint64_t address, T& value) {
-        return address >= 0x10000 && rd_exact(address, value);
-    }
-    template<class T> bool write_heap(uint64_t address, const T& value) {
-        return viewmodel_write_heap(address, &value, sizeof(value));
-    }
-};
-static HeadshotHeapMemory g_headshot_heap_memory;
-static headshot_hitbox::Controller<HeadshotHeapMemory> g_headshot_hitboxes(g_headshot_heap_memory);
-static bool g_headshot_body_enabled = false;
-
-void esp_set_headshot_body(bool enabled) {
-    if (!enabled) {
-        g_headshot_body_enabled = false;
-        // Keep retrying from DrawEspOverlay while a transient transport/map
-        // failure leaves any original area pending restoration.
-        g_headshot_hitboxes.reset(true);
-        return;
-    }
-    if (g_headshot_body_enabled) return;
-    g_headshot_body_enabled = true;
-}
-
-void esp_reset_headshot_body(bool restore) {
-    g_headshot_hitboxes.reset(restore);
-}
-
-struct HeadshotHitboxFrameScope {
-    ~HeadshotHitboxFrameScope() { g_headshot_hitboxes.end_frame(); }
-};
 
 TransformHierarchyLayout g_skeleton_layout{};
 bool g_skeleton_layout_valid = false;
@@ -7077,6 +7063,7 @@ static EspAttachState g_attach_state = ESP_ATTACH_OK;
 EspAttachState esp_attach_state() { return g_attach_state; }
 
 bool esp_init(pid_t pid, bool package_verified_release) {
+    std::lock_guard<std::recursive_mutex> memory_guard(g_mem_session_mutex);
     std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
     esp_reset();
     g_pid = pid;
@@ -7134,15 +7121,21 @@ bool esp_init(pid_t pid, bool package_verified_release) {
     return true;
 }
 
-// Начало кадра: кэш блоков памяти сбрасывается, чтобы кадр читал свежее
-// состояние игры, но внутри кадра повторные обращения к тем же полям не стоили
-// syscall'а (см. mem_io.h).
-void esp_mem_frame_begin() { g_mem.frame_begin(); }
+// The render thread keeps one coherent memory session for the whole frame.
+// A background liveness check may wait for the frame, but it cannot close and
+// reopen the selected transport halfway through an ESP traversal.
+void esp_mem_frame_begin() {
+    g_mem_session_mutex.lock();
+    g_mem.frame_begin();
+}
+void esp_mem_frame_end() { g_mem_session_mutex.unlock(); }
 
-// Привязка ещё жива? Дешёвая проверка (одно чтение): процесс мог перезапуститься
-// с тем же pid, а доступ — отобрали. Без неё чит оставался «привязанным» и молча
-// ничего не делал до перезапуска приложения.
-bool esp_alive_check() { return g_mem.verify(); }
+// Привязка ещё жива? Проверка может переоткрыть выбранный транспорт после
+// временного EIO, поэтому она сереализуется с рендером и сайлент-писателем.
+bool esp_alive_check() {
+    std::lock_guard<std::recursive_mutex> guard(g_mem_session_mutex);
+    return g_mem.verify();
+}
 
 // Счётчики чтений памяти для диагностики штормов (см. кадргист в main.cpp):
 // отличают «читаем больше» (аим раздул объём) от «читаем так же, но каждое
@@ -7211,13 +7204,12 @@ static void read_local_aim_reference(uint64_t local_player, const PlayerAux* loc
 // Per-frame player list, kept across frames so a transient empty read does
 // not blank the overlay, but dropped on a real world change.
 static std::vector<uint64_t> g_frame_transforms;
-// Игроки, пропавшие из реестра в последние пару кадров. Список
-// PlayerManager читается по одному указателю на элемент, и одиночный
-// сбой чтения (или непрочитавшаяся проверка класса) выбрасывал игрока
-// из кадра — его бокс гас и загорался обратно. Держим пропавшего ещё
-// кадр-два: настоящий уход/смерть задерживается на ~30 мс, а мерцание
-// исчезает. Значение — сколько кадров подряд игрока нет в списке.
-static std::unordered_map<uint64_t, int> g_frame_transforms_lost;
+// Игроки, пропавшие из реестра. Список PlayerManager читается по одному
+// указателю на элемент; краткий read-gap не должен гасить бокс случайного
+// игрока. Храним момент первого пропуска, а не число кадров: частота ESP
+// меняется вместе с нагрузкой устройства.
+static constexpr double kPlayerListMissingHoldSeconds = 3.0;
+static std::unordered_map<uint64_t, double> g_frame_transforms_lost;
 
 // Frame projection state, published by esp_get_boxes() so that world markers
 // (ore / animals) project through exactly the same camera as the player boxes.
@@ -7336,6 +7328,9 @@ bool esp_local_eye_position(float& x, float& y, float& z) {
 // on screen). Feeds the enemy-counter pill in the overlay.
 static int      g_frame_player_count = 0;
 static int      g_frame_bot_count = 0;
+// Set only after a complete player/camera snapshot. Draw code uses it to
+// distinguish a confirmed empty world from a transient failed frame.
+static bool     g_frame_player_snapshot_valid = false;
 static int      g_frame_transforms_empty_streak = 0;
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
@@ -7397,6 +7392,7 @@ static void reset_world_caches() {
 }
 
 void esp_reset() {
+    std::lock_guard<std::recursive_mutex> memory_guard(g_mem_session_mutex);
     std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
     silent_aim::clear();
     esp_viewmodel_reset(false); // process lost: never restore to a reused address
@@ -7433,6 +7429,7 @@ void esp_reset() {
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
     g_go_name_offset_valid = false; g_go_name_retry_at = 0.0;
     g_frame_vp_valid = false; g_frame_local_valid = false;
+    g_frame_player_snapshot_valid = false;
     reset_marker_caches();
 }
 
@@ -7710,9 +7707,8 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
+    g_frame_player_snapshot_valid = false;
     std::vector<EspBox> result;
-    g_headshot_hitboxes.begin_frame(g_headshot_body_enabled);
-    HeadshotHitboxFrameScope headshot_frame_scope;
     auto transient_return = [&](int tag) {
         watch_boxes(result, (size_t)-1, nullptr, tag);
         return result;
@@ -7761,6 +7757,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
     bool player_list_ok = false;
     std::vector<uint64_t> refreshed = read_configured_player_transforms(&player_list_ok);
+    // While the local PlayerManager is in the death/respawn transition, the
+    // remote registry may temporarily collapse to local-only (or empty). Keep
+    // the prior remote population alive rather than turning the death screen
+    // into an ESP blackout; normal per-player reads still reject recycled data.
+    const bool hold_remote_during_local_respawn = player_is_respawning_now(g_local_player);
     if (!refreshed.empty()) {
         // World reload: every PlayerManager object is new (no overlap with
         // the previous population). This also has to fire when we are alone on
@@ -7816,21 +7817,32 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             g_population_snapshot = refreshed;
             s_adopt_cand.clear(); s_adopt_ident_streak = 0;
         }
-        // Население то же, но кого-то не досчитались: почти всегда это сбой
-        // чтения одного элемента, а не уход игрока. Возвращаем пропавших в
-        // список ещё на пару кадров (иначе их боксы мигают), после чего
-        // отпускаем — иначе ушедший игрок остался бы в списке навсегда.
-        if (overlap && refreshed.size() < s_transforms.size()) {
+        // Население то же, но кого-то не досчитались: обычно это сбой чтения
+        // одного элемента, а не уход игрока. Удерживаем прежний адрес по
+        // монотонному времени, а не по числу кадров: при просадке FPS прежние
+        // 30 кадров могли закончиться за миг, и ESP пропадал на 1–2 секунды,
+        // пока PlayerManager снова не попадал в читаемый снапшот.
+        if (overlap) {
+            const double missing_since_now = mono_seconds();
             for (uint64_t previous : s_transforms) {
                 bool present = false;
                 for (uint64_t current : refreshed) if (current == previous) { present = true; break; }
                 if (present) { g_frame_transforms_lost.erase(previous); continue; }
-                // Держим пропавшего лишь несколько кадров: это страховка от
-                // сбоя чтения одного элемента. Удержание на секунды означало
-                // бы «боксы висят на месте после смерти» вместо того, чтобы
-                // просто исчезнуть.
-                if (++g_frame_transforms_lost[previous] <= 30) refreshed.push_back(previous);
-                else g_frame_transforms_lost.erase(previous);
+                if (hold_remote_during_local_respawn && previous != g_local_player) {
+                    // The remote list is intentionally unavailable while the
+                    // local player respawns. Keep known remote PlayerManagers
+                    // in this snapshot; their normal identity/position guards
+                    // below still discard objects that actually disappeared.
+                    g_frame_transforms_lost.erase(previous);
+                    refreshed.push_back(previous);
+                    continue;
+                }
+                double& missing_since = g_frame_transforms_lost[previous];
+                if (missing_since <= 0.0) missing_since = missing_since_now;
+                if (missing_since_now - missing_since <= kPlayerListMissingHoldSeconds)
+                    refreshed.push_back(previous);
+                else
+                    g_frame_transforms_lost.erase(previous);
             }
             if (g_frame_transforms_lost.size() > 256) g_frame_transforms_lost.clear();
         }
@@ -7862,6 +7874,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Alone on the server: no player boxes, but markers and the farm still
         // need this frame's camera. A validated empty list is healthy; a failed
         // resolver is not, even though this camera-only frame can publish.
+        g_frame_player_snapshot_valid = player_list_ok;
         note_player_pipeline_health(player_list_ok);
         publish_camera_only_frame(sw, sh);
         append_bot_boxes(result); // боты — и без игроков
@@ -7871,17 +7884,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
     prune_player_aux(s_transforms);
-    // Hit areas are independent of projection/position validity. Apply the
-    // verified KCC chain before any transient camera or position failure can
-    // skip this frame, so a short ESP read glitch cannot drop the remap.
-    if (g_headshot_body_enabled) {
-        for (size_t i = 0; i < s_transforms.size(); ++i) {
-            if (!s_transforms[i] || s_transforms[i] == g_local_player ||
-                player_is_local(s_transforms[i]) == 1) continue;
-            PlayerAux& hitbox_aux = player_aux(s_transforms[i]);
-            if (hitbox_aux.kcc) g_headshot_hitboxes.apply_kcc(hitbox_aux.kcc);
-        }
-    }
     prune_player_text(s_transforms);
     prune_player_track(s_transforms);
     prune_mount_latch(s_transforms);
@@ -8045,7 +8047,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     // раскачивало бокс «под землю» циклами (жалоба после первого
                     // фикса). Уже рисуемого игрока аварийный источник принимаем
                     // только рядом с нарисованной точкой; дальше — обычный
-                    // холд фильтра, который за секунду сам перезапустит трек.
+                    // холд фильтра, который через несколько секунд перезапустит трек.
                     bool accept = true;
                     auto prev = g_player_track.find(s_transforms[index]);
                     if (prev != g_player_track.end() && prev->second.filt.has_drawn) {
@@ -8228,7 +8230,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         g_local_position_fail_streak = 0;
     }
 
-    note_player_pipeline_health(player_list_ok && live_player_positions > 0);
+    // Do not reset the resolver here: reset_player_pipeline_resolvers clears
+    // g_frame_transforms, and doing that mid-frame turns a short read-gap into
+    // an intentionally empty result. Defer the watchdog until this snapshot
+    // has been drawn/published below.
+    const bool player_pipeline_healthy = player_list_ok && live_player_positions > 0;
 
     g_frame_vp = vp;
     g_frame_vp_valid = !transform_camera_mode;
@@ -8678,10 +8684,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         result.push_back(box);
     }
 
+    g_frame_player_snapshot_valid = true;
     append_bot_boxes(result);
     watch_boxes(result, local_entity_index, &skip_reason, 0);
+    // See player_pipeline_healthy above: a recovery may clear caches for the
+    // next frame, never the fully assembled result we return this frame.
+    note_player_pipeline_health(player_pipeline_healthy);
     return result;
 }
+
+bool esp_player_frame_valid() { return g_frame_player_snapshot_valid; }
 
 int esp_nearby_player_count() { return g_frame_player_count; }
 int esp_nearby_bot_count() {
