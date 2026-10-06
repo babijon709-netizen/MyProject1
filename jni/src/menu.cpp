@@ -191,14 +191,6 @@ float TabContent(int tab, float dt, float cW) {
             boneRow("##ab2", XS("Тело"),   2, true,  g_state.a_aim_pelvis);
         }
 
-        SHdr(XS("Зона попадания"));
-        CardBg(Layout::RowH);
-        const bool oldHeadshotBody = g_state.viewmodel.headshot_body;
-        ToggleRow("##headshotbody", XS("Голова на всё тело"),
-                  &g_state.viewmodel.headshot_body, g_state.a_headshot_body, true, true);
-        if (oldHeadshotBody != g_state.viewmodel.headshot_body)
-            esp_set_headshot_body(g_state.viewmodel.headshot_body);
-
         // ---- Выбор цели ---------------------------------------------------
         // Из нескольких целей в круге FOV берётся одна — по какому правилу:
         //   0 «Умный»   — как было: прицел и дальность, нормированные, вместе
@@ -425,6 +417,7 @@ float TabContent(int tab, float dt, float cW) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NP-1);
         }
 
+        ImGui::Dummy({1.f, 12.f});
         SHdr(XS("Мир"));
         {
             struct ERow { const char* id; const char* lbl; bool* v; float* a; ImVec4* col; };
@@ -984,10 +977,9 @@ float TabContent(int tab, float dt, float cW) {
             if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
                 // This button resets only FOV/hands, not the other misc features.
                 const int fps = vm.fps_limit;
-                const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot,
-                           hb = vm.headshot_body;
+                const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
                 vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns;
-                vm.fast_loot = fl; vm.headshot_body = hb;
+                vm.fast_loot = fl;
                 g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
                 g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
                 esp_viewmodel_tick(vm);
@@ -1798,7 +1790,6 @@ void RenderMenu() {
     Tick(g_state.a_aim_pelvis, g_state.aim_bone == 2,      dt);
     Tick(g_state.a_aim_spec,   g_state.aim_special,        dt);
     Tick(g_state.a_aim_scope,  g_state.aim_scope_only,     dt);
-    Tick(g_state.a_headshot_body, g_state.viewmodel.headshot_body, dt);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
     Tick(g_state.a_esp_wall,   g_state.esp_wall,           dt);

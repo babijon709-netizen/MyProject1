@@ -12,9 +12,11 @@
 
 namespace weapon_speed {
 inline constexpr const char* kWeapons = "HyperHug.Games.Oxide.Features.Weapons";
-// Переключатели всегда используют прежний максимум UI; промежуточных
-// коэффициентов больше нет.
-inline constexpr float kMaxMultiplier = 20.f;
+// Extreme 20x timing outruns the authoritative reload/fire state machine: the
+// client restarts the animation before the server accepts the previous action.
+// A bounded multiplier remains visibly fast without creating that feedback loop.
+inline constexpr float kFireMultiplier = 5.f;
+inline constexpr float kReloadMultiplier = 5.f;
 
 template<class IO> bool pointer(IO& io, uint64_t address, uint64_t& value) {
     if (!io.read(address,value)) return false;
@@ -73,9 +75,11 @@ struct Scalar {
     template<class IO> bool sample(IO& io,uint64_t addr,float lo,float hi) {
         float value=0.f;
         if (!io.read(addr,value) || !finite_range(value,lo,hi)) return false;
-        // If the game rebuilt a cache while the toggle was active, adopt that
-        // new unowned value instead of restoring an obsolete lifecycle value.
-        if (!owned || address!=addr || value!=last) original=value;
+        // Capture an original once per field identity. The game may restore a
+        // config/cache between actions; adopting that transient value on every
+        // mismatch compounds the multiplier and causes permanent animation
+        // loops. Keep the lifecycle original and simply re-apply the target.
+        if (!owned || address!=addr) original=value;
         address=addr; current=value;
         return true;
     }
@@ -162,9 +166,9 @@ template<class IO> class Controller {
     }
     bool normalize_inherited_caches(const Context& next) {
         // Only migrate cached values when the config is shared but the live
-        // weapon instance changed. The old condition used `weapon == next`
-        // here, so it skipped the exact equip transition that needs migration.
-        if (!(context_.config==next.config) || !(context_.weapon==next.weapon)) return true;
+        // weapon instance changed. This prevents a newly drawn instance from
+        // inheriting an already accelerated cache and being scaled twice.
+        if (!(context_.config==next.config) || context_.weapon==next.weapon) return true;
         const bool a=shot_period_.normalize_copy(
             io_,next.weapon.object+go_active::FPWEAPON_SHOT_PERIOD);
         const bool b=effective_full_.normalize_copy(
@@ -245,7 +249,7 @@ template<class IO> class Controller {
 
         float wanted=config_fire_.original>=1.f
             ? config_fire_.original*multiplier : config_fire_.original/multiplier;
-        if (wanted<0.01f) wanted=0.01f;
+        if (wanted<0.02f) wanted=0.02f;
         if (wanted>5000.f) wanted=5000.f;
 
         const bool a=config_fire_.put(io_,wanted);
@@ -274,8 +278,8 @@ template<class IO> class Controller {
 
         float full=config_full_.original>0.f ? config_full_.original/multiplier : 0.f;
         float loop=config_loop_.original>0.f ? config_loop_.original/multiplier : 0.f;
-        if (full>0.f && full<0.03f) full=0.03f;
-        if (loop>0.f && loop<0.01f) loop=0.01f;
+        if (full>0.f && full<0.15f) full=0.15f;
+        if (loop>0.f && loop<0.08f) loop=0.08f;
 
         // The full period may include a player stat multiplier; scale the
         // captured effective value by the same config ratio instead of
@@ -332,24 +336,32 @@ public:
         // selected through release go_active constants.
         Context next;
         if (!resolve(player,next)) {
-            restore_all();
+            // A single transport/class-name miss is not a lifecycle change.
+            // Restoring every owned scalar here made the next successful tick
+            // write all of them again, stalling the overlay and oscillating the
+            // weapon state between original and accelerated timings.
+            fire=fast_fire?Status::Waiting:fire;
+            reload=fast_reload?Status::Waiting:reload;
             return;
         }
         if (!(next==context_)) {
-            // A verified new context means an equip/respawn transition.  Try
-            // the polite conditional restore first; if the old graph is
-            // already unreadable, abandon only its saved addresses and move
-            // on.  Previously that permanent read failure blocked every later
-            // apply until the user toggled both options off and on.
+            // A verified new context means an equip/respawn transition. Try a
+            // conditional restore; a dead old graph must not pin the new one.
             const bool normalized=normalize_inherited_caches(next);
             const bool restored=restore_all();
             if (!normalized || !restored) forget_values();
             context_=next;
             if (!fast_fire) fire=Status::Off;
             if (!fast_reload) reload=Status::Off;
+        } else if (!(next.burst_wait==context_.burst_wait)) {
+            // WaitForSeconds is created/replaced lazily without changing the
+            // weapon identity. Move burst ownership separately so it cannot
+            // keep pointing at a pooled wait object.
+            if (!burst_seconds_.restore(io_,context_.burst_wait)) burst_seconds_={};
+            context_.burst_wait=next.burst_wait;
         }
-        if (fast_fire) fire=apply_fire(kMaxMultiplier)?Status::Active:Status::Failed;
-        if (fast_reload) reload=apply_reload(kMaxMultiplier)?Status::Active:Status::Failed;
+        if (fast_fire) fire=apply_fire(kFireMultiplier)?Status::Active:Status::Failed;
+        if (fast_reload) reload=apply_reload(kReloadMultiplier)?Status::Active:Status::Failed;
     }
 };
 }

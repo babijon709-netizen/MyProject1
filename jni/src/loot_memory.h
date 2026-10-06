@@ -182,9 +182,11 @@ template <class IO> class Controller {
         if (klass == scaled_class_) return 2;
         // Окончательный отказ («читалось и чужое») кэшируется: массив раннера
         // полон не-обещаний, и без кэша имена перечитывались бы каждый тик.
-        bool known_not_promise = false;
-        if (cached(item_classes_, klass, known_not_promise) && known_not_promise)
-            return 0;
+        bool cached_verdict = false;
+        // item_classes_ contains only confirmed negative classes. The previous
+        // condition checked the stored false value as a truth flag, so every
+        // non-promise class had its metadata strings reread on every traversal.
+        if (cached(item_classes_, klass, cached_verdict)) return 0;
         const int a = class_state(klass, "DelayIgnoreTimeScalePromise", "");
         if (a > 0) { promise_class_ = klass; return 1; }
         const int b = class_state(klass, "DelayPromise", "");

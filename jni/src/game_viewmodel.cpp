@@ -238,9 +238,10 @@ fast_loot::Controller<HeapMemory> loot(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
-Clock::time_point weapon_last_tick{};
+Clock::time_point weapon_last_tick{}, loot_last_tick{};
 uint64_t weapon_last_player = 0;
 unsigned weapon_last_flags = ~0u;
+bool loot_last_enabled = false;
 int fps_last_limit = 0;
 viewmodel::Status fps_last_log = viewmodel::Status::Off;
 // Build ID libunity, который не прошёл таблицу kFpsLayouts (0 — движок
@@ -313,15 +314,8 @@ std::recursive_mutex& viewmodel_session_mutex() {
     return mutex;
 }
 
-bool viewmodel_write_heap(uint64_t address, const void* data, std::size_t size) {
-    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
-    if (!data || !size || size > 64 || !g_mem.bound() || g_pid <= 0) return false;
-    return heap_gate_allows(address, size) && g_mem.write(address, data, size);
-}
-
 void esp_viewmodel_reset(bool restore) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
-    esp_reset_headshot_body(restore && g_mem.bound());
     controller.reset(restore && g_mem.bound());
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
@@ -331,6 +325,7 @@ void esp_viewmodel_reset(bool restore) {
     loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
+    loot_last_tick = {}; loot_last_enabled = false;
     invalidate_maps_snapshot();
     ++epoch;
 }
@@ -353,7 +348,15 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         return;
     }
     tick_fps(epoch, settings.fps_limit);
-    loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
+    // Promise traversal can inspect hundreds of loop items. Cap it at game
+    // cadence instead of repeating it at an uncapped overlay frame rate.
+    const auto now = Clock::now();
+    if (settings.fast_loot != loot_last_enabled ||
+        now - loot_last_tick >= std::chrono::milliseconds(16)) {
+        loot_last_tick = now;
+        loot_last_enabled = settings.fast_loot;
+        loot.tick(epoch, g_il2cpp_base, settings.fast_loot);
+    }
     const bool want_no_spread = settings.no_spread || esp_silent_wants_no_spread();
     // Use the local identity already validated by the world reader first. The
     // fixed TypeInfo RVA can lag behind a game update even when every managed
@@ -403,9 +406,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         local_source_failed=false;
     }
     // Weapon chains are expensive (class names, backlinks and readbacks for
-    // every scalar).  They only need maintenance at game-tick cadence, not at
-    // the uncapped overlay rate.  Setting/player changes bypass the limiter so
-    // toggles and respawns still apply immediately.
+    // every scalar). They only need a watchdog cadence, not the uncapped
+    // overlay rate. Setting/player changes bypass the limiter immediately.
     const unsigned weapon_flags = (settings.no_recoil ? 1u : 0u) |
                                   (want_no_spread ? 2u : 0u) |
                                   (g_state.fast_fire ? 4u : 0u) |
@@ -413,7 +415,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
-                            weapon_now - weapon_last_tick >= std::chrono::milliseconds(33);
+                            weapon_now - weapon_last_tick >= std::chrono::milliseconds(100);
     if (weapon_due) {
         weapon_last_tick = weapon_now;
         weapon_last_player = player;

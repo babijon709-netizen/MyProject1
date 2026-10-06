@@ -161,10 +161,8 @@ std::vector<EspMarker> esp_get_markers();
 void        esp_set_aim_bones_enabled(bool enabled);
 // Temporarily classify verified remote body HitBoxes as Head through the live
 // managed KCC data. Values are restored when disabled or despawned.
-void        esp_set_headshot_body(bool enabled);
 // Clears tracked remote HitBoxes at scene/process teardown. restore=true only
 // while the selected memory transport is still bound to the same game.
-void        esp_reset_headshot_body(bool restore);
 // Bot aim feed: world positions of recognised bots, refreshed (scan +
 // throttled re-reads) even when bot markers are not drawn — so the aimbot
 // keeps working on bots after their ESP is switched off.

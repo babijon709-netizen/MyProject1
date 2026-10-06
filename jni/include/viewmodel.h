@@ -14,9 +14,6 @@ struct ViewmodelSettings {
     // Быстрый подбор: не трогает код игры, обнуляет только точный 0.35f
     // cadence активных UniTask promises в управляемой куче.
     bool fast_loot = false;
-    // Проверенные HitBox тела временно маркируются как Head; восстановление
-    // выполняется при выключении и уходе игрока.
-    bool headshot_body = false;
 };
 
 namespace viewmodel {
@@ -44,8 +41,8 @@ inline ViewmodelSettings sanitize(ViewmodelSettings s) {
 struct ConfigExtension {
     uint32_t magic = 0x31574d56u; // VMW1
     // v4 grew the trailer by one float (aim lead, ms); v5 keeps the 36-byte
-    // layout and reserves flag bit 10 for body-to-head HitBox remapping. v1–v3
-    // were 32 bytes; decode() accepts both sizes.
+    // layout. Bit 10 is retired and ignored for compatibility with saved v5
+    // profiles. v1–v3 were 32 bytes; decode() accepts both sizes.
     uint32_t version = 5;
     uint32_t size = 36;
     uint32_t flags = 0;
@@ -59,8 +56,7 @@ inline ConfigExtension encode(ViewmodelSettings s) {
     // Bits 2..3: 0 = default, 1 = 144 (legacy toggle), 2 = 90, 3 = 120.
     const uint32_t fps_mode = s.fps_limit == 144 ? 1u : s.fps_limit == 90 ? 2u : s.fps_limit == 120 ? 3u : 0u;
     e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2) |
-              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u) |
-              (s.headshot_body ? 1024u : 0u);
+              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u);
     e.fov = s.fov; e.x = s.x; e.y = s.y; e.z = s.z;
     return e;
 }
@@ -83,7 +79,6 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     s.no_recoil = e.version >= 2 && (e.flags & 32u) != 0;
     s.no_spread = e.version >= 2 && (e.flags & 64u) != 0;
     s.fast_loot = e.version >= 3 && (e.flags & 16u) != 0;
-    s.headshot_body = e.version >= 5 && (e.flags & 1024u) != 0;
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
     return sanitize(s);
 }

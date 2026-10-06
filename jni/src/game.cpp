@@ -5,7 +5,6 @@
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
-#include "headshot_hitbox_memory.h"
 #include "mem_io.h"                // чтение/запись памяти игры: транспорт + кэш блоков
 #include "kernel_io.h"             // кернел-транспорт (сокет ядерного драйвера)
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
@@ -4363,41 +4362,6 @@ struct PlayerAux {
 };
 static std::unordered_map<uint64_t, PlayerAux> g_player_aux;
 
-// Remote HitBox edits share the exact managed-heap gate used by viewmodel. No
-// new transport, fd or library patch is introduced here; g_mem remains the
-// sole selected memory path in every kernel mode.
-struct HeadshotHeapMemory {
-    template<class T> bool read(uint64_t address, T& value) {
-        return address >= 0x10000 && rd_exact(address, value);
-    }
-    template<class T> bool write_heap(uint64_t address, const T& value) {
-        return viewmodel_write_heap(address, &value, sizeof(value));
-    }
-};
-static HeadshotHeapMemory g_headshot_heap_memory;
-static headshot_hitbox::Controller<HeadshotHeapMemory> g_headshot_hitboxes(g_headshot_heap_memory);
-static bool g_headshot_body_enabled = false;
-
-void esp_set_headshot_body(bool enabled) {
-    if (!enabled) {
-        g_headshot_body_enabled = false;
-        // Keep retrying from DrawEspOverlay while a transient transport/map
-        // failure leaves any original area pending restoration.
-        g_headshot_hitboxes.reset(true);
-        return;
-    }
-    if (g_headshot_body_enabled) return;
-    g_headshot_body_enabled = true;
-}
-
-void esp_reset_headshot_body(bool restore) {
-    g_headshot_hitboxes.reset(restore);
-}
-
-struct HeadshotHitboxFrameScope {
-    ~HeadshotHitboxFrameScope() { g_headshot_hitboxes.end_frame(); }
-};
-
 TransformHierarchyLayout g_skeleton_layout{};
 bool g_skeleton_layout_valid = false;
 
@@ -7730,8 +7694,6 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
     std::vector<EspBox> result;
-    g_headshot_hitboxes.begin_frame(g_headshot_body_enabled);
-    HeadshotHitboxFrameScope headshot_frame_scope;
     auto transient_return = [&](int tag) {
         watch_boxes(result, (size_t)-1, nullptr, tag);
         return result;
@@ -7890,17 +7852,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
     prune_player_aux(s_transforms);
-    // Hit areas are independent of projection/position validity. Apply the
-    // verified KCC chain before any transient camera or position failure can
-    // skip this frame, so a short ESP read glitch cannot drop the remap.
-    if (g_headshot_body_enabled) {
-        for (size_t i = 0; i < s_transforms.size(); ++i) {
-            if (!s_transforms[i] || s_transforms[i] == g_local_player ||
-                player_is_local(s_transforms[i]) == 1) continue;
-            PlayerAux& hitbox_aux = player_aux(s_transforms[i]);
-            if (hitbox_aux.kcc) g_headshot_hitboxes.apply_kcc(hitbox_aux.kcc);
-        }
-    }
     prune_player_text(s_transforms);
     prune_player_track(s_transforms);
     prune_mount_latch(s_transforms);
