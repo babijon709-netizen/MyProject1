@@ -7536,12 +7536,8 @@ static void reset_player_pipeline_resolvers(bool deep) {
     g_player_manager_static_fields = 0;
     g_local_position_fail_streak = 0;
     if (deep) {
-        // After a sustained failure, retry the managed position source without
-        // discarding drawable snapshots. A successful frame will update all
-        // dependent caches naturally.
-        g_player_position_offset = PLAYER_POSITION;
-        g_player_position_validated = false;
-        g_use_direct_player_position = true;
+        // Keep the established position path. Re-discovering it during an EIO
+        // burst removed every box even though each track still had a position.
         g_direct_position_fail_streak = 0;
         g_direct_position_recheck = 0;
     }
@@ -7949,105 +7945,45 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
     bool player_list_ok = false;
     std::vector<uint64_t> refreshed = read_configured_player_transforms(&player_list_ok);
-    if (!refreshed.empty()) {
-        // World reload: every PlayerManager object is new (no overlap with
-        // the previous population). This also has to fire when we are alone on
-        // the server -- respawning solo replaces our single PlayerManager and
-        // used to leave every cache pointing at the dead one.
-        // Пересечение считаем не с прошлым кадром, а со снапшотом — составом,
-        // под который собраны кэши: список подменяется уже на первом кадре
-        // смены, и на следующем кадре сравнение с прошлым кадром пересекается
-        // само с собой, то есть полную смену состава оно бы не заметило.
-        bool overlap = g_population_snapshot.empty();
-        if (!overlap) {
-            for (uint64_t previous : g_population_snapshot) {
-                for (uint64_t current : refreshed) if (previous == current) { overlap = true; break; }
-                if (overlap) break;
+    // Keep a plain player snapshot with a grace period. A stable list adds new
+    // objects immediately; a temporarily unreadable or incomplete list cannot
+    // remove an already known player. Five seconds of confirmed absence is
+    // required before an address is retired.
+    if (player_list_ok) {
+        for (uint64_t player : refreshed) {
+            if (!player) continue;
+            bool known = false;
+            for (uint64_t current : s_transforms) {
+                if (current == player) { known = true; break; }
+            }
+            if (!known) s_transforms.push_back(player);
+            g_frame_transforms_lost.erase(player);
+        }
+
+        for (auto it = s_transforms.begin(); it != s_transforms.end();) {
+            bool present = false;
+            for (uint64_t player : refreshed) {
+                if (player == *it) { present = true; break; }
+            }
+            if (present) {
+                ++it;
+                continue;
+            }
+            int& misses = g_frame_transforms_lost[*it];
+            if (++misses > 300) {
+                g_player_track.erase(*it);
+                g_player_aux.erase(*it);
+                g_player_text.erase(*it);
+                g_mount_latch.erase(*it);
+                g_skeletons.erase(*it);
+                g_frame_transforms_lost.erase(*it);
+                it = s_transforms.erase(it);
+            } else {
+                ++it;
             }
         }
-        bool adopt_after_reset = false;
-        if (!overlap) {
-            // Не-пересекающаяся подмена: либо рваный кадр (гонка ниже проверки
-            // стабильности указателя/счётчика), либо настоящая смена мира.
-            // Рваные кадры в глубоких штормах идут сериями по 3+ подряд, но их
-            // состав каждый кадр РАЗНЫЙ (мусорные адреса меняются) — поэтому
-            // прежнее «3 любых» усыновляло рванину (+0-9 в логе 09-20) и заодно
-            // сбрасывало все кэши с перезаучением (всплески тысяч отказов).
-            // Правило: сброс+усыновление — только по 3 подряд ИДЕНТИЧНЫМ
-            // составам (по членству; порядок не важен — рехеш его меняет).
-            // Подстраховка — 30 любых подряд (полсекунды): рванью столько
-            // длиться не может, это переезд (сервер/мир), но сбрасывать кэши
-            // там не за что — усыновляем список как есть.
-            ++g_world_change_streak;
-            bool identical = (refreshed.size() == s_adopt_cand.size());
-            if (identical) {
-                for (uint64_t c : refreshed) {
-                    bool found = false;
-                    for (uint64_t k : s_adopt_cand) if (k == c) { found = true; break; }
-                    if (!found) { identical = false; break; }
-                }
-            }
-            if (identical) ++s_adopt_ident_streak;
-            else { s_adopt_cand = refreshed; s_adopt_ident_streak = 1; }
-            if (s_adopt_ident_streak >= 3) {
-                reset_world_caches();
-                g_population_snapshot = refreshed;
-                adopt_after_reset = true;
-            } else if (g_world_change_streak >= 30) {
-                g_population_snapshot = refreshed;
-                s_adopt_cand.clear(); s_adopt_ident_streak = 0;
-                g_world_change_streak = 0;
-                adopt_after_reset = true;
-            }
-        } else {
-            g_world_change_streak = 0;
-            g_population_snapshot = refreshed;
-            s_adopt_cand.clear(); s_adopt_ident_streak = 0;
-        }
-        // Население то же, но кого-то не досчитались: почти всегда это сбой
-        // чтения одного элемента, а не уход игрока. Возвращаем пропавших в
-        // список ещё на пару кадров (иначе их боксы мигают), после чего
-        // отпускаем — иначе ушедший игрок остался бы в списке навсегда.
-        if (overlap && refreshed.size() < s_transforms.size()) {
-            for (uint64_t previous : s_transforms) {
-                bool present = false;
-                for (uint64_t current : refreshed) if (current == previous) { present = true; break; }
-                if (present) { g_frame_transforms_lost.erase(previous); continue; }
-                // Держим пропавшего лишь несколько кадров: это страховка от
-                // сбоя чтения одного элемента. Удержание на секунды означало
-                // бы «боксы висят на месте после смерти» вместо того, чтобы
-                // просто исчезнуть.
-                if (++g_frame_transforms_lost[previous] <= 30) refreshed.push_back(previous);
-                else g_frame_transforms_lost.erase(previous);
-            }
-            if (g_frame_transforms_lost.size() > 256) g_frame_transforms_lost.clear();
-        }
-        if (!overlap && !adopt_after_reset) {
-            // Рваный кадр списка игроков: подмена без пересечения со снапшотом,
-            // подтверждённой сменой мира не признана (см. правило выше).
-            // Старый список целее нового: держим его, иначе 9 боксов из 10
-            // гаснут, а сброс кэшей запускает перезаучение со всплеском отказов.
-        } else {
-            s_transforms = std::move(refreshed);
-        }
-        g_frame_transforms_empty_streak = 0;
-    } else {
-        // A failed resolver is not an empty world. Some kernels return EIO in
-        // bursts for heap/static reads while the attachment itself remains
-        // alive. Clearing the last population after a timeout turned such a
-        // burst into minutes without ESP because every position/text cache was
-        // discarded with it. Keep the last confirmed objects on unreadable
-        // frames; destroyed objects fail safely and the next stable snapshot
-        // replaces them. Only a readable, confirmed empty registry may age the
-        // old population out.
-        if (player_list_ok) {
-            if (++g_frame_transforms_empty_streak > 120 && !s_transforms.empty()) {
-                s_transforms.clear();
-                reset_world_caches();
-            }
-        } else {
-            g_frame_transforms_empty_streak = 0;
-        }
+        g_frame_transforms_empty_streak = refreshed.empty()
+            ? g_frame_transforms_empty_streak + 1 : 0;
     }
     if (s_transforms.empty()) {
         // Alone on the server: no player boxes, but markers and the farm still
@@ -8070,20 +8006,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
 
+    // The selected build profile already contains the PlayerManager position
+    // field. Use it directly; KCC/model below cover objects whose synced field
+    // has not been initialized yet.
     if (!g_player_position_validated) {
-        if (!discover_player_position_offset(s_transforms)) {
-            note_player_pipeline_health(false);
-            // Мир ещё не отдал позиции (перезагрузка после смерти). Боксов в
-            // этом кадре нет, но метки и фарм живут на камере — без публикации
-            // они гаснут вместе с боксами на все секунды ожидания.
-            publish_camera_only_frame(sw, sh);
-            append_bot_boxes(result);
-            return transient_return(2);
-        }
-    } else {
-        // Пока работаем на обходе иерархии, продолжаем проверять прямые поля и
-        // возвращаемся к ним, как только они снова читаются.
-        recheck_direct_player_position(s_transforms);
+        g_player_position_offset = PLAYER_POSITION;
+        g_use_direct_player_position = true;
+        g_player_position_validated = true;
     }
 
     bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
@@ -8095,12 +8024,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!read_camera_frame(sw / sh, native_cam, projection, view))
             return transient_return(5);
         // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
-        if (!g_matrix_configuration_validated) {
-            if (!optimize_matrix_configuration(native_cam, s_transforms))
-                return transient_return(6);
-            if (!read_native_camera_matrices(native_cam, sw / sh, projection, view))
-                return transient_return(7);
-        }
+        g_matrix_configuration_validated = true;
+        g_camera_matrix_physical_match = true;
         // Растяг экрана (Aspect Ratio, меню «Визуалы → Ещё настройки»):
         // горизонтальный масштаб проекции — это cot(fov/2) / aspect, поэтому
         // aspect ДЕЛИМ на коэффициент: горизонтальный FOV растёт, края
@@ -8132,11 +8057,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     bool has_local_position = false;
-    bool local_position_from_player = false;
-    bool local_respawning = false;
     Vec3 local{};
-    Vec3 frame_camera_position{};
-    bool frame_camera_position_valid = false;
     size_t local_entity_index = s_transforms.size();
     // Positions are read once per frame here and reused below: the box loop
     // must see exactly the same values the local player was picked with.
@@ -8145,276 +8066,74 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<char> skip_reason(s_transforms.size(), 0); // наблюдатель мерцаний: код пропуска
     size_t live_player_positions = 0;
 
-    {
-        Vec3 camera_position{};
-        bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
-        if (has_camera_position) {
-            frame_camera_position = camera_position;
-            frame_camera_position_valid = true;
+    Vec3 camera_position{};
+    if (!camera_position_from_view(view, camera_position)) {
+        append_bot_boxes(result);
+        return transient_return(8);
+    }
+    local = camera_position;
+    has_local_position = true;
+
+    for (size_t index = 0; index < s_transforms.size(); ++index) {
+        const uint64_t player = s_transforms[index];
+        if (!player) continue;
+
+        Vec3 candidate{};
+        bool read_ok = read_entity_position(player, candidate) &&
+                       position_looks_like_world_space(candidate);
+        if (!read_ok) {
+            const PlayerAux& aux = player_aux(player);
+            read_ok = player_kcc_position(aux, candidate);
+            if (read_ok) {
+                if (!g_use_direct_player_position) candidate.y += 1.60F;
+            } else if (player_model_position(player, candidate)) {
+                candidate.y += g_use_direct_player_position ? -0.90F : 0.90F;
+                read_ok = position_looks_like_world_space(candidate);
+            }
         }
-        double nearest_distance_squared = INFINITY;
-        size_t nearest_index = s_transforms.size();
-        size_t first_valid_index = s_transforms.size();
-        Vec3 first_valid_position{};
+
+        auto tracked = g_player_track.find(player);
+        if (!read_ok) {
+            // A read failure never removes a visible player. Keep the last
+            // accepted world position until the confirmed list retires him.
+            if (tracked == g_player_track.end() || !tracked->second.has_last) continue;
+            candidate = tracked->second.last;
+        } else {
+            ++live_player_positions;
+            track_player(player, candidate);
+            tracked = g_player_track.find(player);
+        }
+
+        positions[index] = candidate;
+        position_ok[index] = 1;
+        if (tracked != g_player_track.end()) {
+            tracked->second.filt.drawn = candidate;
+            tracked->second.filt.drawn_t = mono_seconds();
+            tracked->second.filt.has_drawn = true;
+        }
+    }
+
+    // Local identity only excludes our own PlayerManager. Distance always uses
+    // the camera from this exact projection frame, never a stale player field.
+    for (size_t index = 0; index < s_transforms.size(); ++index) {
+        if (s_transforms[index] == g_local_player) {
+            local_entity_index = index;
+            break;
+        }
+    }
+    if (local_entity_index == s_transforms.size()) {
         for (size_t index = 0; index < s_transforms.size(); ++index) {
-            Vec3 candidate{};
-            // Мусорный отсчёт (нули после респауна, денормали, координаты чужого
-            // объекта из пула) отбрасываем сразу: это finite-вектор, но не
-            // мировая позиция, и именно он утаскивал бокс «в другую сторону».
-            bool read_ok = read_entity_position(s_transforms[index], candidate) &&
-                           position_looks_like_world_space(candidate);
-            bool direct_was_junk = false;
-            if (read_ok && position_near_world_origin(candidate)) {
-                // (0.1, 0.0, 0.0)-мусор пула: считаем чтение неудачным, дальше
-                // отработают KCC/модель или холд фильтра. Если ниже KCC/модель
-                // подтвердит ту же точку у нуля — это живой спавн, и отказ
-                // в счётчике откатим.
-                read_ok = false;
-                direct_was_junk = true;
-                ++g_position_origin_rejected;
-            }
-            if (!read_ok) {
-                // Только что заспавнившийся неподвижный игрок: синхронизируемые
-                // поля PlayerManager ещё не получили ни одной записи (писатель
-                // позиции шлёт дельты движения), поэтому прямое чтение даёт
-                // нули/мусор — бокс либо отсутствовал, либо мерцал в (0,0,0)
-                // «под картой». Живые источники той же позиции доступны сразу:
-                // KCC.Move.Position = низ капсулы (те же «ноги», что и прямое
-                // поле), дальше — characterModel (бёдра: 0.9 м выше ног).
-                // Бэклинки обоих цепочек подтверждены резолверами, а фильтр ниже
-                // примет значение как первую нормальную точку трека.
-                Vec3 alt{};
-                const PlayerAux& fallback_aux = player_aux(s_transforms[index]);
-                bool have_alt = player_kcc_position(fallback_aux, alt);
-                if (have_alt) {
-                    if (!g_use_direct_player_position) alt.y += 1.60F;  // ноги -> глаза
-                } else if (player_model_position(s_transforms[index], alt)) {
-                    alt.y += g_use_direct_player_position ? -0.90F : 0.90F;  // бёдра -> ноги / глаза
-                    have_alt = true;
-                }
-                if (have_alt && position_looks_like_world_space(alt) && position_near_world_origin(alt)) {
-                    // Согласие источников: прямое поле И KCC/модель ВМЕСТЕ
-                    // указывают «у нуля мира» — это живой спавн на плоской
-                    // арене (PvP-сервера сажают точку спауна в (x, 0.0, 0.0)),
-                    // а не пуловый мусор: у мусора KCC держит настоящее тело
-                    // в стороне, и точки не совпадают. 04.10: на PvP-сервере
-                    // игрок появился на спавне рядом и остался без ESP — обе
-                    // его линии чтения честно давали (x, 0.0, 0.0).
-                    const bool direct_near_zero =
-                        position_looks_like_world_space(candidate) && position_near_world_origin(candidate);
-                    const bool direct_agrees =
-                        direct_near_zero && vec3_horiz2(alt, candidate) <= 1.5F * 1.5F &&
-                        fabsf(alt.y - candidate.y) <= 1.5F;
-                    const bool direct_unread = !position_looks_like_world_space(candidate);
-                    if (direct_agrees || direct_unread) {
-                        candidate = alt;   // обе линии сходятся — это живая точка
-                        read_ok = true;
-                        if (direct_was_junk) --g_position_origin_rejected;  // тик прямого чтения был ложным
-                    } else {
-                        have_alt = false;
-                        ++g_position_origin_rejected;
-                    }
-                }
-                if (have_alt && position_looks_like_world_space(alt)) {
-                    // Фолбэк нужен игроку БЕЗ позиции (свежий спавн). У KCC/
-                    // characterModel другая база по высоте и свои паузы: сел в
-                    // кресло/лёг/плывёт/в лодке — их точка может стоять на
-                    // несколько метров ниже сетевой, и чередование источников
-                    // раскачивало бокс «под землю» циклами (жалоба после первого
-                    // фикса). Уже рисуемого игрока аварийный источник принимаем
-                    // только рядом с нарисованной точкой; дальше — обычный
-                    // холд фильтра, который за секунду сам перезапустит трек.
-                    bool accept = true;
-                    auto prev = g_player_track.find(s_transforms[index]);
-                    if (prev != g_player_track.end() && prev->second.filt.has_drawn) {
-                        const Vec3& d = prev->second.filt.drawn;
-                        const float ddx = alt.x - d.x, ddz = alt.z - d.z;
-                        accept = (ddx * ddx + ddz * ddz) <= 3.0F * 3.0F &&
-                                 fabsf(alt.y - d.y) <= 3.0F;
-                    }
-                    if (accept) {
-                        candidate = alt;
-                        read_ok = true;
-                        ++g_position_fallback_this_frame;
-                    } else {
-                        ++g_position_fallback_rejected;
-                    }
-                }
-            }
-            if (read_ok) ++live_player_positions;
-            // Один сбой чтения или один мусорный кадр больше не гасят и не
-            // дёргают бокс — см. filter_player_position.
-            PlayerTrack& filter = g_player_track[s_transforms[index]];
-            if (!filter_player_position(filter, read_ok, candidate, s_transforms[index])) continue;
-            apply_mounted_position(s_transforms[index], candidate);
-            positions[index] = candidate;
-            position_ok[index] = 1;
-            track_player(s_transforms[index], candidate);
-            if (first_valid_index == s_transforms.size()) { first_valid_index = index; first_valid_position = candidate; }
-            if (!has_camera_position) continue;
-            double dx = (double)candidate.x - camera_position.x, dy = (double)candidate.y - camera_position.y, dz = (double)candidate.z - camera_position.z;
-            double distance_squared = dx * dx + dy * dy + dz * dz;
-            if (std::isfinite(distance_squared) && distance_squared < nearest_distance_squared) {
-                nearest_distance_squared = distance_squared; nearest_index = index;
+            if (player_is_local(s_transforms[index]) == 1) {
+                local_entity_index = index;
+                g_local_player = s_transforms[index];
+                break;
             }
         }
-        {
-            // Раз в секунду — сколько позиций пришло из запасного источника.
-            const double now = mono_seconds();
-            if (now - g_position_fallback_log_at >= 1.0) {
-                if (g_position_fallback_logged > 0 || g_position_fallback_rejected_logged > 0 ||
-                    g_position_origin_rejected_logged > 0)
-                    LogLine("визуал: позиция из KCC/модели для %d игроков за секунду (свежий спавн, далёких отвергнуто %d, нулей-пула %d)",
-                            g_position_fallback_logged, g_position_fallback_rejected_logged,
-                            g_position_origin_rejected_logged);
-                g_position_fallback_log_at = now;
-                g_position_fallback_logged = 0;
-                g_position_fallback_rejected_logged = 0;
-                g_position_origin_rejected_logged = 0;
-            }
-            g_position_fallback_logged += g_position_fallback_this_frame;
-            g_position_fallback_rejected_logged += g_position_fallback_rejected;
-            g_position_origin_rejected_logged += g_position_origin_rejected;
-            g_position_fallback_this_frame = 0;
-            g_position_fallback_rejected = 0;
-            g_position_origin_rejected = 0;
-        }
-        // Prefer the resolver's exact local PlayerManager whenever it is in
-        // the population.  Nearest-to-camera is only a startup fallback when
-        // no exact identity is known; during death the spectator camera may
-        // sit on an enemy, and calling that enemy local made its box vanish.
-        static uint64_t s_local_latch_addr = 0;
-        static int s_local_latch_miss = 0;
-        static uint64_t s_local_latch_trueid = 0;
-        uint64_t true_local_id = g_local_player;
-        size_t true_local_index = s_transforms.size();
-        if (true_local_id) {
-            for (size_t i = 0; i < s_transforms.size(); ++i) {
-                if (s_transforms[i] == true_local_id && position_ok[i]) {
-                    true_local_index = i;
-                    break;
-                }
-            }
-        }
-        // The static resolver may lag one or two frames behind a replaced
-        // PlayerManager.  Mirror's named isLocalPlayer flag is an exact,
-        // build-table-backed identity and lets this frame adopt the new local
-        // immediately without treating the spectator target as local.
-        if (true_local_index == s_transforms.size()) {
-            for (size_t i = 0; i < s_transforms.size(); ++i) {
-                if (position_ok[i] && player_is_local(s_transforms[i]) == 1) {
-                    true_local_id = s_transforms[i];
-                    true_local_index = i;
-                    g_local_player = true_local_id;
-                    break;
-                }
-            }
-        }
-        if (s_local_latch_addr != 0 && s_local_latch_trueid != 0 && true_local_id != 0 &&
-            true_local_id != s_local_latch_trueid) {
-            s_local_latch_addr = 0;
-        }
-
-        size_t latch_index = s_transforms.size();
-        if (true_local_index != s_transforms.size()) {
-            s_local_latch_addr = true_local_id;
-            s_local_latch_trueid = true_local_id;
-            s_local_latch_miss = 0;
-            latch_index = true_local_index;
-        } else if (s_local_latch_addr != 0) {
-            for (size_t i = 0; i < s_transforms.size(); ++i)
-                if (s_transforms[i] == s_local_latch_addr) { latch_index = i; break; }
-            if (latch_index == s_transforms.size() || !position_ok[latch_index]) {
-                latch_index = s_transforms.size();
-                if (++s_local_latch_miss >= 5) {
-                    s_local_latch_addr = 0;
-                    s_local_latch_miss = 0;
-                }
-            } else {
-                s_local_latch_miss = 0;
-                // This distance sanity check is only needed when the exact
-                // resolver identity is unavailable.
-                if (!true_local_id && has_camera_position && nearest_index != s_transforms.size() &&
-                    nearest_index != latch_index && nearest_distance_squared < 2.0 * 2.0) {
-                    const double ldx = (double)positions[latch_index].x - camera_position.x;
-                    const double ldy = (double)positions[latch_index].y - camera_position.y;
-                    const double ldz = (double)positions[latch_index].z - camera_position.z;
-                    if (ldx * ldx + ldy * ldy + ldz * ldz > 10.0 * 10.0) {
-                        s_local_latch_addr = 0;
-                        latch_index = s_transforms.size();
-                    }
-                }
-            }
-        }
-        if (s_local_latch_addr == 0 && !true_local_id) {
-            size_t pick = nearest_index;
-            if (pick == s_transforms.size()) pick = first_valid_index;
-            if (pick != s_transforms.size()) {
-                s_local_latch_addr = s_transforms[pick];
-                s_local_latch_miss = 0;
-                s_local_latch_trueid = 0;
-                latch_index = pick;
-            }
-        }
-        if (latch_index != s_transforms.size() && position_ok[latch_index]) {
-            local_entity_index = latch_index;
-            local = positions[latch_index];
-            // The local PlayerManager position is the boarding-point field on
-            // some vehicle states. For the distance origin, the camera pose is
-            // authoritative and follows the vehicle, while the entity index is
-            // still retained so the local player is excluded from ESP.
-            if (player_is_mounted(s_transforms[latch_index]) && has_camera_position)
-                local = camera_position;
-            has_local_position = true;
-            local_position_from_player = true;
-            uint8_t respawning = 0;
-            if (rd_exact(s_transforms[latch_index] + PLAYER_MANAGER_RESPAWNING,
-                         respawning) && respawning) {
-                local_respawning = true;
-                if (has_camera_position) local = camera_position;
-            }
-        }
-
-        // A live view matrix is a better distance origin than either a dead
-        // body's stale position or no local position at all.  Continue building
-        // enemy boxes through the respawn gap instead of returning camera-only.
-        if (!has_local_position && has_camera_position) {
-            local = camera_position;
-            has_local_position = true;
-            local_entity_index = s_transforms.size();
-            local_position_from_player = false;
-        }
-        if (!has_local_position) {
-            ++g_local_position_fail_streak;
-            note_player_pipeline_health(player_list_ok && live_player_positions > 0);
-            // Камера этого кадра уже прочитана — публикуем её как есть (без
-            // повторного чтения и повторного xray/day-тика), иначе вместе с
-            // боксами гаснут метки и автофарм.
-            if (matrix_is_finite(vp)) {
-                g_frame_vp = vp; g_frame_vp_valid = true;
-                g_frame_sw = sw; g_frame_sh = sh;
-                Vec3 camera_only_position{};
-                if (camera_position_from_view(view, camera_only_position)) {
-                    g_frame_local_pos = camera_only_position;
-                    g_frame_local_valid = true;
-                }
-                g_frame_publish_fail_streak = 0;
-            }
-            append_bot_boxes(result);
-            return transient_return(8);
-        }
-        g_local_position_fail_streak = 0;
     }
+    g_local_position_fail_streak = 0;
 
-    // PlayerManager's synchronized local position is stale on some builds: the
-    // log showed it frozen while the live view camera travelled another 185 m.
-    // Keep it for local identity/exclusion and diagnostics, but use the camera
-    // that produced this exact projection frame as the distance origin.
+    // The camera from this projection frame is the sole distance origin.
     watch_camera_and_local(view, local);
-    if (frame_camera_position_valid) {
-        local = frame_camera_position;
-        has_local_position = true;
-    }
     note_player_pipeline_health(player_list_ok && live_player_positions > 0);
 
     g_frame_vp = vp;
@@ -8478,64 +8197,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         read_local_aim_reference(local_player, local_aux, local_crouched);
     }
 
-    // One box per player: of several objects carrying the same userID (the
-    // copy left behind when he mounted a vehicle, or a respawn leftover) only
-    // the one that moved most recently is drawn. The previous winner keeps the
-    // spot on a tie, otherwise a parked car would make the box flip about.
-    std::vector<char> suppressed(s_transforms.size(), 0);
-    {
-        std::unordered_map<std::string, size_t> chosen;
-        for (size_t index = 0; index < s_transforms.size(); ++index) {
-            if (!position_ok[index]) continue;
-            auto tracked = g_player_track.find(s_transforms[index]);
-            if (tracked == g_player_track.end()) continue;
-            std::string uid(tracked->second.uid);
-            // Names are not unique. Suppressing by a shared/default name made
-            // newly spawned enemies disappear until one of the copies moved.
-            if (uid.empty()) continue;
-            auto found = chosen.find(uid);
-            if (found == chosen.end()) { chosen.emplace(uid, index); continue; }
-            size_t rival = found->second;
-            int mine = tracked->second.still_frames;
-            int theirs = g_player_track[s_transforms[rival]].still_frames;
-            bool mine_ride = player_mount_engaged(s_transforms[index]);
-            bool their_ride = player_mount_engaged(s_transforms[rival]);
-            bool take_mine;
-            if (index == local_entity_index)      take_mine = true;
-            else if (rival == local_entity_index) take_mine = false;
-            else if (mine_ride != their_ride)     take_mine = mine_ride;
-            else if (mine != theirs)              take_mine = mine < theirs;
-            else {
-                auto sticky = g_player_track_pick.find(uid);
-                take_mine = sticky != g_player_track_pick.end() && sticky->second == s_transforms[index];
-            }
-            suppressed[take_mine ? rival : index] = 1;
-            if (take_mine) found->second = index;
-        }
-        for (const auto& entry : chosen) g_player_track_pick[entry.first] = s_transforms[entry.second];
-        // Ghost PlayerManager left at the boarding point: same frozen lastSaved
-        // as a rider, even when userID on the leftover is empty.
-        for (size_t index = 0; index < s_transforms.size(); ++index) {
-            if (!position_ok[index] || suppressed[index]) continue;
-            auto lit = g_mount_latch.find(s_transforms[index]);
-            if (lit == g_mount_latch.end() || !lit->second.engaged || !lit->second.have_saved) continue;
-            const Vec3& mount = lit->second.prev_saved;
-            for (size_t other = 0; other < s_transforms.size(); ++other) {
-                if (other == index || !position_ok[other] || suppressed[other]) continue;
-                if (other == local_entity_index) continue;
-                if (player_mount_engaged(s_transforms[other])) continue;
-                // A leftover is effectively at the exact boarding point. The
-                // old 1.8 m radius also removed real enemies fighting nearby.
-                if (vec3_horiz2(positions[other], mount) < 0.45F * 0.45F)
-                    suppressed[other] = 1;
-            }
-        }
-    }
-
+    // Draw every remote PlayerManager returned by the player registry.
+    // No UID, name, mount-point or movement heuristic is allowed to hide one.
     for (size_t i = 0; i < s_transforms.size(); ++i) {
         if (i == local_entity_index) { skip_reason[i] = 'L'; continue; }
         if (!s_transforms[i]) { skip_reason[i] = 'Z'; continue; }
-        if (suppressed[i]) { skip_reason[i] = 'S'; continue; }
         if (!position_ok[i]) { skip_reason[i] = 'P'; continue; }
         Vec3 feet = positions[i];
 
@@ -8543,7 +8209,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (has_local_position) {
             float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
             distance = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (!std::isfinite(distance) || distance < MIN_PLAYER_DISTANCE || distance > MAX_PLAYER_DISTANCE) { skip_reason[i] = 'D'; continue; }
+            if (!std::isfinite(distance)) { skip_reason[i] = 'D'; continue; }
         }
 
         // Counted before any screen-space checks: the pill counter must see
@@ -8571,7 +8237,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!top_visible) { skip_reason[i] = 'T'; continue; }
 
         float height = fabsf(sh2.y - sf.y);
-        if (!std::isfinite(height) || height < 2.0F) { skip_reason[i] = 'H'; continue; }
+        if (!std::isfinite(height) || height <= 0.001F) { skip_reason[i] = 'H'; continue; }
         float cx = (sf.x + sh2.x) * 0.5F;
         float cy = (sf.y + sh2.y) * 0.5F;
         float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;

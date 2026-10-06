@@ -75,11 +75,10 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         const bool transient = esp_box_frame_transient();
         const size_t raw_count = next.size();
         bool retained = false;
-        // Single-frame camera/list read gaps used to publish an empty vector,
-        // producing rapid full-screen ESP flicker on noisier kernels. Keep the
-        // previous screen snapshot only for a short visual debounce window;
-        // a confirmed healthy empty frame still clears it immediately.
-        if (!transient || s_boxes.empty() || now - last_healthy_at > 0.35) {
+        // A transient resolver failure does not mean that the players left.
+        // Keep the last complete frame until a confirmed healthy frame replaces
+        // it; only a healthy empty registry may clear visible players.
+        if (!transient || s_boxes.empty()) {
             s_boxes = std::move(next);
             if (!transient) last_healthy_at = now;
         } else {
