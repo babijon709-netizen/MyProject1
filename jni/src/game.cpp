@@ -10,7 +10,7 @@
 #include "kernel_io.h"             // кернел-транспорт (сокет ядерного драйвера)
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
-#include "game_offsets_active.h"   // compile-time offsets текущего релиза
+#include "game_offsets_active.h"   // выбранный Release/Beta профиль
 #include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
@@ -81,7 +81,7 @@ bool esp_silent_write(uint64_t addr, const void* in, size_t len) {
 
 // адресами без метки тоже нельзя. Снимаем метку сразу, на входе.
 
-// Все смещения — compile-time константы единственного release-набора.
+// Профиль смещений выбирается до первого bind и больше не меняется.
 using namespace go_active;
 
 pid_t     g_pid         = -1;
@@ -1176,7 +1176,7 @@ static Mat4 mat_mul(const Mat4& a, const Mat4& b);
 // позиции не дал ни один (GameObject на месте Transform даёт мусор в +0x38).
 static constexpr uint64_t GAMEOBJECT_COMPONENT_COUNT  = 0x30;  // число компонентов
 static constexpr uint64_t GAMEOBJECT_COMPONENT_STRIDE = 0x10;  // размер пары
-static constexpr uint64_t TRANSFORM_ACCESS_HIERARCHY  = TRANSFORM_HIERARCHY_DATA;
+static const uint64_t TRANSFORM_ACCESS_HIERARCHY = TRANSFORM_HIERARCHY_DATA;
 
 static uint64_t transform_from_gameobject(uint64_t gameobject) {
     if (gameobject < 0x10000) return 0;
@@ -3070,7 +3070,7 @@ static uint64_t mouse_look_owner(uint64_t mouse_look) {
 // dump.cs релиза). По нему и опознаём «свой» объект.
 static constexpr uint64_t MOUSELOOK_LOOK_ROOT = 0x28;
 // Mirror помечает игрока, которым управляет это устройство. Оба поля берутся
-// только из compile-time таблицы текущего релиза.
+// только из выбранного профиля оффсетов.
 
 // -1 — прочитать не удалось, 0 — чужой, 1 — локальный.
 static int player_is_local(uint64_t player) {
@@ -8442,7 +8442,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         box.health = -1.f;
         {
-            const uint64_t vitals = rd_ptr(s_transforms[i] + game_offsets::PLAYER_VITALS);
+            const uint64_t vitals = rd_ptr(s_transforms[i] + go_active::PLAYER_VITALS);
             if (vitals >= 0x10000) {
                 // Где здоровье на самом деле. Прошлые две сборки читали
                 // GenericVitals.KQN (0xB8) — и срез памяти из лога 15:56
@@ -8464,9 +8464,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 //       public class brz : brS  ->  public ? Health;  // 0x98
                 //     а 0x68 у brS — это public brz Entity.
                 // Итого: здоровье = [[[vitals + 0x68] + 0x98] + 0x20].
-                const uint64_t entity = rd_ptr(vitals + game_offsets::PMP_ENTITY);
+                const uint64_t entity = rd_ptr(vitals + go_active::PMP_ENTITY);
                 if (entity >= 0x10000) {
-                    const uint64_t hv = rd_ptr(entity + game_offsets::PMK_HEALTH);
+                    const uint64_t hv = rd_ptr(entity + go_active::PMK_HEALTH);
                     if (hv >= 0x10000) {
                         // Слот значения: дизассемблер сеттера показывает +0x20
                         // (старое значение при этом относит в +0x24), а по
@@ -8475,8 +8475,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         // разрешён (там просто «?»), поэтому берём тот слот,
                         // где лечит правдоподобное здоровье, — и печатаем оба,
                         // чтобы следующая сборка уже знала точно.
-                        const float hp20 = rd<float>(hv + game_offsets::HEALTH_VALUE);
-                        const float hp18 = rd<float>(hv + game_offsets::ARP_LATEST_VALUE);
+                        const float hp20 = rd<float>(hv + go_active::HEALTH_VALUE);
+                        const float hp18 = rd<float>(hv + go_active::ARP_LATEST_VALUE);
                         auto plausible = [](float v) {
                             return std::isfinite(v) && v >= 0.f && v <= 100000.f;
                         };
@@ -8644,11 +8644,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // неизвестен (-1) и НЕ считается смертью: пометить живого игрока
         // мёртвым хуже, чем один кадр повести по трупу.
         {
-            const uint64_t ref = rd_ptr(s_transforms[i] + game_offsets::PLAYER_DEATH_HANDLER);
+            const uint64_t ref = rd_ptr(s_transforms[i] + go_active::PLAYER_DEATH_HANDLER);
             if (ref >= 0x10000) {
-                const uint64_t dh = rd_ptr(ref + game_offsets::DEATH_HANDLER_REF_TARGET);
+                const uint64_t dh = rd_ptr(ref + go_active::DEATH_HANDLER_REF_TARGET);
                 if (dh >= 0x10000) {
-                    const uint32_t f = rd<uint8_t>(dh + game_offsets::DEATH_HANDLER_DEATH);
+                    const uint32_t f = rd<uint8_t>(dh + go_active::DEATH_HANDLER_DEATH);
                     if (f == 1) { box.death_flag = 1; box.dead = true; }
                     else if (f == 0) box.death_flag = 0;
                 }

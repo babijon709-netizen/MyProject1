@@ -30,6 +30,7 @@
 #include "mem_io.h"                  // procfs_transport (дефолт)
 #include "kernel_io.h"               // kernel_transport, driver_available
 #include "game.h"                    // esp_set_mem_backend
+#include "game_offsets_active.h"     // runtime Release/Beta profile
 #include "config.h"                  // CfgDir(), RestoreLang(), RestoreAccent()
 #include "theme.h"                   // C::/R::, ApplyTheme
 #include "hud.h"                     // VisibleScreen
@@ -104,7 +105,80 @@ static bool ModeButton(const char* id, float w, float h, const char* title,
     return tapped;
 }
 
-// ---- экран ---------------------------------------------------------------
+// ---- выбор версии игры ---------------------------------------------------
+
+static bool RunVersionSelect() {
+    RestoreLang();
+    RestoreAccent();
+    ApplyTheme();
+
+    float fade = 0.f;
+    int picked = -1;
+
+    while (main_thread_flag.load() && picked < 0) {
+        drawBegin();
+        auto& io = ImGui::GetIO();
+        float dt = ImMin(io.DeltaTime, 0.1f);
+        fade = ImMin(fade + dt * 1.6f, 1.f);
+
+        float vw = 0.f, vh = 0.f;
+        VisibleScreen(vw, vh);
+        Touch_BlockRect(true, 0.f, 0.f, vw, vh);
+
+        const ImGuiWindowFlags wf = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse
+                                  | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar
+                                  | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground
+                                  | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav
+                                  | ImGuiWindowFlags_NoBringToFrontOnFocus;
+        ImGui::SetNextWindowPos({0.f, 0.f}, ImGuiCond_Always);
+        ImGui::SetNextWindowSize({vw, vh}, ImGuiCond_Always);
+        ImGui::Begin("##version_select", nullptr, wf);
+        {
+            auto* dl = ImGui::GetWindowDrawList();
+            ImFont* fn = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize();
+            const float t = EaseInOut(fade);
+            const float slide = (1.f - t) * -30.f;
+            const char* title = XS("Версия игры");
+            const float tfs = fs * 1.55f;
+            const ImVec2 ts = fn->CalcTextSizeA(tfs, FLT_MAX, 0.f, title);
+            const float gap = 14.f;
+            const float btnH = fs * 3.4f;
+            const float btnW = ImMin((vw - 36.f - gap) / 2.f, 300.f);
+            const float titleGap = fs * 1.3f;
+            const float blockH = tfs + titleGap + btnH;
+            const float ty = (vh - blockH) * 0.5f + slide;
+            const float tx = (vw - ts.x) * 0.5f;
+
+            dl->AddText(fn, tfs, {tx + 2.f, ty + 2.f}, IM_COL32(0, 0, 0, 110), title);
+            dl->AddText(fn, tfs, {tx, ty}, C::U(C::Txt()), title);
+
+            const float rowW = btnW * 2.f + gap;
+            const float bx = (vw - rowW) * 0.5f;
+            const float by = ty + tfs + titleGap;
+            ImGui::SetCursorScreenPos({bx, by});
+            if (ModeButton("##version_release", btnW, btnH, "Release", true, false, fs)) {
+                picked = 0;
+                PlaySound(SND_CLICK);
+            }
+            ImGui::SetCursorScreenPos({bx + btnW + gap, by});
+            if (ModeButton("##version_beta", btnW, btnH, "Beta", true, false, fs)) {
+                picked = 1;
+                PlaySound(SND_CLICK);
+            }
+        }
+        ImGui::End();
+        drawEnd();
+    }
+
+    Touch_BlockRect(false, 0.f, 0.f, 0.f, 0.f);
+    if (picked < 0) return false;
+    go_active::Select(picked == 1 ? go_active::GameVersion::Beta
+                                  : go_active::GameVersion::Release);
+    return true;
+}
+
+// ---- экран выбора транспорта ---------------------------------------------
 //
 // Возвращает true, если режим выбран и применён к g_mem. false — приложение
 // закрыли (сигнал/терминал), не дав выбрать: вызывающий выходит тем же

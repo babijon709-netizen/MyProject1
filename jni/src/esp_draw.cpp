@@ -5,7 +5,7 @@
 #include "cfg.h"
 #include "process.h"           // g_esp_attached
 #include "ui_util.h"           // ColU32
-#include "game_offsets_active.h" // game_offsets::PLAYER_BOX_WIDTH_RATIO
+#include "game_offsets_active.h" // go_active::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
 #include "overlay_geometry.h"
 #include <cfloat>
@@ -146,7 +146,7 @@ void DrawEspOverlay() {
         if (y2 < y1) { float t = y1; y1 = y2; y2 = t; }
         float cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f;
         float w = x2 - x1, h = y2 - y1;
-        if (!(h > 0.01f)) { h = kMinBoxSide; w = kMinBoxSide * game_offsets::PLAYER_BOX_WIDTH_RATIO; }
+        if (!(h > 0.01f)) { h = kMinBoxSide; w = kMinBoxSide * go_active::PLAYER_BOX_WIDTH_RATIO; }
         if (h < kMinBoxSide) { float s = kMinBoxSide / h; h *= s; w *= s; }
         if (w < kMinBoxWidth) w = kMinBoxWidth; // only for absurdly narrow rects
         x1 = cx - w * 0.5f; x2 = cx + w * 0.5f;

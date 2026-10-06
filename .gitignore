@@ -7,3 +7,6 @@ dist/
 
 # диагностический лог устройства (присылается отдельно)
 xvcen.log
+
+# externally supplied game dumps
+google_drive/

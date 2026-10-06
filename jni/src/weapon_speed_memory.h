@@ -5,7 +5,7 @@
 // интервалы в живой FPWeaponBase/FPHitscan ещё при создании/доставании оружия.
 // Поэтому контроллер синхронно держит и config, и подтверждённые ARM64-аудитом
 // live-кэши. Инструкции/данные библиотек не меняются, а все адресные цепочки
-// состоят только из статических go_active offsets текущего релиза.
+// берутся только из выбранного go_active профиля Release/Beta.
 #include "viewmodel.h"
 #include "game_offsets_active.h"
 #include <cstdint>
