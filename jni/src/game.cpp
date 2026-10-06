@@ -7835,6 +7835,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
                 case 'T': why = "top"; break;
                 case 'H': why = "h2px"; break;
                 case 'O': why = "offscreen"; break;
+                case 'X': why = "dead"; break;
             }
             LogLine("визуал: бокс 0x%llx ПРОПАЛ: %s, отказов чтения за кадр %llu%s",
                     (unsigned long long)player, why,
@@ -8533,6 +8534,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         (double)box.skel_flat, (int)box.respawning, (int)box.death_flag,
                         (int)box.dead, (double)box.health);
             }
+        }
+        // A confirmed corpse must disappear immediately. The five-second list
+        // grace protects living players from read gaps, not dead PlayerManagers.
+        if (box.dead) {
+            skip_reason[i] = 'X';
+            if (g_frame_player_count > 0) --g_frame_player_count;
+            continue;
         }
         result.push_back(box);
     }
