@@ -7580,11 +7580,34 @@ static double s_watch_sec = -1e9;
 static int s_watch_budget = 0;
 static int s_watch_hidden = 0;
 
+struct BoxWatchPose {
+    float cx = 0.0F, cy = 0.0F, distance = -1.0F;
+    unsigned long long frame = 0;
+};
+static std::unordered_map<uint64_t, BoxWatchPose> s_watch_box_pose;
+static unsigned long long s_watch_frame = 0;
+static double s_watch_summary_at = -1e9;
+static int s_watch_summary_frames = 0;
+static int s_watch_summary_empty = 0;
+static int s_watch_summary_min = 1000000;
+static int s_watch_summary_max = 0;
+static int s_watch_summary_returns = 0;
+static int s_watch_summary_losses = 0;
+static int s_watch_summary_jumps = 0;
+static int s_watch_summary_local_jumps = 0;
+static int s_watch_summary_camera_jumps = 0;
+static int s_watch_summary_camera_mismatch = 0;
+static int s_watch_summary_early[16]{};
+static unsigned long long s_watch_summary_fails = 0;
+static Vec3 s_watch_prev_local{};
+static bool s_watch_prev_local_valid = false;
+static double s_watch_prev_local_at = 0.0;
+
 static bool watch_allow() {
     const double now = memio::now_seconds();
     if (now - s_watch_sec >= 1.0) {
         s_watch_sec = now;
-        s_watch_budget = 4;
+        s_watch_budget = 6;
         if (s_watch_hidden > 0) {
             LogLine("визуал: ...и ещё %d событий скрыто бюджетом", s_watch_hidden);
             s_watch_hidden = 0;
@@ -7596,12 +7619,83 @@ static bool watch_allow() {
     return true;
 }
 
+static void watch_camera_and_local(const Mat4& view, const Vec3& local) {
+    static Vec3 previous_camera{};
+    static bool have_previous_camera = false;
+    static double previous_at = 0.0;
+    Vec3 camera{};
+    if (!camera_position_from_view(view, camera) || !vec3_is_finite(camera)) return;
+    const double now = memio::now_seconds();
+    if (have_previous_camera) {
+        const float dx = camera.x - previous_camera.x;
+        const float dy = camera.y - previous_camera.y;
+        const float dz = camera.z - previous_camera.z;
+        const float jump = sqrtf(dx * dx + dy * dy + dz * dz);
+        const double dt = now - previous_at;
+        if (dt >= 0.0 && dt < 0.5 && std::isfinite(jump) && jump > 8.0F) {
+            ++s_watch_summary_camera_jumps;
+            if (watch_allow())
+                LogLine("ESP-ДИАГ: камера прыгнула на %.1fм за %.0fмс: (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)",
+                        (double)jump, dt * 1000.0,
+                        (double)previous_camera.x, (double)previous_camera.y, (double)previous_camera.z,
+                        (double)camera.x, (double)camera.y, (double)camera.z);
+        }
+    }
+    const float ldx = local.x - camera.x;
+    const float ldy = local.y - camera.y;
+    const float ldz = local.z - camera.z;
+    const float mismatch = sqrtf(ldx * ldx + ldy * ldy + ldz * ldz);
+    if (std::isfinite(mismatch) && mismatch > 25.0F) {
+        ++s_watch_summary_camera_mismatch;
+        if (watch_allow())
+            LogLine("ESP-ДИАГ: камера и локальный игрок разошлись на %.1fм: camera=(%.1f %.1f %.1f), local=(%.1f %.1f %.1f)",
+                    (double)mismatch,
+                    (double)camera.x, (double)camera.y, (double)camera.z,
+                    (double)local.x, (double)local.y, (double)local.z);
+    }
+    previous_camera = camera;
+    previous_at = now;
+    have_previous_camera = true;
+}
+
 // tag: 0 = главный путь (боксы строились), иначе номер раннего выхода.
 static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
                         const std::vector<char>* skip, int tag) {
+    ++s_watch_frame;
+    const double watch_now = memio::now_seconds();
     const unsigned long long fails = g_mem.read_fails_total();
     const unsigned long long fails_delta = fails - s_watch_fails;
     s_watch_fails = fails;
+    s_watch_summary_fails += fails_delta;
+    ++s_watch_summary_frames;
+    if (tag > 0 && tag < 16) ++s_watch_summary_early[tag];
+
+    int drawn_players = 0;
+    for (const EspBox& box : result) if (!box.is_bot) ++drawn_players;
+    if (drawn_players == 0) ++s_watch_summary_empty;
+    s_watch_summary_min = std::min(s_watch_summary_min, drawn_players);
+    s_watch_summary_max = std::max(s_watch_summary_max, drawn_players);
+
+    if (g_frame_local_valid) {
+        if (s_watch_prev_local_valid) {
+            const float dx = g_frame_local_pos.x - s_watch_prev_local.x;
+            const float dy = g_frame_local_pos.y - s_watch_prev_local.y;
+            const float dz = g_frame_local_pos.z - s_watch_prev_local.z;
+            const float jump = sqrtf(dx * dx + dy * dy + dz * dz);
+            const double dt = watch_now - s_watch_prev_local_at;
+            if (dt >= 0.0 && dt < 0.5 && std::isfinite(jump) && jump > 8.0F) {
+                ++s_watch_summary_local_jumps;
+                if (watch_allow())
+                    LogLine("ESP-ДИАГ: локальная позиция прыгнула на %.1fм за %.0fмс: (%.1f %.1f %.1f) -> (%.1f %.1f %.1f), выход=%d",
+                            (double)jump, dt * 1000.0,
+                            (double)s_watch_prev_local.x, (double)s_watch_prev_local.y, (double)s_watch_prev_local.z,
+                            (double)g_frame_local_pos.x, (double)g_frame_local_pos.y, (double)g_frame_local_pos.z, tag);
+            }
+        }
+        s_watch_prev_local = g_frame_local_pos;
+        s_watch_prev_local_valid = true;
+        s_watch_prev_local_at = watch_now;
+    }
 
     // Популяция: кто добавился/ушёл.
     {
@@ -7646,11 +7740,36 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
     for (const EspBox& box : result) {
         if (box.is_bot) continue;
         drawn_now.push_back(box.id);
+        const float cx = (box.x1 + box.x2) * 0.5F;
+        const float cy = (box.y1 + box.y2) * 0.5F;
+        auto pose = s_watch_box_pose.find(box.id);
+        if (pose != s_watch_box_pose.end() && pose->second.frame + 1 == s_watch_frame) {
+            const float screen_dx = cx - pose->second.cx;
+            const float screen_dy = cy - pose->second.cy;
+            const float screen_jump = sqrtf(screen_dx * screen_dx + screen_dy * screen_dy);
+            const float distance_jump = fabsf(box.distance - pose->second.distance);
+            const float distance_limit = std::max(10.0F, fabsf(pose->second.distance) * 0.25F);
+            const float screen_limit = std::max(180.0F, std::min(g_frame_sw, g_frame_sh) * 0.18F);
+            if ((std::isfinite(distance_jump) && distance_jump > distance_limit) ||
+                (std::isfinite(screen_jump) && screen_jump > screen_limit)) {
+                ++s_watch_summary_jumps;
+                if (watch_allow())
+                    LogLine("ESP-ДИАГ: бокс 0x%llx прыгнул: dist %.1f->%.1fм (дельта %.1f), экран (%.0f %.0f)->(%.0f %.0f) (дельта %.0fpx), local-flip=%d",
+                            (unsigned long long)box.id,
+                            (double)pose->second.distance, (double)box.distance, (double)distance_jump,
+                            (double)pose->second.cx, (double)pose->second.cy,
+                            (double)cx, (double)cy, (double)screen_jump, (int)local_flipped);
+            }
+        }
+        s_watch_box_pose[box.id] = {cx, cy, box.distance, s_watch_frame};
         auto it = s_watch_gap.find(box.id);
-        if (it != s_watch_gap.end() && it->second > 0 && watch_allow())
-            LogLine("визуал: бокс 0x%llx ВЕРНУЛСЯ через %d кадр(а), отказов чтения за кадр %llu%s",
-                    (unsigned long long)box.id, it->second,
-                    fails_delta, local_flipped ? ", LOCAL-FLIP" : "");
+        if (it != s_watch_gap.end() && it->second > 0) {
+            ++s_watch_summary_returns;
+            if (watch_allow())
+                LogLine("визуал: бокс 0x%llx ВЕРНУЛСЯ через %d кадр(а), отказов чтения за кадр %llu%s",
+                        (unsigned long long)box.id, it->second,
+                        fails_delta, local_flipped ? ", LOCAL-FLIP" : "");
+        }
     }
 
     // Пропущенные в этом кадре (только главный путь; gap 0 = был в прошлом).
@@ -7661,6 +7780,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
             const uint64_t player = g_frame_transforms[i];
             auto it = s_watch_gap.find(player);
             if (it == s_watch_gap.end() || it->second != 0) continue;
+            ++s_watch_summary_losses;
             if (!watch_allow()) continue;
             // Коды причин (почему бокс пропущен): local = сам стал локальным,
             // null = нулевой адрес, dup = задавлен дубликатом того же uid,
@@ -7696,6 +7816,36 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
     for (uint64_t id : drawn_now) s_watch_gap[id] = 0;
     for (auto it = s_watch_gap.begin(); it != s_watch_gap.end();) {
         if (it->second > 600) it = s_watch_gap.erase(it); else ++it;
+    }
+    for (auto it = s_watch_box_pose.begin(); it != s_watch_box_pose.end();) {
+        if (it->second.frame + 600 < s_watch_frame) it = s_watch_box_pose.erase(it);
+        else ++it;
+    }
+
+    if (watch_now - s_watch_summary_at >= 1.0) {
+        char exits[160]{};
+        size_t used = 0;
+        for (int i = 1; i < 16; ++i) {
+            if (!s_watch_summary_early[i] || used + 16 >= sizeof(exits)) continue;
+            used += (size_t)snprintf(exits + used, sizeof(exits) - used,
+                                     "%s%d:%d", used ? "," : "", i, s_watch_summary_early[i]);
+        }
+        LogLine("ESP-ДИАГ: кадры=%d боксы=%d..%d пустых=%d возвратов=%d пропаж=%d скачков=%d local-jump=%d camera-jump=%d camera-local=%d read-fail=%llu early={%s}",
+                s_watch_summary_frames,
+                s_watch_summary_min == 1000000 ? 0 : s_watch_summary_min,
+                s_watch_summary_max, s_watch_summary_empty,
+                s_watch_summary_returns, s_watch_summary_losses,
+                s_watch_summary_jumps, s_watch_summary_local_jumps,
+                s_watch_summary_camera_jumps, s_watch_summary_camera_mismatch,
+                s_watch_summary_fails, exits);
+        s_watch_summary_at = watch_now;
+        s_watch_summary_frames = s_watch_summary_empty = 0;
+        s_watch_summary_min = 1000000; s_watch_summary_max = 0;
+        s_watch_summary_returns = s_watch_summary_losses = 0;
+        s_watch_summary_jumps = s_watch_summary_local_jumps = 0;
+        s_watch_summary_camera_jumps = s_watch_summary_camera_mismatch = 0;
+        s_watch_summary_fails = 0;
+        memset(s_watch_summary_early, 0, sizeof(s_watch_summary_early));
     }
 }
 
@@ -8216,6 +8366,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         g_local_position_fail_streak = 0;
     }
 
+    watch_camera_and_local(view, local);
     note_player_pipeline_health(player_list_ok && live_player_positions > 0);
 
     g_frame_vp = vp;

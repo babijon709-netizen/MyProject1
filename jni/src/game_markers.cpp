@@ -3,6 +3,7 @@
 #include "game_internal.h"
 #include "game_offsets_active.h"   // оффсеты (go_active)
 #include "lang.h"
+#include "logfile.h"
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -1383,7 +1384,130 @@ static void marker_track_position(MarkerEntity& entity) {
     }
 }
 
+struct MarkerWatchSample {
+    Vec3 world{};
+    float x = 0.0F, y = 0.0F, distance = -1.0F;
+    int kind = -1;
+    bool visible = false;
+    unsigned long long frame = 0;
+};
+
+static std::unordered_map<uint64_t, MarkerWatchSample> s_marker_watch;
+static unsigned long long s_marker_watch_frame = 0;
+static double s_marker_watch_summary_at = -1e9;
+static double s_marker_watch_budget_at = -1e9;
+static int s_marker_watch_budget = 0;
+static int s_marker_watch_frames = 0;
+static int s_marker_watch_min = 1000000;
+static int s_marker_watch_max = 0;
+static int s_marker_watch_losses = 0;
+static int s_marker_watch_returns = 0;
+static int s_marker_watch_jumps = 0;
+static int s_marker_watch_position_invalid = 0;
+static int s_marker_watch_frame_early = 0;
+
+static bool marker_watch_allow() {
+    const double now = mono_seconds();
+    if (now - s_marker_watch_budget_at >= 1.0) {
+        s_marker_watch_budget_at = now;
+        s_marker_watch_budget = 4;
+    }
+    if (s_marker_watch_budget <= 0) return false;
+    --s_marker_watch_budget;
+    return true;
+}
+
+static uint64_t marker_watch_key(const MarkerEntity& entity) {
+    return entity.identity ? entity.identity : entity.transform;
+}
+
+static void marker_watch_observe(const MarkerEntity& entity, bool visible,
+                                 const char* reason, float distance,
+                                 float screen_x, float screen_y) {
+    const uint64_t key = marker_watch_key(entity);
+    if (!key) return;
+    const char* marker_name = entity.label ? entity.label : entity.text;
+    if (!marker_name) marker_name = "?";
+    auto found = s_marker_watch.find(key);
+    if (found != s_marker_watch.end()) {
+        MarkerWatchSample& old = found->second;
+        if (old.visible != visible) {
+            if (visible) ++s_marker_watch_returns;
+            else ++s_marker_watch_losses;
+            if (marker_watch_allow())
+                LogLine("ESP-ДИАГ-МЕТКА: 0x%llx kind=%d name=%s %s, причина=%s, dist=%.1fм world=(%.1f %.1f %.1f)",
+                        (unsigned long long)key, entity.kind, marker_name,
+                        visible ? "ВЕРНУЛАСЬ" : "ПРОПАЛА", reason,
+                        (double)distance, (double)entity.position.x,
+                        (double)entity.position.y, (double)entity.position.z);
+        }
+        if (visible && old.visible && old.frame + 1 == s_marker_watch_frame) {
+            const float wx = entity.position.x - old.world.x;
+            const float wy = entity.position.y - old.world.y;
+            const float wz = entity.position.z - old.world.z;
+            const float world_jump = sqrtf(wx * wx + wy * wy + wz * wz);
+            const float dist_jump = fabsf(distance - old.distance);
+            const float sx = screen_x - old.x, sy = screen_y - old.y;
+            const float screen_jump = sqrtf(sx * sx + sy * sy);
+            const float dist_limit = std::max(10.0F, fabsf(old.distance) * 0.25F);
+            const float world_limit = entity.kind == ESP_MARKER_ORE ? 1.5F : 15.0F;
+            const float screen_limit = std::max(180.0F, std::min(g_frame_sw, g_frame_sh) * 0.18F);
+            if ((std::isfinite(world_jump) && world_jump > world_limit) ||
+                (std::isfinite(dist_jump) && dist_jump > dist_limit) ||
+                (std::isfinite(screen_jump) && screen_jump > screen_limit)) {
+                ++s_marker_watch_jumps;
+                if (marker_watch_allow())
+                    LogLine("ESP-ДИАГ-МЕТКА: 0x%llx kind=%d name=%s прыгнула: world=%.1fм dist=%.1f->%.1fм экран=(%.0f %.0f)->(%.0f %.0f), local=(%.1f %.1f %.1f)",
+                            (unsigned long long)key, entity.kind, marker_name, (double)world_jump,
+                            (double)old.distance, (double)distance,
+                            (double)old.x, (double)old.y, (double)screen_x, (double)screen_y,
+                            (double)g_frame_local_pos.x, (double)g_frame_local_pos.y,
+                            (double)g_frame_local_pos.z);
+            }
+        }
+    }
+    MarkerWatchSample& sample = s_marker_watch[key];
+    sample.world = entity.position;
+    sample.x = screen_x; sample.y = screen_y; sample.distance = distance;
+    sample.kind = entity.kind; sample.visible = visible; sample.frame = s_marker_watch_frame;
+    if (!visible && reason && reason[0] == 'P') ++s_marker_watch_position_invalid;
+}
+
+static void marker_watch_finish(int visible_count) {
+    ++s_marker_watch_frames;
+    s_marker_watch_min = std::min(s_marker_watch_min, visible_count);
+    s_marker_watch_max = std::max(s_marker_watch_max, visible_count);
+    for (auto& entry : s_marker_watch) {
+        MarkerWatchSample& sample = entry.second;
+        if (sample.visible && sample.frame + 1 < s_marker_watch_frame) {
+            sample.visible = false;
+            ++s_marker_watch_losses;
+            if (marker_watch_allow())
+                LogLine("ESP-ДИАГ-МЕТКА: 0x%llx kind=%d ПРОПАЛА из кеша/скана",
+                        (unsigned long long)entry.first, sample.kind);
+        }
+    }
+    for (auto it = s_marker_watch.begin(); it != s_marker_watch.end();) {
+        if (it->second.frame + 600 < s_marker_watch_frame) it = s_marker_watch.erase(it);
+        else ++it;
+    }
+    const double now = mono_seconds();
+    if (now - s_marker_watch_summary_at >= 1.0) {
+        LogLine("ESP-ДИАГ-МЕТКИ: кадры=%d видно=%d..%d пропаж=%d возвратов=%d скачков=%d bad-position=%d early=%d cache=%u",
+                s_marker_watch_frames,
+                s_marker_watch_min == 1000000 ? 0 : s_marker_watch_min,
+                s_marker_watch_max, s_marker_watch_losses, s_marker_watch_returns,
+                s_marker_watch_jumps, s_marker_watch_position_invalid,
+                s_marker_watch_frame_early, (unsigned)s_marker_watch.size());
+        s_marker_watch_summary_at = now;
+        s_marker_watch_frames = 0; s_marker_watch_min = 1000000; s_marker_watch_max = 0;
+        s_marker_watch_losses = s_marker_watch_returns = s_marker_watch_jumps = 0;
+        s_marker_watch_position_invalid = s_marker_watch_frame_early = 0;
+    }
+}
+
 std::vector<EspMarker> esp_get_markers() {
+    ++s_marker_watch_frame;
     std::vector<EspMarker> result;
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
         !g_markers_loot_enabled && !g_markers_pickup_enabled &&
@@ -1394,16 +1518,24 @@ std::vector<EspMarker> esp_get_markers() {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_next_scan = 0.0;
         marker_scan_abort();   // не тащить незавершённую порцию через выключенный ESP
+        s_marker_watch.clear();
         return result;
     }
-    if (g_pid <= 0 || !g_il2cpp_base) return result;
+    if (g_pid <= 0 || !g_il2cpp_base) {
+        ++s_marker_watch_frame_early;
+        marker_watch_finish(0);
+        return result;
+    }
     // The box pipeline publishes the frame while players are visible; when it
     // bailed out for ANY reason (empty player list, failed position read,
     // world reload), build a camera-only frame right here. Markers must never
     // depend on other players being around.
     if (!g_frame_vp_valid || !g_frame_local_valid) {
-        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh))
+        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
+            ++s_marker_watch_frame_early;
+            marker_watch_finish(0);
             return result;
+        }
     }
 
     {
@@ -1487,13 +1619,19 @@ std::vector<EspMarker> esp_get_markers() {
         // Ore nodes never move, so their position is only read on a rescan.
         // Animals and bots DO move — throttled re-reads, see marker_track_position.
         marker_track_position(entity);
-        if (!entity.position_valid) continue;
+        if (!entity.position_valid) {
+            marker_watch_observe(entity, false, "POSITION", -1.0F, 0.0F, 0.0F);
+            continue;
+        }
 
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
         float dz = entity.position.z - g_frame_local_pos.z;
         float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(distance) || distance > max_distance) continue;
+        if (!std::isfinite(distance) || distance > max_distance) {
+            marker_watch_observe(entity, false, "DISTANCE", distance, 0.0F, 0.0F);
+            continue;
+        }
 
         Vec2 screen{};
         Vec3 anchor = entity.position;
@@ -1509,11 +1647,18 @@ std::vector<EspMarker> esp_get_markers() {
                   : (entity.kind == ESP_MARKER_SLEEPER)  ? 0.8F
                   : (entity.kind == ESP_MARKER_BACKPACK) ? 0.5F
                   : (entity.kind == ESP_MARKER_HOUSE)    ? 0.6F : 0.9F;
-        if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false)) continue;
-        if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
-        if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F) continue;
-        if (screen.y < -64.0F || screen.y > g_frame_sh + 64.0F) continue;
+        if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false) ||
+            !std::isfinite(screen.x) || !std::isfinite(screen.y)) {
+            marker_watch_observe(entity, false, "PROJECTION", distance, screen.x, screen.y);
+            continue;
+        }
+        if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F ||
+            screen.y < -64.0F || screen.y > g_frame_sh + 64.0F) {
+            marker_watch_observe(entity, false, "OFFSCREEN", distance, screen.x, screen.y);
+            continue;
+        }
 
+        marker_watch_observe(entity, true, "VISIBLE", distance, screen.x, screen.y);
         EspMarker marker;
         marker.x = screen.x;
         marker.y = screen.y;
@@ -1561,6 +1706,7 @@ std::vector<EspMarker> esp_get_markers() {
         thinned.push_back(marker);
         if (thinned.size() >= 64) break; // keep the screen readable
     }
+    marker_watch_finish((int)thinned.size());
     return thinned;
 }
 

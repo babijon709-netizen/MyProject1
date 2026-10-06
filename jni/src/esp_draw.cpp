@@ -7,7 +7,9 @@
 #include "ui_util.h"           // ColU32
 #include "game_offsets_active.h" // go_active::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
+#include "logfile.h"
 #include "overlay_geometry.h"
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <utility>
@@ -71,6 +73,8 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         clock_gettime(CLOCK_MONOTONIC, &ts);
         const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
         const bool transient = esp_box_frame_transient();
+        const size_t raw_count = next.size();
+        bool retained = false;
         // Single-frame camera/list read gaps used to publish an empty vector,
         // producing rapid full-screen ESP flicker on noisier kernels. Keep the
         // previous screen snapshot only for a short visual debounce window;
@@ -78,6 +82,31 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         if (!transient || s_boxes.empty() || now - last_healthy_at > 0.35) {
             s_boxes = std::move(next);
             if (!transient) last_healthy_at = now;
+        } else {
+            retained = true;
+        }
+        static double diag_at = -1e9;
+        static int diag_frames = 0, diag_transient = 0, diag_retained = 0;
+        static size_t diag_raw_min = (size_t)-1, diag_raw_max = 0;
+        static size_t diag_draw_min = (size_t)-1, diag_draw_max = 0;
+        ++diag_frames;
+        if (transient) ++diag_transient;
+        if (retained) ++diag_retained;
+        diag_raw_min = std::min(diag_raw_min, raw_count);
+        diag_raw_max = std::max(diag_raw_max, raw_count);
+        diag_draw_min = std::min(diag_draw_min, s_boxes.size());
+        diag_draw_max = std::max(diag_draw_max, s_boxes.size());
+        if (now - diag_at >= 1.0) {
+            LogLine("ESP-ДИАГ-РЕНДЕР: кадры=%d raw=%u..%u draw=%u..%u transient=%d retained=%d age=%.0fмс",
+                    diag_frames,
+                    (unsigned)(diag_raw_min == (size_t)-1 ? 0 : diag_raw_min),
+                    (unsigned)diag_raw_max,
+                    (unsigned)(diag_draw_min == (size_t)-1 ? 0 : diag_draw_min),
+                    (unsigned)diag_draw_max, diag_transient, diag_retained,
+                    (now - last_healthy_at) * 1000.0);
+            diag_at = now; diag_frames = diag_transient = diag_retained = 0;
+            diag_raw_min = diag_draw_min = (size_t)-1;
+            diag_raw_max = diag_draw_max = 0;
         }
     }
     return s_boxes;
