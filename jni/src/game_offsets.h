@@ -5,28 +5,25 @@
 // по его дампу и подключаются как compile-time константы через
 // game_offsets_active.h; update_offsets.py обновляет этот файл.
 //
-// ИСТОЧНИК ТЕКУЩИХ ЗНАЧЕНИЙ (обновление 2026-10-03, игра обновилась:
-// types 31701->31704, methods 282651->284191, fields 140026->140070):
-//   - метадата: рантайм-блоб v39 из памяти (benzhack: 0x6dfaec8000,
-//     29441996 байт, канонический заголовок без XOR) + libil2cpp.so
-//     235607232 байт из текущего APK; дамп il2cpp_dump.py: dump.cs
-//     (31704 типов, RVA у 258422 методов), il2cpp.h, script.json;
-//   - managed-поля: dump.cs/il2cpp.h поимённо (читаемые имена) и
-//     позиционно (обфусцированные: тип + соседство + SyncVar-хуки),
-//     спорные места сверены дизассемблером aarch64;
-//   - TYPEINFO-слоты: выведены из нового .so по паттерну
-//     adrp/ldr -> слот -> ldr [slot,#0xB8] -> статик (см. у каждой).
-// Прежние значения (дамп 62a8534) сохранены в комментариях «было».
+// ИСТОЧНИК ТЕКУЩИХ ЗНАЧЕНИЙ (release dump11946, 2026-10-06):
+//   - dump11946.7z: dump.cs (31 704 TypeDef), il2cpp.h, script.json и
+//     libil2cpp.so (235 598 704 байт, SHA-256
+//     172210fb902eb5e04963916c4c1a1c54d156200e250d9227f224f830f0dce419,
+//     GNU build-id 8890c2076cf60a8d7b3a9c630d278470a57aeb49);
+//   - managed-поля сверены с dump.cs/il2cpp.h по имени либо по типу,
+//     позиции и SyncVar-хукам для обфусцированных классов;
+//   - TYPEINFO-слоты взяты из script.json/TypeInfoPointers и подтверждены
+//     соответствующими R_AARCH64_RELATIVE записями libil2cpp.so.
+// Неизменившиеся поля намеренно остались прежними; это один поддерживаемый
+// release, а не набор совместимых профилей.
 
 namespace game_offsets {
 
 // NOTE: every obfuscated class/field name quoted in the comments below is
-// valid only for the dump it was read from - the obfuscator re-rolls them on
-// each game build (fvp->pmi, wK->ij, Mo->sR, ...; в билде 2026-10-03:
-// ij->gt, sR->ON, sY->OB, pGW->WRU, GKo->Wxi, pmp->WxL, pmK->WxY, JE->vV,
-// UV->ak, eDt->Wxz, GuI`1 -> не разрешён в дампе, читается как Il2CppObject).
-// Names are kept purely as breadcrumbs; when re-checking after an update,
-// match structs and fields POSITIONALLY (offset + type).
+// valid only for the dump it was read from. dump11946 names include Rys
+// (PlayerEventHandler), qY (TOD sky), dM (nick label) and Qv (hitscan
+// calculator); do not use any one of them as a cross-release identifier.
+// Re-check obfuscated layouts positionally (field type + neighbours + offset).
 
 // Native Unity Camera (via Camera::m_CachedPtr) — from libunity.so (dump2)
 // get_worldToCameraMatrix_Injected @ 0x5ac514 → helper 0xe1fe08 returns cam+0x70
@@ -77,24 +74,14 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // делает ОДНО разыменование: rd_ptr(base + RVA) -> klass, значит RVA обязан
 // быть ВНУТРЕННИМ слотом (addend).
 //
-// УРОК 337e891 (слоты были неверны — опечатка в одной hex-цифре outer):
-// правильные outer этого билда: PM 0xd9acc68 (не 0xd9a8c68!), GC 0xd9ab2f8
-// (не 0xd9a72f8), NC 0xd9ab1a0 (не 0xd9a71a0) — «опечатанные» адреса тоже
-// существуют в .rela.dyn, но указывают на чужие слоты, поэтому ручная цепочка
-// «подтверждалась» против чужих ячеек. Надёжная методика (применена здесь):
-// 1) dump.cs даёт RVA методов класса ПОИМЁННО; 2) дизассемблируем их и
-// голосуем: слот = addend того outer, на который ссылается большинство
-// собственных методов класса; 3) РАНТАЙМ-ПОДТВЕРЖДЕНИЕ по дампам benzhack
-// (сессия pid 7619, base=0x6e1002b000, rw-сегмент=imagedata): в ячейке слота
-// лежит указатель на Il2CppClass в ptr1-регионе, из структуры читаются
-// имя/неймспейс (строки в блобе 0x6dfaec8000) — все пять классов совпали
-// ПО ИМЕНИ. Старые ячейки 0xDDB1AD8/0xDDB1AA8 опровергнуты рантаймом: там
-// мусор 0xa000b409/0xa000b3fd (это «таблица типов v2» протектора S16 из
-// малых целых, НЕ слоты классов). Перекрёстное подтверждение: PM-PLH = 0x30,
-// как и в прошлом рабочем билде (0xD9C5310/0xD9C52E0).
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDCFD2A0;  // ВНУТРЕННИЙ слот: outer 0xd9acc68 -> rela addend (раньше из-за опечатки брали outer 0xd9a8c68 -> 0xddb1ad8, чужой слот с мусором). Oxide.PlayerManager (TypeDefIndex 9624): методы LoL@0x691aac8, LmT@0x691aba8 и ещё 52 из 120 проверенных ссылаются на этот outer; рантайм: [слот]=0x6dd1b336b0=Il2CppClass{PlayerManager,Oxide}; через слот activePlayerList(+0x8)/clientPlayerList(+0x10)
-// Cysharp.Threading.Tasks.PlayerLoopHelper; re-derived from this release ELF.
-inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA    = 0xDCFD270;  // ВНУТРЕННИЙ слот: outer 0xd9abab8 -> addend; на него ссылаются 14 из 19 методов PLH (get_MainThreadId@0xc632da8 — единственный слот метода, читает mainThreadId@statics+0x10; .cctor@0xc634c7c пишет ThrowMarkerContinuationQueue@statics+0x0) и остальной Cysharp-код (init-проверки); рантайм: [слот]=0x6dd1b35230=Il2CppClass{PlayerLoopHelper,Cysharp.Threading.Tasks}; = PM-0x30, как в прошлом билде. Имя класса дополнительно сверяется (loot_memory: class_state)
+// В dump11946 script.json указывает на ВНУТРЕННИЕ слоты напрямую; для
+// защиты от перепутанного outer они перепроверены по .rela.dyn:
+//   PlayerManager      outer 0xD9AB580 -> addend 0xDCFACB8
+//   PlayerLoopHelper   outer 0xD9AA3E0 -> addend 0xDCFAC88
+// PM-PLH по-прежнему различаются ровно на 0x30. В обоих случаях читатель
+// разыменовывает именно внутренний слот, не GOT-ячейку.
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA       = 0xDCFACB8; // Oxide.PlayerManager (TypeDefIndex 9624), statics: active +0x8, client list +0x10
+inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA    = 0xDCFAC88; // Cysharp.Threading.Tasks.PlayerLoopHelper
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
 
@@ -133,25 +120,23 @@ inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = 0x18;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xDCF8530; // ВНУТРЕННИЙ слот: outer 0xd9ab2f8 -> addend (опечатка прошлого вывода: 0xd9a72f8); 81 из 120 методов GameControllerBase (nii@0x68962d0 и др.); рантайм: [слот]=0x6dd1cfc840=Il2CppClass{GameControllerBase,Oxide}, statics — все 13 статиков
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA         = 0xDCF6068; // Oxide.GameControllerBase; dump11946: outer 0xD9A96F8 -> inner slot
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
 
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
-// Effective release-client lastSavedPosition. The generated dump reports
-// 0x1D4, but the shipped combat client stores this block four bytes earlier;
-// device validation and the previous live resolver both select 0x1D0.
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x1F4;  // было 0x1D0; lastSavedPosition идёт вплотную за lastTickPosition(0x1E8), старый дамп говорил 0x1D4 при устройстве 0x1D0 — если на устройстве позиция «не та», попробовать 0x1F0
+// dump11946: lastTickPosition is 0x1E8 and lastSavedPosition is 0x1F4.
+inline constexpr std::uint64_t PLAYER_POSITION  = 0x1F4;  // было 0x1D0
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
-inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (class ij, was wK)
-// PlayerManager "uWc" (0x220, was LLI): the real human-readable display name (confirmed
-// on-device — equals the nicklabel widget's private name string, e.g.
-// "пахановский" / "#Фришка"), whereas userID/voice names carry the machine id.
-inline constexpr std::uint64_t PLAYER_DISPLAY_NAME = 0x240;  // было 0x220; zNy (protected string) — прежний uWc; ВНИМАНИЕ: 0x220 теперь enum HackType lastViolationType, вставка +0x20 до animator
+inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (dump11946 dM)
+// PlayerManager.rjy is the release display-name string; the surrounding
+// lastViolationType (0x220) and nextTerrainCheck (0x224) distinguish it from
+// the old 0x220 location.
+inline constexpr std::uint64_t PLAYER_DISPLAY_NAME = 0x240;  // было 0x220
 
-// nicklabel (class gt this build; was ij/wK): player back-ref + nickname UI.Text.
+// dump11946 dM nick-label: player back-ref + nickname UI.Text.
 inline constexpr std::uint64_t NICKLABEL_PLAYER_BACKREF = 0x20;
 inline constexpr std::uint64_t NICKLABEL_NICKNAME_TEXT  = 0x38;
 // UnityEngine.UI.Text: managed string with the visible nickname.
@@ -175,16 +160,15 @@ inline constexpr std::uint64_t IL2CPP_STRING_LENGTH = 0x10;
 inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 
 // Local player "is aiming" (ADS) state (dump.cs + libil2cpp disasm):
-//   PlayerManager.playerEventHandler (0x78) -> class WxG (was Gum/DqO)
+//   PlayerManager.playerEventHandler (0x78) -> class Rys in dump11946
 //   handler.manager (0xD0) back-ref == PlayerManager (validation)
-//   handler.Aim (0x270, was 0x268) -> toggle activity (class Gub, was Dqg), its
+//   handler.Aim (0x298, was 0x290) -> toggle activity, its
 //   <...>k__BackingField (0x10) == Active
 //   This exact byte is what FPManager.LateUpdate reads to blend the camera to aimFOV.
 //   The handler class is a live target: builds add/remove activities in the middle
-//   of it. A KnockDoor field inserted at 0x188 shifted every later field by +8, so
-//   Aim moved 0x268 -> 0x270 and 0x268 became Jump ("only in scope" silently read
-//   the jump flag). offsets_map.json reaches these through `via`
-//   (playerEventHandler -> Aim), so update_offsets.py verifies them by field name.
+//   of it. dump11946 has Run/Crouch/Jump/Aim at 0x280/0x288/0x290/0x298;
+//   Aim is therefore selected by the final field's type and neighbours, not its
+//   obfuscated class or member name.
 // Fallback: PlayerManager.fpManager (0x90) -> FPManager.LtZ (0x58, current FPWeaponBase)
 //   FPObject.Player (0xC0) back-ref == PlayerManager (validation)
 //   FPWeaponBase.<LKk>k__BackingField (0x120) == isAiming (set in weapon StartAim)
@@ -197,10 +181,10 @@ inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x298;  // был
 // so these are the synced/inventory-backed fallbacks to probe:
 //   0x98  inventory            (Oxide.PlayerInventory) — все три подтверждены именами в новом дампе
 //   0xF0  weaponReference      (private; likely the current remote weapon)
-//   0x198 weapons              (private array of weapon objects)
+//   0x1B8 weapons              (private array of weapon objects)
 // Признак смерти игрока: Oxide.PlayerManager.respawning (bool).
 // Источник — РЕЛИЗНЫЙ дамп (dump.cs, struct Oxide_PlayerManager_Fields):
-//     bool respawning;   // 0x208
+//     bool respawning;   // 0x228
 // Стоит единицей, пока игрок мёртв и ждёт возрождения; живой игрок держит
 // ноль. Поле на самом PlayerManager, который уже есть в списке кадров, —
 // поэтому читается одним чтением, без цепочек. Рядом lastDeathPosition
@@ -219,16 +203,16 @@ inline constexpr std::uint64_t PLAYER_MANAGER_RESPAWNING = 0x228;  // было 0
 inline constexpr std::uint64_t PLAYER_DEATH_HANDLER         = 0x80;
 inline constexpr std::uint64_t DEATH_HANDLER_REF_TARGET     = 0x18;
 inline constexpr std::uint64_t DEATH_HANDLER_DEATH          = 0xF0;
-// Цепочка здоровья (релизный дамп):
+// Цепочка здоровья (dump11946):
 //   Oxide.PlayerManager.vitals            (Oxide.PlayerVitals*) 0xC8
-//   Oxide.GenericVitals.KQN               (float, protected)    0xB8
+//   Oxide.GenericVitals.rQQ               (float, protected)    0xB8
 // m_MaxHealth лежит там же на 0x88, поэтому 0xB8 — текущее здоровье; имя
 // обфусцировано, сверялись позиционно по dump.cs (class Oxide.GenericVitals).
 inline constexpr std::uint64_t PLAYER_VITALS       = 0xC8;
 inline constexpr std::uint64_t VITALS_HEALTH       = 0xB8;
 inline constexpr std::uint64_t PLAYER_INVENTORY         = 0x98;
 inline constexpr std::uint64_t PLAYER_WEAPON_REFERENCE  = 0xF0;  // без изменений
-inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x198;
+inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x1B8;  // dump11946 PlayerManager.weapons
 // Oxide.PlayerInventory instance fields (dump.cs).
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_DATA = 0x20; // _playerInventoryData
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInventoryClient
@@ -237,10 +221,10 @@ inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInv
 // The FP objects above are local-only MonoBehaviours, so enemies never resolve
 // through them. What every client *does* get is the networked weapon component:
 //   HyperHug.Games.Oxide.Features.Weapons.PlayerWeapon : Mirror.NetworkBehaviour
-//     playerWeaponViewReference  0xD0  (-> class sR, third-person weapon view)
-//     Oxide.WeaponPiece          0x100 (SyncVar "weaponPiece", 0x10 bytes)
-//     WeaponState                0x110
-//     <player>k__BackingField    0x128 (back-ref to PlayerManager, validation)
+//     playerWeaponViewReference  0xE8  (third-person weapon view)
+//     Oxide.WeaponPiece          0x110 (SyncVar "weaponPiece", 0x10 bytes)
+//     WeaponState                0x120
+//     <player>k__BackingField    0x138 (back-ref to PlayerManager, validation)
 // It hangs off PlayerManager.weaponReference (0xF0), which is an obfuscated
 // lazy-reference wrapper just like kccReference, so it needs the same probing.
 // This build inserted 0x40 bytes of new fields before `animator`, so every
@@ -435,7 +419,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDCFC518;  // ВНУТРЕННИЙ слот: outer 0xd9ab1a0 -> addend (опечатка прошлого вывода: 0xd9a71a0 -> 0x59daa78 в RX-области); 99 из 104 методов Mirror.NetworkClient (get_sendInterval@0xbfdc4fc и др.); рантайм: [слот]=0x6dd2249020=Il2CppClass{NetworkClient,Mirror}; статики: handlers(+0x28), spawned(+0x30), connection(+0x38), ready(+0x40), localPlayer(+0x48), prefabs(+0x78) — раскладка подтверждена dump.cs
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDCF9F40;  // Mirror.NetworkClient; dump11946: outer 0xD9A9638 -> inner slot; spawned is static +0x30
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x30;  // было 0x28; перед spawned вставлен handlers(+0x28)
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -467,7 +451,7 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 // Oxide.TimeOfDay в боевых сценах не живёт: его ленивые метадата-слоты не
 // инициализированы (Awake ни разу не вызывается), поэтому day/night читается
 // из TOD_Sky. Имя его класса ОБФУСЦИРОВАНО И РОТИРУЕТ КАЖДЫЙ БИЛД: в дампе
-// 89e0b63 это `IY`, в этом (62a8534) — `UV`. Структура же стабильна:
+// 89e0b63 это `IY`, затем `UV`/`ak`, а в dump11946 — `qY`. Структура же стабильна:
 //   * единственный статик — List<Self> (первое статик-поле, offset 0x0);
 //   * у инстанса `TOD_CycleParameters_o* Cycle` на 0x40;
 //   * у TOD_CycleParameters: Hour(float)@0x10, Day@0x14, Month@0x18, Year@0x1C.
@@ -479,22 +463,14 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 // кандидат по структуре выше. Это НЕ поля, но уезжают они КАЖДЫЙ билд вместе
 // со всеми *_TYPEINFO_RVA — проверить:
 //   python3 tools/offsets/typeinfo_rva.py --so <new>/libil2cpp.so
-//       --script <new>/script.json --methods 2000 UV
-// оба кандидата TOD_Sky обязаны попасть в окно. Класс TOD_Sky в этом билде
-// снова переименован (IY -> UV -> ak); структура цела: единственный
-// не-literal статик (List<Self>, offset 0x0) + TOD_CycleParameters Cycle
-// на 0x40. Прошлые окна: 0xD7A0000..0xD840000, затем 0xD9B0000..0xDA50000.
-// Окно = слотовый регион rw-сегмента этого билда: настоящие слоты классов
-// лежат на 0xdcf****-0xdd*****(PM 0xdcfd2a0, PLH 0xdcfd270, NC 0xdcfc518,
-// GC 0xdcf8530, ak 0xdd03e88); «таблица типов v2» протектора на 0xdd8d380+
-// (31696 записей S16) классов НЕ содержит (рантайм-проверка: там малые
-// целые/мусор). В 9e26509
-// окно ошибочно накрывало .data.rel.ro (внешние записи: в них лежат АДРЕСА
-// слотов, а не классы). Слот ak этого билда ВЕРИФИЦИРОВАН: outer 0xd9ab350 ->
-// addend 0xDD03E88 (геттер инстанса ak.IPB@0x684b1b0: [outer]->klass->
-// [+0xB8]->statics->[statics+0x0] = List<ak>; рантайм: [слот]=0x6dd2461360=
-// Il2CppClass{ak}); лежит на 0x3E88 от начала окна — сканер доходит до него
-// за ~16 шагов (~0.3 с @60fps). Остальное окно — запас на следующий билд:
+//       --script <new>/script.json --methods 2000 qY
+// Кандидат TOD_Sky обязан попасть в окно. В dump11946 qY_TypeInfo = 0xDD02158;
+// это 0x2158 от начала окна. Он имеет единственный не-literal статик
+// List<qY> (+0x0) и TOD_CycleParameters Cycle (+0x40). Настоящие TypeInfo
+// слоты этого release лежат в 0xDCE1428..0xDDE6D48; сканируется только
+// поддиапазон, содержащий qY. .data.rel.ro/GOT исключён: его ячейки содержат
+// адреса внутренних слотов, а не Il2CppClass*. Остальное окно — запас на
+// следующий билд:
 // сканер крутится циклично и валидирует кандидатов по полной структуре
 // (статик List<Self> + Cycle + sane-дата), так что ложных срабатываний нет.
 inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDD00000;
