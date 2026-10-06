@@ -158,6 +158,7 @@ void        esp_set_always_day(bool enabled);
 void        esp_set_marker_max_distance(float metres);// Markers for the current frame, nearest first. Call after esp_get_boxes():
 // it reuses the camera/projection state that call established.
 std::vector<EspMarker> esp_get_markers();
+bool esp_marker_frame_transient();
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.
 void        esp_set_aim_bones_enabled(bool enabled);
 // Temporarily classify verified remote body HitBoxes as Head through the live

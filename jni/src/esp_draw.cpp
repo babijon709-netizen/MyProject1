@@ -112,6 +112,26 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
     return s_boxes;
 }
 
+static const std::vector<EspMarker>& FrameMarkers() {
+    static std::vector<EspMarker> cached;
+    static int cached_frame = -1;
+    static double last_healthy_at = -1e9;
+    const int frame = ImGui::GetFrameCount();
+    if (frame == cached_frame) return cached;
+    cached_frame = frame;
+
+    std::vector<EspMarker> next = esp_get_markers();
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    const bool transient = esp_marker_frame_transient();
+    if (!transient || cached.empty() || now - last_healthy_at > 0.5) {
+        cached = std::move(next);
+        if (!transient) last_healthy_at = now;
+    }
+    return cached;
+}
+
 void DrawEspOverlay() {
     const OverlayGeometry overlay = MakeOverlayGeometry(
         displayInfo.width, displayInfo.height,
@@ -417,7 +437,7 @@ void DrawEspOverlay() {
         float rr = 1.f, rg = 1.f, rb = 1.f;
         ImGui::ColorConvertHSVtoRGB(rainbow_hue, 0.85f, 1.0f, rr, rg, rb);
         const ImU32 rainbow_col = IM_COL32((int)(rr * 255.f), (int)(rg * 255.f), (int)(rb * 255.f), 255);
-        for (const EspMarker& marker : esp_get_markers()) {
+        for (const EspMarker& marker : FrameMarkers()) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
             ImU32 col = marker.rainbow ? rainbow_col

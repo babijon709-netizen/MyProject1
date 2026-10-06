@@ -7796,6 +7796,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
                 case 'B': why = "bottom"; break;
                 case 'T': why = "top"; break;
                 case 'H': why = "h2px"; break;
+                case 'O': why = "offscreen"; break;
             }
             LogLine("визуал: бокс 0x%llx ПРОПАЛ: %s, отказов чтения за кадр %llu%s",
                     (unsigned long long)player, why,
@@ -8101,6 +8102,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     bool local_position_from_player = false;
     bool local_respawning = false;
     Vec3 local{};
+    Vec3 frame_camera_position{};
+    bool frame_camera_position_valid = false;
     size_t local_entity_index = s_transforms.size();
     // Positions are read once per frame here and reused below: the box loop
     // must see exactly the same values the local player was picked with.
@@ -8112,6 +8115,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     {
         Vec3 camera_position{};
         bool has_camera_position = g_camera_matrix_physical_match && camera_position_from_view(view, camera_position);
+        if (has_camera_position) {
+            frame_camera_position = camera_position;
+            frame_camera_position_valid = true;
+        }
         double nearest_distance_squared = INFINITY;
         size_t nearest_index = s_transforms.size();
         size_t first_valid_index = s_transforms.size();
@@ -8366,7 +8373,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         g_local_position_fail_streak = 0;
     }
 
+    // PlayerManager's synchronized local position is stale on some builds: the
+    // log showed it frozen while the live view camera travelled another 185 m.
+    // Keep it for local identity/exclusion and diagnostics, but use the camera
+    // that produced this exact projection frame as the distance origin.
     watch_camera_and_local(view, local);
+    if (frame_camera_position_valid) {
+        local = frame_camera_position;
+        has_local_position = true;
+    }
     note_player_pipeline_health(player_list_ok && live_player_positions > 0);
 
     g_frame_vp = vp;
@@ -8529,6 +8544,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!std::isfinite(height) || height < 2.0F) { skip_reason[i] = 'H'; continue; }
         float cx = (sf.x + sh2.x) * 0.5F;
         float cy = (sf.y + sh2.y) * 0.5F;
+        const float screen_margin = std::max(sw, sh) * 0.25F;
+        if (cx < -screen_margin || cx > sw + screen_margin ||
+            cy < -screen_margin || cy > sh + screen_margin) {
+            skip_reason[i] = 'O';
+            continue;
+        }
         float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
         float half_h = height * 0.5F;
 

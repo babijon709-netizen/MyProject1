@@ -9,8 +9,12 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <csignal>
+#include <cstdint>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <ucontext.h>
 #include <thread>
 #include <time.h>
 #include <unistd.h>
@@ -31,6 +35,9 @@ std::deque<std::string> g_log_queue;
 bool g_writer_run = false;
 unsigned g_log_dropped = 0;
 std::thread g_writer;
+int g_crash_fd = -1;
+volatile sig_atomic_t g_handling_crash = 0;
+alignas(16) unsigned char g_crash_stack[64 * 1024];
 std::atomic<int> g_stage{kStageNone};
 std::atomic<unsigned long> g_frame{0};
 std::atomic<long long> g_beat_ns{0};
@@ -71,6 +78,52 @@ void write_line_locked(const char* text) {
                  ts.tv_nsec / 1000000L, tid, text);
 }
 
+void crash_handler(int signal_number, siginfo_t* info, void* context) {
+    if (g_handling_crash) _exit(128 + signal_number);
+    g_handling_crash = 1;
+
+    uintptr_t pc = 0;
+#if defined(__aarch64__)
+    if (context) pc = (uintptr_t)((ucontext_t*)context)->uc_mcontext.pc;
+#elif defined(__x86_64__) && defined(REG_RIP)
+    if (context) pc = (uintptr_t)((ucontext_t*)context)->uc_mcontext.gregs[REG_RIP];
+#endif
+    char message[384];
+    const long long age_ns = monotonic_ns() - g_beat_ns.load(std::memory_order_relaxed);
+    const int length = std::snprintf(
+        message, sizeof(message),
+        "\nCRASH: signal=%d code=%d fault=0x%llx pc=0x%llx frame=%lu stage=%s(%d) beat-age=%.3fs\n",
+        signal_number, info ? info->si_code : 0,
+        (unsigned long long)(uintptr_t)(info ? info->si_addr : nullptr),
+        (unsigned long long)pc, g_frame.load(std::memory_order_relaxed),
+        stage_name(g_stage.load(std::memory_order_relaxed)),
+        g_stage.load(std::memory_order_relaxed), (double)age_ns / 1e9);
+    if (g_crash_fd >= 0 && length > 0) {
+        write(g_crash_fd, message, (size_t)length);
+        fsync(g_crash_fd);
+    }
+
+    signal(signal_number, SIG_DFL);
+#if defined(SYS_tgkill)
+    syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), signal_number);
+#endif
+    _exit(128 + signal_number);
+}
+
+void install_crash_handlers() {
+    stack_t stack{};
+    stack.ss_sp = g_crash_stack;
+    stack.ss_size = sizeof(g_crash_stack);
+    sigaltstack(&stack, nullptr);
+
+    struct sigaction action{};
+    action.sa_sigaction = crash_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
+    const int signals[] = {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE};
+    for (int value : signals) sigaction(value, &action, nullptr);
+}
+
 void writer_loop() {
     std::unique_lock<std::mutex> lock(g_log_mutex);
     while (g_writer_run || !g_log_queue.empty()) {
@@ -97,6 +150,7 @@ void writer_loop() {
         if (g_log_file && std::ftell(g_log_file) >= kMaxLogBytes) {
             std::fclose(g_log_file);
             g_log_file = nullptr;
+            if (g_crash_fd >= 0) { close(g_crash_fd); g_crash_fd = -1; }
             const std::string old_path = g_log_path + ".old";
             unlink(old_path.c_str());
             rename(g_log_path.c_str(), old_path.c_str());
@@ -106,6 +160,7 @@ void writer_loop() {
                 setvbuf(g_log_file, nullptr, _IOFBF, 64 * 1024);
                 write_line_locked("лог продолжен после ротации 16 МБ; предыдущая часть в xvcen.log.old");
                 std::fflush(g_log_file);
+                g_crash_fd = open(g_log_path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
             }
         }
     }
@@ -134,6 +189,8 @@ void LogOpen() {
     write_line_locked("лог открыт");
     write_line_locked((std::string("файл: ") + g_log_path).c_str());
     std::fflush(g_log_file);
+    g_crash_fd = open(g_log_path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
+    install_crash_handlers();
     g_writer_run = true;
     g_writer = std::thread(writer_loop);
 }
@@ -155,6 +212,10 @@ void LogClose() {
     std::fflush(g_log_file);
     std::fclose(g_log_file);
     g_log_file = nullptr;
+    if (g_crash_fd >= 0) {
+        close(g_crash_fd);
+        g_crash_fd = -1;
+    }
     g_log_path.clear();
     g_log_queue.clear();
 }

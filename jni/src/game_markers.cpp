@@ -45,6 +45,8 @@ static bool g_markers_house_enabled = false;
 // Аим по ботам: скан и позиции ботов живут, даже когда их маркеры выключены.
 static bool g_bot_aim_enabled = false;
 static float g_marker_max_distance = 150.0F;
+static bool g_marker_frame_transient = false;
+bool esp_marker_frame_transient() { return g_marker_frame_transient; }
 // Когда можно начинать следующий проход скана маркеров, в mono_seconds().
 // Раньше здесь был счётчик кадров (180, при пустом списке 30) из расчёта на
 // 60 fps; устройство пользователя рисует 118 кадров/с, поэтому скан шёл вдвое
@@ -1508,6 +1510,7 @@ static void marker_watch_finish(int visible_count) {
 
 std::vector<EspMarker> esp_get_markers() {
     ++s_marker_watch_frame;
+    g_marker_frame_transient = false;
     std::vector<EspMarker> result;
     if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
         !g_markers_loot_enabled && !g_markers_pickup_enabled &&
@@ -1522,6 +1525,7 @@ std::vector<EspMarker> esp_get_markers() {
         return result;
     }
     if (g_pid <= 0 || !g_il2cpp_base) {
+        g_marker_frame_transient = true;
         ++s_marker_watch_frame_early;
         marker_watch_finish(0);
         return result;
@@ -1532,6 +1536,7 @@ std::vector<EspMarker> esp_get_markers() {
     // depend on other players being around.
     if (!g_frame_vp_valid || !g_frame_local_valid) {
         if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
+            g_marker_frame_transient = true;
             ++s_marker_watch_frame_early;
             marker_watch_finish(0);
             return result;
