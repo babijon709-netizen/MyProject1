@@ -922,26 +922,42 @@ uint64_t get_class_static_fields(uint64_t klass) {
     return rd_ptr(klass + IL2CPP_CLASS_STATIC_FIELDS);
 }
 
-static uint64_t resolve_player_list() {
+static int resolve_player_lists(uint64_t out[2]) {
+    out[0] = out[1] = 0;
     if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
         const uint64_t candidate = rd_ptr(g_il2cpp_base + PLAYER_MANAGER_TYPEINFO_RVA);
         if (class_identity(candidate, "PlayerManager", "Oxide") != 0)
             g_player_manager_class = candidate;
     }
-    if (!g_player_manager_class) {
-        return 0;
-    }
+    if (!g_player_manager_class) return 0;
     if (!g_player_manager_static_fields)
         g_player_manager_static_fields = get_class_static_fields(g_player_manager_class);
-    if (!g_player_manager_static_fields) {
-        return 0;
+    if (!g_player_manager_static_fields) return 0;
+
+    // clientPlayerList is normally complete, but during network spawn its
+    // insertion can lag activePlayerList by several frames. Reading only the
+    // client list permanently missed objects on builds where the insertion
+    // callback was skipped. Merge both registries; object-class validation
+    // keeps unrelated or half-destroyed entries out.
+    const uint64_t fields[2] = {
+        PLAYER_MANAGER_STATIC_FIELDS_LIST,
+        PLAYER_MANAGER_STATIC_FIELDS_ACTIVE_LIST,
+    };
+    int count = 0;
+    for (uint64_t field : fields) {
+        const uint64_t list = rd_ptr(g_player_manager_static_fields + field);
+        if (!validate_player_list(list, g_player_manager_class)) continue;
+        bool duplicate = false;
+        for (int i = 0; i < count; ++i) duplicate |= out[i] == list;
+        if (!duplicate) out[count++] = list;
     }
-    uint64_t list = rd_ptr(g_player_manager_static_fields + PLAYER_MANAGER_STATIC_FIELDS_LIST);
-    if (!validate_player_list(list, g_player_manager_class)) {
-        g_player_manager_static_fields = 0;
-        return 0;
-    }
-    return list;
+    if (count == 0) g_player_manager_static_fields = 0;
+    return count;
+}
+
+static uint64_t resolve_player_list() {
+    uint64_t lists[2]{};
+    return resolve_player_lists(lists) > 0 ? lists[0] : 0;
 }
 
 // Сколько кадров подряд прежний адрес игрока не подтверждается чтением. Три —
@@ -4183,64 +4199,67 @@ static bool optimize_matrix_configuration(uint64_t native_camera, const std::vec
 static std::vector<uint64_t> read_configured_player_transforms(bool* player_list_ok) {
     if (player_list_ok) *player_list_ok = false;
     std::vector<uint64_t> transforms;
-    uint64_t list = resolve_player_list();
-    if (!list) return transforms;
+    uint64_t lists[2]{};
+    int list_count = resolve_player_lists(lists);
+    if (list_count == 0) return transforms;
 
     uint64_t local_player = resolve_local_player();
-    if (local_player && !player_list_contains(list, local_player)) {
-        // Alone on the server the player list is empty — the local player
-        // is only registered there while networked players are around. He is
-        // still perfectly valid (his class just re-checked in the resolver),
-        // and dropping him here was what killed markers/farm solo: the frame
-        // below never got a local position. Only treat him as stale when the
-        // list actually has entries that he is missing from.
-        int32_t list_count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (list_count > 0) {
+    if (local_player) {
+        bool contained = false;
+        bool any_nonempty = false;
+        for (int i = 0; i < list_count; ++i) {
+            contained |= player_list_contains(lists[i], local_player);
+            const int32_t count = rd<int32_t>(lists[i] + IL2CPP_LIST_SIZE);
+            any_nonempty |= count > 0 && count <= 512;
+        }
+        if (!contained && any_nonempty) {
             if (local_player == g_local_player) g_local_player = 0;
             local_player = 0;
         }
     }
-    uint64_t local_source = local_player;
+    const uint64_t local_source = local_player;
 
     for (int attempt = 0; attempt < 3; ++attempt) {
         if (attempt > 0) {
-            uint64_t refreshed_list = resolve_player_list();
-            if (refreshed_list) list = refreshed_list;
-        }
-        uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
-        int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (!items || count <= 0 || count > 512) {
-            // Empty is a healthy list state.  Report it separately from a
-            // failed resolver so camera-only publication cannot mask failures.
-            //
-            // Массив элементов у пустого List может быть и нулевым (old_source
-            // проверял только count): если свой PlayerManager известен, его
-            // одного хватает всему конвейеру — камера, проверка матрицы и
-            // локальная позиция считаются по одному отсчёту.
-            if (count == 0) {
-                if (player_list_ok) *player_list_ok = true;
-                // A known local player is enough for camera/matrix validation.
-                if (local_source) return {local_source};
-                return transforms;
-            }
-            continue;
+            const int refreshed_count = resolve_player_lists(lists);
+            if (refreshed_count > 0) list_count = refreshed_count;
         }
 
         std::vector<uint64_t> snapshot;
-        snapshot.reserve((size_t)count + 1);
+        snapshot.reserve(32);
         if (local_source) snapshot.push_back(local_source);
+        bool stable = true;
+        bool healthy = false;
 
-        for (int32_t index = 0; index < count; ++index) {
-            uint64_t player = rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
-            if (!player) continue;
-            if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) continue;
-            if (player == local_source) continue;
-            snapshot.push_back(player);
+        for (int list_index = 0; list_index < list_count; ++list_index) {
+            const uint64_t list = lists[list_index];
+            const uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
+            const int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
+            if (count < 0 || count > 512 || (count > 0 && !items)) {
+                stable = false;
+                break;
+            }
+            healthy = true;
+
+            for (int32_t index = 0; index < count; ++index) {
+                const uint64_t player = rd_ptr(
+                    items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
+                if (!player || player == local_source) continue;
+                if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) continue;
+                bool duplicate = false;
+                for (uint64_t known : snapshot) duplicate |= known == player;
+                if (!duplicate) snapshot.push_back(player);
+            }
+
+            const uint64_t confirmed_items = rd_ptr(list + IL2CPP_LIST_ITEMS);
+            const int32_t confirmed_count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
+            if (items != confirmed_items || count != confirmed_count) {
+                stable = false;
+                break;
+            }
         }
 
-        uint64_t confirmed_items = rd_ptr(list + IL2CPP_LIST_ITEMS);
-        int32_t confirmed_count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-        if (items == confirmed_items && count == confirmed_count && !snapshot.empty()) {
+        if (healthy && stable) {
             if (player_list_ok) *player_list_ok = true;
             return snapshot;
         }

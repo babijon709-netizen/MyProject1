@@ -83,6 +83,7 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDCC45F8; // release 11945: outer 0xD9755E0 -> R_AARCH64_RELATIVE addend; PlayerManager self slot
 // Cysharp.Threading.Tasks.PlayerLoopHelper; re-derived from this release ELF.
 inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDCC45C8; // release 11945: outer 0xD974480 -> addend
+inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_ACTIVE_LIST = 0x08; // activePlayerList
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
 
