@@ -7,7 +7,6 @@
 #include "ui_util.h"
 #include "aim.h"                 // AimSensitivityScale/Gain
 #include "esp_draw.h"            // FrameBoxes
-#include "widgets.h"             // g_sheet, g_pop (пауза при открытом окне)
 #include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
 #include <cmath>
@@ -57,7 +56,7 @@ float g_farmTgtDist = 0.f;   // метры до точки прицела
 float g_farmReach = 0.f;     // FPMelee.m_MaxReach + hitRadius орудия в руках, м
 int  g_farmTgtKind = 0;      // ресурс текущей цели
 int  g_farmSpot = 0;         // 0 — крестика нет, иначе его источник (1 руда, 2/3 дерево)
-bool g_farmPaused = false;   // цель видна, но ввод остановлен (открыто меню / работает аимбот)
+bool g_farmPaused = false;   // Target is visible, but aim or calibration owns input.
 int  g_farmStreak = 0;       // hitstreakIndex: сколько подряд попали в крестик
 float g_farmHpPct = -1.f;    // здоровье узла в процентах (-1 = не читается)
 float g_farmSpotLife = -1.f; // сколько секунд осталось жить крестику (-1 = неизвестно)
@@ -284,7 +283,6 @@ static void UpdateFarmInner(float dt) {
     esp_farm_set_resources(mask);
     esp_farm_set_range(g_state.farm_range);
 
-    const bool menuBlocked = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     if (mask == 0 || !g_esp_attached) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
@@ -293,14 +291,10 @@ static void UpdateFarmInner(float dt) {
         resetNode(); s_settle = 0.f; s_lostTime = 0.f;
         return;
     }
-    // Водим пальцами только когда ничто не мешает: аимбот владеет камерой,
-    // пока ведёт игрока (фарм уступает полностью), открытое меню и калибровка
-    // зон — тоже пауза. Уступаем и мемори-режимам аима: пальца там нет, а
-    // камеру (или ось выстрела) аим всё равно крутит. А вот цель читаем всегда: иначе строка статуса в окне
-    // автофарма показывала бы «простой» ровно тогда, когда на неё смотрят
-    // (само это окно и ставит бота на паузу).
-    const bool driving = !menuBlocked && !s_fingerDown && !g_aimActive &&
-                         g_calibMode == 0;
+    // Aim owns the camera while tracking a player, and calibration owns the
+    // physical touch used to select a control zone. Menu and popover windows
+    // do not pause farming, so opening its status/settings cannot stop it.
+    const bool driving = !s_fingerDown && !g_aimActive && g_calibMode == 0;
 
     float sw = (float)native_window_screen_x;
     float sh = (float)native_window_screen_y;

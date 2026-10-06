@@ -13,7 +13,6 @@
 #include "str.h"               // XS(): строки интерфейса зашифрованы в бинарнике
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
-#include "widgets.h"             // g_sheet, g_pop
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -203,28 +202,22 @@ struct AimPick {
                    velYaw = 0.f; velPitch = 0.f; }
 };
 
-// Начало такта: общие проверки и размер экрана. false — в этом кадре аим
-// работать не должен (меню, калибровка зон, нет привязки, «только в прицеле»
-// без прицела). dt приводится к рабочему диапазону на месте.
-// Коды причины «аим молчит» (AimMemDiag.inactive):
-//   1 аим выключен          2 нет привязки к процессу   3 открыто меню
-//   4 калибровка зон        6 включён фрикам
-//   7 «только с прицелом», а прицела нет                8 не определён экран
-// Признак «в прицеле» и цепочка, которой он прочитан. Запоминаются в AimBegin,
-// потому что на пути «аим молчит» диагностика чистится целиком, и иначе в логе
-// остался бы ноль — он читается как «цепочка не подтвердилась», хотя проверка
-// могла ответить честно и просто «прицела нет».
+// Common per-frame checks. Calibration, detached state, freecam, and the
+// scope-only condition can pause aiming; regular menu and popover windows do
+// not. The reason code is recorded in AimMemDiag.inactive:
+//   1 disabled              2 game process detached
+//   4 zone calibration      6 freecam enabled
+//   7 scope-only without ADS                               8 invalid screen
+// ADS state and its source are retained because the inactive path clears the
+// rest of the diagnostics.
 static int  s_adsState  = -1;   // 1 в прицеле, 0 нет, -1 режим выключен
 static int  s_adsSource = 0;    // 1 Aim, 2 isAiming, 0 не подтвердилась
 
 static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     g_aimActive = false;
-    const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
-    // Во время калибровки зон (тапом по экрану) аим ничего не трогает: иначе
-    // он водил бы камеру прямо под пальцем пользователя.
-    // Во фрикаме аим молчит: камера улетела от тела, а точка прицела считается
-    // от глаза персонажа — доворачивать камеру по ней было бы некуда.
-    bool active = g_state.aim_touch && g_esp_attached && !menuOpen &&
+    // Calibration owns the physical touch used to select a screen point.
+    // Freecam owns the camera and cannot share its look controller with aim.
+    bool active = g_state.aim_touch && g_esp_attached &&
                   g_calibMode == 0 && !g_state.freecam_on;
 
     // "Только с прицелом": only steer while the local player is ADS.
@@ -242,7 +235,6 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
         if (why) {
             if (!g_state.aim_touch)                  *why = 1;
             else if (!g_esp_attached)                *why = 2;
-            else if (menuOpen)                       *why = 3;
             else if (g_calibMode != 0)               *why = 4;
             else if (g_state.freecam_on)             *why = 6;
             else                                     *why = 7;
