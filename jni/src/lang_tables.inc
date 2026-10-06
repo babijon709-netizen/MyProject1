@@ -33,6 +33,7 @@ static const LangPair kUiEn[] = {
     {"Быстрый подбор", "Fast pickup"},
     {"В прицеле FOV и руки возвращаются к штатным значениям.", "FOV and hands return to defaults while aiming."},
     {"Вверх", "Up"},
+    {"Версия игры", "Game version"},
     {"Вкл", "On"},
     {"Включено", "On"},
     {"Вниз", "Down"},

@@ -1176,7 +1176,7 @@ static Mat4 mat_mul(const Mat4& a, const Mat4& b);
 // позиции не дал ни один (GameObject на месте Transform даёт мусор в +0x38).
 static constexpr uint64_t GAMEOBJECT_COMPONENT_COUNT  = 0x30;  // число компонентов
 static constexpr uint64_t GAMEOBJECT_COMPONENT_STRIDE = 0x10;  // размер пары
-static constexpr uint64_t TRANSFORM_ACCESS_HIERARCHY  = TRANSFORM_HIERARCHY_DATA;
+static const uint64_t TRANSFORM_ACCESS_HIERARCHY = TRANSFORM_HIERARCHY_DATA;
 
 static uint64_t transform_from_gameobject(uint64_t gameobject) {
     if (gameobject < 0x10000) return 0;

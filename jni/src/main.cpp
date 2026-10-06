@@ -17,6 +17,7 @@
 #include "app_state.h"
 #include "overlay_geometry.h"
 #include "mode_select.h"
+#include "version_select.h"
 #include "metadata_dump.h"
 #include "mem_io.h"
 #include "kernel_io.h"
@@ -338,6 +339,22 @@ int main(int argc, char* argv[]) {
                 Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
         }
     }).detach();
+    // Экран выбора версии игры (Release / Beta): пакет у обоих клиентов один,
+    // поэтому оффсеты (go_active) выбирает пользователь. Собственный цикл
+    // отрисовки, до любого чтения памяти игры.
+    if (!versionsel::RunVersionSelect()) {
+        // Закрыли сигналом до выбора версии: тот же порядок teardown, что и у
+        // отмены выбора режима ниже (attach и чит-конвейеры ещё не стартовали).
+        silent_aim::shutdown();
+        esp_freecam_set(false);
+        stop_attach_thread();
+        esp_viewmodel_reset(true);
+        process_detach();
+        Blur::Free();
+        CfgWatchFree();
+        AudioFree();
+        shutdown(); Touch_Close(); return 0;
+    }
     // Экран выбора режима (экстернал / кернел-драйвер): собственный цикл
     // отрисовки, поток привязки стартует ТОЛЬКО после выбора — транспорт
     // памяти задаётся один раз, до первого bind.
