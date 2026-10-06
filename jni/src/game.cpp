@@ -7949,16 +7949,26 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<uint64_t>& s_transforms = g_frame_transforms;
     bool player_list_ok = false;
     std::vector<uint64_t> refreshed = read_configured_player_transforms(&player_list_ok);
-    // A stable registry snapshot is authoritative: players absent from it
-    // have left and disappear immediately. If the registry itself is
-    // unreadable, player_list_ok is false and the previous snapshot is kept.
+    // One incomplete registry sample must not remove a player. This matters at
+    // low FPS because one bad frame stays visible much longer. Two consecutive
+    // stable snapshots must agree on the absence; an unreadable list keeps the
+    // previous snapshot without advancing the confirmation.
     if (player_list_ok) {
+        for (uint64_t player : refreshed) g_frame_transforms_lost.erase(player);
+
         for (uint64_t previous : s_transforms) {
             bool present = false;
             for (uint64_t player : refreshed) {
                 if (player == previous) { present = true; break; }
             }
             if (present) continue;
+
+            int& missing_snapshots = g_frame_transforms_lost[previous];
+            if (++missing_snapshots < 2) {
+                refreshed.push_back(previous);
+                continue;
+            }
+
             g_player_track.erase(previous);
             g_player_aux.erase(previous);
             g_player_text.erase(previous);
