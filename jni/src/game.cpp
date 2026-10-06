@@ -147,6 +147,10 @@ void esp_set_xray(float meters) {
 // Нативный указатель камеры последнего кадра: его находит esp_get_boxes, а
 // фрикаму нужен трансформ камеры, чтобы двигать её.
 static uint64_t g_native_camera = 0;
+// Camera resolver anchors are stable for a world. Keeping them avoids making
+// every ESP frame depend on four unrelated pointer reads succeeding together.
+static uint64_t g_game_controller_static_fields_cached = 0;
+static uint64_t g_camera_manager_cached = 0;
 
 static void xray_apply(uint64_t native_cam) {
     if (!native_cam) return;
@@ -7398,6 +7402,9 @@ void esp_reset() {
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;
     g_pid = -1; g_il2cpp_base = 0;
+    g_native_camera = 0;
+    g_game_controller_static_fields_cached = 0;
+    g_camera_manager_cached = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
@@ -7443,25 +7450,60 @@ float g_last_overlay_sh = 2400.0F;
 // the autofarm alive when the player list is empty or the box pipeline
 // failed: the camera IS where the local player is.
 
+static uint64_t resolve_native_camera_pointer(bool allow_last_confirmed) {
+    if (!g_game_controller_static_fields_cached && g_game_controller_class)
+        g_game_controller_static_fields_cached = get_class_static_fields(g_game_controller_class);
+
+    if (g_game_controller_static_fields_cached) {
+        const uint64_t manager = rd_ptr(g_game_controller_static_fields_cached +
+                                        GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
+        if (manager) g_camera_manager_cached = manager;
+    }
+
+    if (g_camera_manager_cached) {
+        const uint64_t managed = rd_ptr(g_camera_manager_cached + CAMERA_MANAGER_CAMERA_FIELD);
+        if (managed) {
+            const uint64_t native = rd_ptr(managed + MANAGED_CACHED_PTR);
+            if (native) return native;
+        }
+    }
+    return allow_last_confirmed ? g_native_camera : 0;
+}
+
+static bool read_camera_frame(float aspect, uint64_t& native, Mat4& projection, Mat4& view) {
+    native = resolve_native_camera_pointer(true);
+    if (native && read_native_camera_matrices(native, aspect, projection, view)) {
+        xray_apply(native);
+        always_day_tick();
+        return true;
+    }
+
+    // A stale anchor after a camera/world replacement must not pin recovery to
+    // the old object. Re-resolve once from the class, but retain the last native
+    // pointer across ordinary EIO bursts.
+    g_game_controller_static_fields_cached = 0;
+    g_camera_manager_cached = 0;
+    const uint64_t refreshed = resolve_native_camera_pointer(false);
+    if (refreshed && refreshed != native &&
+        read_native_camera_matrices(refreshed, aspect, projection, view)) {
+        native = refreshed;
+        xray_apply(native);
+        always_day_tick();
+        return true;
+    }
+    return false;
+}
+
 bool publish_camera_only_frame(float sw, float sh) {
     if (g_pid <= 0 || !g_il2cpp_base) return false;
     // Resolves g_game_controller_class as a side effect — without it the
     // camera lookup below has no class to read statics from.
     resolve_local_player();
     if (!g_game_controller_class) return false;
-    uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
-    if (!gcb_sf) return false;
-    uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
-    if (!cam_mgr) return false;
-    uint64_t managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
-    if (!managed_cam) return false;
-    uint64_t cam_native = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-    if (!cam_native) return false;
     if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
     Mat4 solo_proj{}, solo_view{};
-    xray_apply(cam_native);
-    always_day_tick();
-    if (!read_native_camera_matrices(cam_native, sw / sh, solo_proj, solo_view)) return false;
+    uint64_t cam_native = 0;
+    if (!read_camera_frame(sw / sh, cam_native, solo_proj, solo_view)) return false;
     Vec3 cam_pos{};
     if (!camera_position_from_view(solo_view, cam_pos)) return false;
     g_frame_vp = mat_mul(solo_proj, solo_view);
@@ -8046,22 +8088,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
     if (!transform_camera_mode) {
-        uint64_t managed_cam = 0;
-        if (g_game_controller_class) {
-            uint64_t gcb_sf = get_class_static_fields(g_game_controller_class);
-            if (gcb_sf) {
-                            uint64_t cam_mgr = rd_ptr(gcb_sf + GAME_CONTROLLER_CAMERA_MANAGER_FIELD);
-                if (cam_mgr) managed_cam = rd_ptr(cam_mgr + CAMERA_MANAGER_CAMERA_FIELD);
-            }
-        }
-        if (!managed_cam) return transient_return(3);
-        native_cam = rd_ptr(managed_cam + MANAGED_CACHED_PTR);
-        if (!native_cam) return transient_return(4);
-        xray_apply(native_cam);
-        always_day_tick();
-        // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
-        if (!read_native_camera_matrices(native_cam, sw / sh, projection, view))
+        // The uploaded log showed multi-second outages almost exclusively at
+        // the managed-camera chain (early=3). Read through stable cached
+        // anchors and fall back to the last confirmed native camera when one
+        // pointer read fails; the matrix read still validates that fallback.
+        if (!read_camera_frame(sw / sh, native_cam, projection, view))
             return transient_return(5);
+        // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
         if (!g_matrix_configuration_validated) {
             if (!optimize_matrix_configuration(native_cam, s_transforms))
                 return transient_return(6);
