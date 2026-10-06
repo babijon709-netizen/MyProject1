@@ -29,8 +29,6 @@ LOCAL_SRC_FILES := \
     src/game.cpp src/game_viewmodel.cpp src/game_markers.cpp src/game_farm.cpp src/logfile.cpp \
     src/lang.cpp \
     src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
-    src/VidAvatar.cpp \
-    src/third_party/tjpgd/tjpgd.c \
     src/Blur/Blur.cpp \
     src/ImGui/imgui.cpp src/ImGui/imgui_draw.cpp src/ImGui/imgui_tables.cpp \
     src/ImGui/imgui_widgets.cpp src/ImGui/backends/imgui_impl_android.cpp \
