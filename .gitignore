@@ -6,7 +6,7 @@ dist/
 .stubs/
 
 # диагностический лог устройства (присылается отдельно)
-xvcen.log
+benzware.log
 
 # externally supplied game dumps
 google_drive/

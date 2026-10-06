@@ -22,9 +22,9 @@
 namespace {
 
 constexpr const char* kPrimaryDir = "/storage/emulated/0/Download";
-constexpr const char* kPrimaryPath = "/storage/emulated/0/Download/xvcen.log";
+constexpr const char* kPrimaryPath = "/storage/emulated/0/Download/benzware.log";
 constexpr const char* kFallbackDir = "/storage/emulated/0/benzware";
-constexpr const char* kFallbackPath = "/storage/emulated/0/benzware/xvcen.log";
+constexpr const char* kFallbackPath = "/storage/emulated/0/benzware/benzware.log";
 constexpr long kMaxLogBytes = 16L * 1024L * 1024L;
 
 std::mutex g_log_mutex;
@@ -158,7 +158,7 @@ void writer_loop() {
             if (g_log_file) {
                 chmod(g_log_path.c_str(), 0666);
                 setvbuf(g_log_file, nullptr, _IOFBF, 64 * 1024);
-                write_line_locked("лог продолжен после ротации 16 МБ; предыдущая часть в xvcen.log.old");
+                write_line_locked("лог продолжен после ротации 16 МБ; предыдущая часть в benzware.log.old");
                 std::fflush(g_log_file);
                 g_crash_fd = open(g_log_path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
             }

@@ -17,7 +17,7 @@ enum LogStageId {
     kStageCount
 };
 
-// The primary destination is /storage/emulated/0/Download/xvcen.log.
+// The primary destination is /storage/emulated/0/Download/benzware.log.
 // A private shared-storage fallback is used only when Download is unavailable.
 void LogOpen();
 void LogClose();
