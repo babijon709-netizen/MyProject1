@@ -80,7 +80,7 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // мусор 0xa000b409/0xa000b3fd (это «таблица типов v2» протектора S16 из
 // малых целых, НЕ слоты классов). Перекрёстное подтверждение: PM-PLH = 0x30,
 // как и в прошлом рабочем билде (0xD9C5310/0xD9C52E0).
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDCC3928; // release 11945: outer 0xD9738D0 -> R_AARCH64_RELATIVE addend
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDCC45F8; // release 11945: outer 0xD9755E0 -> R_AARCH64_RELATIVE addend; PlayerManager self slot
 // Cysharp.Threading.Tasks.PlayerLoopHelper; re-derived from this release ELF.
 inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDCC45C8; // release 11945: outer 0xD974480 -> addend
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
