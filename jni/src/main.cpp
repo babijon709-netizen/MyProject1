@@ -412,6 +412,20 @@ int main(int argc, char* argv[]) {
         esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
         LogStage(kStageEsp);
         DrawEspOverlay();
+        {
+            // Пользователь выбрал не ту версию — привязка это поймала по
+            // fingerprint libil2cpp и уже поменяла набор оффсетов. Одно событие
+            // на привязку, тост одной строкой.
+            static int version_autocorrect_last = 0;
+            const int corrected = esp_version_autocorrected();
+            if (corrected && corrected != version_autocorrect_last) {
+                version_autocorrect_last = corrected;
+                ShowToast(corrected == 2 ? XS("Выбран не тот клиент — включена Beta")
+                                       : XS("Выбран не тот клиент — включён Release"));
+            } else if (!corrected) {
+                version_autocorrect_last = 0;
+            }
+        }
         slowMark();   // 1: после ESP
         UpdateAim(ImGui::GetIO().DeltaTime);
         slowMark();   // 2: после аима

@@ -10,6 +10,7 @@
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // compile-time offsets текущего релиза
+#include "version_select.h"        // versionsel::ApplyVersion — автофикс ошибочного выбора версии
 #include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
@@ -7043,6 +7044,54 @@ static EspAttachState g_attach_state = ESP_ATTACH_OK;
 
 EspAttachState esp_attach_state() { return g_attach_state; }
 
+// FNV-1a по трём 128-байтовым кускам .text libil2cpp: релиз (dump11945) и
+// бета (dumpbeta11943) ставятся под одним именем пакета, отличить их по имени
+// нельзя — поэтому есть экран «Версия игры», а этот отпечаток (sha-chain:
+// содержимое обоих образов в .text расходится везде) ловит неверный выбор
+// ДО резолвинга классов. Иначе base_resolves_game() валится на каждой попытке
+// привязки, fallback хватает мёртвый/чужой образ и дальше весь конвейер
+// бесконечно переразрешает классы — внешне это и есть «оверлей жутко лагает».
+struct Il2cppFingerprint { uint64_t rva, release_hash, beta_hash; };
+static constexpr Il2cppFingerprint kIl2cppFingerprints[] = {
+    {0x300000,  0xb7915b78ca9f1245ULL, 0x088403d3f84da651ULL},
+    {0xa00000,  0x69e5c8bc532aadd6ULL, 0xa931199f1c19b45bULL},
+    {0x1000000, 0x04e759f3c35c9bf3ULL, 0x2b07c64bfd8e7b54ULL},
+};
+
+static uint64_t fnv1a64(const uint8_t* data, size_t len) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < len; ++i) { h ^= data[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+// 0 = релиз, 1 = бета, -1 = определить не удалось (образ не читается/не тот).
+static int detect_game_version(pid_t pid, const uint64_t* candidates, int count) {
+    for (int i = 0; i < count && i < 4; ++i) {
+        if (!g_mem.bind(pid, candidates[i])) continue;
+        int release_votes = 0, beta_votes = 0;
+        bool any = false;
+        for (const Il2cppFingerprint& fp : kIl2cppFingerprints) {
+            uint8_t chunk[128];
+            if (!g_mem.read_quiet(candidates[i] + fp.rva, chunk, sizeof(chunk))) continue;
+            any = true;
+            const uint64_t h = fnv1a64(chunk, sizeof(chunk));
+            if (h == fp.release_hash) ++release_votes;
+            else if (h == fp.beta_hash) ++beta_votes;
+        }
+        g_mem.unbind();
+        if (any && release_votes == (int)(sizeof(kIl2cppFingerprints) / sizeof(kIl2cppFingerprints[0]))) return 0;
+        if (any && beta_votes == (int)(sizeof(kIl2cppFingerprints) / sizeof(kIl2cppFingerprints[0]))) return 1;
+    }
+    return -1;
+}
+
+// Сигнал главному циклу показать тост: выбор пользователя не совпал с
+// фактической версией клиента, оффсеты переключены автоматически.
+// 0 = нет события, 1 = переключено на релиз, 2 = переключено на бету.
+static std::atomic<int> g_version_autocorrected{0};
+
+int esp_version_autocorrected() { return g_version_autocorrected.exchange(0); }
+
 bool esp_init(pid_t pid, bool package_verified_release) {
     std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
     esp_reset();
@@ -7056,6 +7105,18 @@ bool esp_init(pid_t pid, bool package_verified_release) {
         g_pid = -1;
         // Без базового адреса читать нечего.
         return false;
+    }
+
+    // Неверный выбор версии на старте = гарантированный провал резолвинга и
+    // вечная переразрешалка. Проверяем ОДИН раз на привязку (десяток чтений),
+    // и если куски .text говорят «другой билд» — чиним выбор сами.
+    {
+        const int detected = detect_game_version(pid, candidates, candidate_count);
+        const int current = go_active::IsBeta() ? 1 : 0;
+        if (detected >= 0 && detected != current) {
+            versionsel::ApplyVersion(detected == 1);
+            g_version_autocorrected.store(detected + 1);
+        }
     }
 
     // База выбирается не «первая по имени в карте», а та, на которой РЕАЛЬНО

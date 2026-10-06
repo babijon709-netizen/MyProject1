@@ -54,6 +54,17 @@ static void RememberVersion(bool beta) {
     if (f) f << (beta ? "beta" : "release");
 }
 
+// Применить выбранную версию к go_active и запомнить для следующего запуска.
+// Дёргается и из экрана выбора, и из esp_init — когда fingerprint libil2cpp
+// показал, что пользователь ткнул не в ту кнопку (имя пакета у версий
+// одинаковое, поэтому автодетект им невозможен и нужен этот двухкнопочный
+// выбор, а неверный выбор ломал бы резолвинг ВСЕХ классов).
+inline void ApplyVersion(bool beta) {
+    RememberVersion(beta);
+    if (beta) go_active::UseBeta();
+    else      go_active::UseRelease();
+}
+
 // ---- кнопка версии (корпус как у карточек mode_select) ---------------------
 
 static bool VersionButton(const char* id, float w, float h, const char* title,
@@ -171,12 +182,7 @@ static bool RunVersionSelect() {
 
     // Выбор задаёт набор оффсетов один раз, до привязки и до старта
     // какого-либо чтения — потребители go_active дальше не знают про версии.
-    const bool beta = (picked == 1);
-    if (picked >= 0) {
-        RememberVersion(beta);
-        if (beta) go_active::UseBeta();
-        else      go_active::UseRelease();
-    }
+    if (picked >= 0) ApplyVersion(picked == 1);
     return picked >= 0;
 }
 

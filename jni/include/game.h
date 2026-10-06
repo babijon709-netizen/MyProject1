@@ -110,6 +110,10 @@ enum EspAttachState {
 bool          esp_init(pid_t pid, bool package_verified_release = false);
 void          esp_reset();
 EspAttachState esp_attach_state();
+// Одноразовый флаг «выбор версии исправлен по fingerprint libil2cpp»:
+// 0 нет, 1 переключено на релиз, 2 переключено на бету. Читается одним
+// потребителем (главный цикл) для тоста.
+int           esp_version_autocorrected();
 // Начало кадра: сброс кэша блоков памяти игры (см. mem_io.h).
 void          esp_mem_frame_begin();
 // Способ доступа к памяти игры. Выбирается один раз на старте, ДО первого
