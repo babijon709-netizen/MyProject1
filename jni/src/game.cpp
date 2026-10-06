@@ -71,6 +71,9 @@ int esp_mem_last_errno() { return g_mem.last_error(); }
 bool esp_silent_target(int pid) {
     return g_mem.bound() && g_mem.pid() == pid;
 }
+pid_t esp_target_pid() {
+    return g_mem.bound() ? g_mem.pid() : -1;
+}
 bool esp_silent_read(uint64_t addr, void* out, size_t len) {
     return g_mem.bound() && g_mem.read_quiet(addr, out, len);
 }

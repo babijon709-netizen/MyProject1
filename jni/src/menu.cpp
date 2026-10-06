@@ -1013,6 +1013,13 @@ float TabContent(int tab, float dt, float cW) {
         if (oldFastFire != g_state.fast_fire || oldFastReload != g_state.fast_reload)
             esp_viewmodel_tick(vm);
 
+        SHdr(XS("Сеть"));
+        CardBg(Layout::RowH + Layout::SliderH);
+        ToggleRow("##fakelag", XS("FakeLag"), &g_state.fake_lag,
+                  g_state.a_fake_lag, false, true);
+        SliderRow("##fakelagpct", XS("Интенсивность"), &g_state.fake_lag_percent,
+                  10.f, 85.f, XS("%.0f%%"), true, false, g_state.sl_fake_lag, dt);
+
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);
         const bool oldLoot = vm.fast_loot;
@@ -1829,6 +1836,7 @@ void RenderMenu() {
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_fast_fire, g_state.fast_fire, dt);
     Tick(g_state.a_fast_reload, g_state.fast_reload, dt);
+    Tick(g_state.a_fake_lag, g_state.fake_lag, dt);
     Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);
     Tick(g_state.a_fps_120, g_state.viewmodel.fps_limit == 120, dt);
     Tick(g_state.a_fps_144, g_state.viewmodel.fps_limit == 144, dt);

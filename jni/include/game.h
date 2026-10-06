@@ -133,6 +133,7 @@ int           esp_mem_last_errno();
 // и не мешает рендер-потоку; esp_silent_target проверяет, что игра
 // привязана именно к этому pid выбранным транспортом.
 bool          esp_silent_target(int pid);
+pid_t         esp_target_pid();
 bool          esp_silent_read(uint64_t addr, void* out, size_t len);
 bool          esp_silent_write(uint64_t addr, const void* in, size_t len);
 // Привязка ещё читается? (одно чтение; ловит перезапуск процесса и отобранный доступ)

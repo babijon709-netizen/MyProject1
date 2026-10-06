@@ -9,6 +9,7 @@
 #include "aim.h"
 #include "silent_aim.h"
 #include "farm.h"
+#include "fake_lag.h"
 #include "widgets.h"
 #include "menu.h"
 #include "config.h"
@@ -345,6 +346,7 @@ int main(int argc, char* argv[]) {
         // что и обычный выход (привязки и чит-конвейеров ещё нет — их
         // остановка здесь пустая, но последовательность та же).
         silent_aim::shutdown();
+        fake_lag::shutdown();
         esp_freecam_set(false);
         stop_attach_thread();
         esp_viewmodel_reset(true);
@@ -392,6 +394,8 @@ int main(int argc, char* argv[]) {
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
+        fake_lag::update(g_state.fake_lag, (int)std::lround(g_state.fake_lag_percent),
+                         esp_target_pid());
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
@@ -462,6 +466,8 @@ int main(int argc, char* argv[]) {
         }
         g_frame_done.store(true);
     }
+    // Remove network rules while the log is still available for diagnostics.
+    fake_lag::shutdown();
     LogClose();
     while (!g_frame_done.load()) {}
     // Сначала останавливаем фонового writer: во время восстановления камеры и
