@@ -332,9 +332,8 @@ int main(int argc, char* argv[]) {
     if (!Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, false))
         Touch_Init(displayInfo.width, displayInfo.height, displayInfo.orientation, true);
     // Полное скрытие процесса: оверлей и тач подняты — дальше живём
-    // «невидимкой»: отвязка от терминала, ptrace-слот занят потомком
-    // (attach отладчиков запрещён), бинарник убирается с диска и
-    // восстанавливается на выходе (в т.ч. по фатальным сигналам).
+    // «невидимкой»: отвязка от терминала и ptrace-слот, занятый потомком
+    // (attach отладчиков запрещён). Бинарник остаётся на диске.
     stealth::ApplyRuntime();
     // Если полноценный тач не поднялся с первого раза (гонка за /dev/uinput
     // или grab на старте — обычное дело сразу после запуска игры), чит раньше
@@ -357,12 +356,12 @@ int main(int argc, char* argv[]) {
         // Приложение закрыли, не выбрав режим: выходим тем же порядком,
         // что и обычный выход (привязки и чит-конвейеров ещё нет — их
         // остановка здесь пустая, но последовательность та же).
-        // Remove the Surface first so a slow worker shutdown cannot leave a
-        // frozen overlay covering the screen.
+        // Arm the deadline before touching EGL: a wedged compositor must not
+        // keep the last overlay frame on screen indefinitely.
+        ArmShutdownDeadline();
         Blur::Free();
         shutdown();
         Touch_Close();
-        ArmShutdownDeadline();
         fake_lag::shutdown();
         silent_aim::shutdown();
         esp_freecam_set(false);
@@ -425,11 +424,22 @@ int main(int argc, char* argv[]) {
         // Индикация привязки (тосты «игра найдена / не найдена») убрана:
         // состояние видно по счётчику игроков в пилюле.
         RenderMenu();
+        // The close button is handled inside RenderMenu. Do not submit one
+        // final frame after it: eglSwapBuffers can block while Android is
+        // tearing the Surface down, leaving the last overlay image frozen.
+        if (!main_thread_flag.load(std::memory_order_acquire)) {
+            g_frame_done.store(true, std::memory_order_release);
+            break;
+        }
         slowMark();   // 4: после меню
         LogStage(kStageFreecam);
         UpdateFreecam(ImGui::GetIO().DeltaTime);   // фрикам: полёт камеры
         AimEndFrame(); // закрыть lease, если меню/фрикам выключили сайлент позднее
         slowMark();   // 5: после фрикама
+        if (!main_thread_flag.load(std::memory_order_acquire)) {
+            g_frame_done.store(true, std::memory_order_release);
+            break;
+        }
         LogStage(kStageFrameEnd);
         drawEnd();
         slowMark();   // 6: после свопа
@@ -483,13 +493,12 @@ int main(int argc, char* argv[]) {
         }
         g_frame_done.store(true);
     }
-    // Destroy the visible Surface before joining any worker. Some transport,
-    // writer or root-command shutdowns can take time; they must run after the
-    // overlay has already disappeared from the screen.
+    // Start the deadline before EGL teardown as well: the compositor itself
+    // may be the blocked component holding the last overlay frame on screen.
+    ArmShutdownDeadline();
     Blur::Free();
     shutdown();
     Touch_Close();
-    ArmShutdownDeadline();
     while (!g_frame_done.load()) {}
     // Remove network rules first: unlike the remaining process-local resources,
     // firewall state must not survive a forced shutdown deadline.

@@ -1,6 +1,5 @@
 #pragma once
-// stealth.h — маскировка процесса: имя в списках запущенных, защита от
-// отладчика и удаление бинарника с диска на время работы.
+// stealth.h — маскировка имени процесса и защита от отладчика.
 //
 // Поверхности видимости, которые закрывает модуль (всё из userspace):
 //   /proc/<pid>/cmdline — фейк «vold …» поверх области argv (область
@@ -10,8 +9,6 @@
 //   /proc/<pid>/status  — Name = «vold» (PR_SET_NAME); новые потоки
 //       наследуют это имя; PR_SET_DUMPABLE=0 закрывает /proc/<pid>
 //       чужим не-root процессам;
-//   /proc/<pid>/exe     — после unlink путь показывает «(deleted)»,
-//       самого файла на диске нет;
 //   /proc/<pid>/fd      — 0/1/2 уходят с терминала в /dev/null (TTY «?»
 //       в ps после setsid), fd-лист чист (см. kernel_io/mem_io);
 //   отладчики           — потомок занимает ptrace-слот (PTRACE_SEIZE):
@@ -22,14 +19,9 @@
 //
 // Не покрывается из userspace (честно): /proc/<pid>/maps всё равно
 // показывает региона с меткой «(deleted)»; ppid остаётся su/shell;
-// TracerPid != 0 в status (плата за занятый ptrace-слот); SIGKILL —
-// файл не восстановить.
-//
-// Восстановление бинарника: при нормальном выходе (teardown в main),
-// exit()/atexit и по фатальным сигналам (SEGV/ABRT/BUS/ILL/FPE) файл
-// пишется обратно из /proc/self/exe (иннод держат отображения, канал
-// читаем и после unlink). После SIGKILL/ребута — файл придётся
-// перекинуть заново.
+// TracerPid != 0 в status (плата за занятый ptrace-слот).
+// Исполняемый файл не удаляется: запуск через _exit и аварийное завершение
+// не должны оставлять каталог без бинарника.
 
 #include <fcntl.h>
 #include <sys/prctl.h>
@@ -53,46 +45,6 @@
 namespace stealth {
 
 inline constexpr const char kComm[] = "vold";   // comm ≤ 15 символов
-
-// Состояние для восстановления бинарника на выходе.
-inline char   g_exe_path[4096] = {};
-inline mode_t g_exe_mode = 0755;
-
-// ---- восстановление бинарника из /proc/self/exe ---------------------------
-inline void RestoreBinary() {
-    if (!g_exe_path[0]) return;
-    // Путь сначала копируем и только потом помечаем «выполнено»: сам файл
-    // открываем уже по копии, а не по затёртому g_exe_path.
-    char path[4096];
-    memcpy(path, g_exe_path, sizeof(path));
-    g_exe_path[0] = 0;
-    const int in = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (in < 0) return;
-    const int out = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (out < 0) { close(in); return; }
-    char buf[65536];
-    ssize_t r;
-    while ((r = read(in, buf, sizeof(buf))) > 0) {
-        ssize_t off = 0;
-        while (off < r) {
-            const ssize_t w = write(out, buf + off, (size_t)(r - off));
-            if (w <= 0) { close(in); close(out); return; }
-            off += w;
-        }
-    }
-    fchmod(out, g_exe_mode);
-    close(in);
-    close(out);
-}
-
-// ---- фатальные сигналы: вернуть файл и отдать сигнал дальше ---------------
-// Не строго async-signal-safe (write/open), но это лучший шанс оставить
-// бинарник на диске после падения; падший процесс всё равно умирает.
-inline void CrashHandler(int sig) {
-    RestoreBinary();
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
 
 // ---- 1) маскировка имени: cmdline/environ/comm/dumpable -------------------
 // Вызывать строго ПОСЛЕ разбора аргументов (строки argv затираются) и до
@@ -206,9 +158,8 @@ inline void ApplyTracerGuard() {
 #endif
 }
 
-// ---- 3) рантайм-скрытие: терминал, файл -----------------------------------
-// Вызывать после успешного подъёма оверлея и тача (если GUI не поднялся —
-// main успевает вернуть -1 с файлом на месте), до экрана выбора режима.
+// ---- 3) рантайм-скрытие: терминал -----------------------------------------
+// Вызывать после успешного подъёма оверлея и тача, до экрана выбора режима.
 inline void ApplyRuntime() {
     // Отвязка от терминала: без сессии ps показывает TTY «?». Отказ не
     // критичен (если мы уже лидер сессии).
@@ -221,31 +172,6 @@ inline void ApplyRuntime() {
         dup2(nul, 0); dup2(nul, 1); dup2(nul, 2);
         if (nul > 2) close(nul);
     }
-
-    // Убираем бинарник с диска. Файл исчезает из файловых менеджеров и
-    // ls; /proc/<pid>/exe продолжает работать (иннод держат отображения)
-    // и служит источником для восстановления на выходе.
-    const ssize_t n = readlink("/proc/self/exe", g_exe_path, sizeof(g_exe_path) - 1);
-    if (n > 0) {
-        g_exe_path[n] = 0;
-        struct stat st {};
-        if (stat(g_exe_path, &st) == 0) g_exe_mode = st.st_mode & 0777;
-        if (unlink(g_exe_path) != 0) g_exe_path[0] = 0;
-    } else {
-        g_exe_path[0] = 0;
-    }
-
-    // Нормальный выход и exit() возвращают файл на место.
-    atexit(RestoreBinary);
-    struct sigaction sa {};
-    sa.sa_handler = CrashHandler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESETHAND | SA_NODEFER;
-    sigaction(SIGSEGV, &sa, nullptr);
-    sigaction(SIGABRT, &sa, nullptr);
-    sigaction(SIGBUS, &sa, nullptr);
-    sigaction(SIGILL, &sa, nullptr);
-    sigaction(SIGFPE, &sa, nullptr);
 
     // ptrace-слот занимает ApplyTracerGuard (ранний fork, с супервизией
     // сигналов) — здесь больше ничего трогать не нужно.
