@@ -12,7 +12,7 @@ void update(bool enabled, int percent, pid_t game_pid);
 void shutdown();
 Status status();
 inline int clamp_percent(int percent) {
-    return percent < 10 ? 10 : (percent > 85 ? 85 : percent);
+    return percent < 10 ? 10 : (percent > 70 ? 70 : percent);
 }
 
 } // namespace fake_lag

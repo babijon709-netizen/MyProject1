@@ -1018,7 +1018,7 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##fakelag", XS("FakeLag"), &g_state.fake_lag,
                   g_state.a_fake_lag, false, true);
         SliderRow("##fakelagpct", XS("Интенсивность"), &g_state.fake_lag_percent,
-                  10.f, 85.f, XS("%.0f%%"), true, false, g_state.sl_fake_lag, dt);
+                  10.f, 70.f, XS("%.0f%%"), true, false, g_state.sl_fake_lag, dt);
 
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);
