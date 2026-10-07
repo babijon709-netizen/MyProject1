@@ -8525,9 +8525,28 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 }
             }
         }
-        if (box.skel_bones >= 11 && box.skel_up >= 0.f && box.skel_flat >= 0.f) {
-            const bool lying = box.skel_up < 0.85f || box.skel_flat > box.skel_up * 1.5f;
-            if (lying) box.dead = true;
+        // Поза «лежит» — только как запасной признак и очень строго.
+        // Порог высоты 0.85 ложно ловил ПРИСЕВШЕГО игрока: в логе 00:53
+        // живой (здоровье 100, флаг смерти 0) сидел с высотой скелета
+        // 0.77-0.86 м и бокс мерцал «мёртв/жив» на каждом пересечении
+        // порога. Теперь: присевшего игра знает сама (поза/состояние KCC)
+        // и поза его не трогает; труп по высоте — 0.3-0.5 м, порог 0.60;
+        // горизонталь трупа — от метра, у сидящего 0.51-0.61 м; и гистерезис
+        // 0.35 с, чтобы шум скелета на один-два кадра не гасил бокс.
+        if (!crouched && !box.dead && box.skel_bones >= 11 &&
+            box.skel_up >= 0.f && box.skel_flat >= 0.f) {
+            const bool lying = box.skel_up < 0.60f ||
+                               (box.skel_flat > 1.0f && box.skel_flat > box.skel_up * 1.5f);
+            static std::unordered_map<uint64_t, double> s_lying_since;
+            const double t_lie = memio::now_seconds();
+            auto it = s_lying_since.find(s_transforms[i]);
+            if (lying) {
+                if (it == s_lying_since.end()) s_lying_since.emplace(s_transforms[i], t_lie);
+                else if (t_lie - it->second >= 0.35) box.dead = true;
+            } else if (it != s_lying_since.end()) {
+                s_lying_since.erase(it);
+            }
+            if (s_lying_since.size() > 256) s_lying_since.clear();
         }
         // Что именно решило судьбу игрока — в лог: без этого порог непроверяем.
         // Печатаем только тех, у кого кости РЕАЛЬНО измерены: в логе 17:06
