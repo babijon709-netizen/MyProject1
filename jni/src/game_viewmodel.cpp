@@ -2,6 +2,7 @@
 #include "game.h"
 #include "weapon_tuning_memory.h"
 #include "fast_fire_memory.h"
+#include "fast_reload_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
 #include "farm.h"
@@ -247,6 +248,7 @@ struct HeapMemory {
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
+fast_reload::Controller<HeapMemory> rapid_reload(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -333,6 +335,8 @@ void esp_viewmodel_reset(bool restore) {
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
     if (!rapid_fire.reset(restore && g_mem.bound()))
         LogLine("fast fire: originals could not all be restored before disconnect; restart game");
+    if (!rapid_reload.reset(restore && g_mem.bound()))
+        LogLine("fast reload: originals could not all be restored before disconnect; restart game");
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
     invalidate_maps_snapshot();
@@ -343,10 +347,12 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     const bool want_fast_fire = g_state.fast_fire;
+    const bool want_fast_reload = g_state.fast_reload;
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
-        rapid_fire.reset(false);
+        rapid_fire.reset(false); rapid_reload.reset(false);
         rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        rapid_reload.status = g_state.fast_reload ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
@@ -364,6 +370,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         want_no_spread || weapons.has_state() ||
         want_fast_fire || rapid_fire.has_state() ||
+        want_fast_reload || rapid_reload.has_state() ||
         g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
@@ -397,6 +404,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             controller.status={wait,wait};
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire);
+            rapid_reload.tick(epoch, g_il2cpp_base, 0, want_fast_reload);
             return;
         }
         local_source_failed=false;
@@ -405,7 +413,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // every scalar). They only need a watchdog cadence, not the uncapped
     // overlay rate. Setting/player changes bypass the limiter immediately.
     const unsigned weapon_flags = (want_no_spread ? 1u : 0u) |
-                                  (want_fast_fire ? 2u : 0u);
+                                  (want_fast_fire ? 2u : 0u) |
+                                  (want_fast_reload ? 4u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -416,12 +425,20 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_last_flags = weapon_flags;
         weapons.tick(epoch, g_il2cpp_base, player, want_no_spread);
         rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire);
+        rapid_reload.tick(epoch, g_il2cpp_base, player, want_fast_reload);
         static int last_fire_stage = -1;
         static auto last_fire_status = viewmodel::Status::Off;
         if (last_fire_stage != rapid_fire.stage() || last_fire_status != rapid_fire.status) {
             last_fire_stage = rapid_fire.stage(); last_fire_status = rapid_fire.status;
             LogLine("fast fire: status=%d stage=%d (1 local,2 FPManager,3 slot,4 type,5 owner,6 mode/wait,7 timing,8 changed,9 restore,10 write,11 burst overlap guard)",
                     (int)last_fire_status, last_fire_stage);
+        }
+        static int last_reload_stage = -1;
+        static auto last_reload_status = viewmodel::Status::Off;
+        if (last_reload_stage != rapid_reload.stage() || last_reload_status != rapid_reload.status) {
+            last_reload_stage = rapid_reload.stage(); last_reload_status = rapid_reload.status;
+            LogLine("fast reload: status=%d stage=%d (1 local,2 FPManager,3 slot,4 identity,5 backref,7 timing,8 revalidate,9 restore,10 write)",
+                    (int)last_reload_status, last_reload_stage);
         }
     }
     {
@@ -453,9 +470,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     controller.tick(epoch, player, visible_settings);
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
-        st.no_spread != last_log.no_spread) {
-        LogLine("viewmodel: fov=%d hands=%d; spread=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
-                (int)st.fov, (int)st.hands, (int)st.no_spread);
+        st.no_spread != last_log.no_spread || st.fast_reload != last_log.fast_reload) {
+        LogLine("viewmodel: fov=%d hands=%d; spread=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error); reload=%d",
+                (int)st.fov, (int)st.hands, (int)st.no_spread, (int)st.fast_reload);
         last_log = st;
     }
 }
@@ -465,6 +482,7 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     auto status = controller.status;
     status.no_spread = weapons.spread;
     status.fast_fire = rapid_fire.status;
+    status.fast_reload = rapid_reload.status;
     return status;
 }
 

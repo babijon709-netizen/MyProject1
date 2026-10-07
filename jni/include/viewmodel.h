@@ -96,6 +96,7 @@ struct Diagnostics {
     Status fov = Status::Off, hands = Status::Off;
     Status no_spread = Status::Off;
     Status fast_fire = Status::Off;
+    Status fast_reload = Status::Off;
 };
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем
 // тике (до 100 мс назад), дополнительных обращений к памяти игры не делает.
