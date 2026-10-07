@@ -254,6 +254,44 @@ HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
 fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
+
+// Причина остановки быстрой стрельбы для лога: расшифровка стадии, которую
+// выставляет fast_fire::Controller (resolve/build_plan/apply в
+// fast_fire_memory.h). Стадия 0 + не-Active — ожидание привязки/игрока.
+const char* fast_fire_stop_reason(viewmodel::Status status, int stage) {
+    if (status == viewmodel::Status::Off) return "disabled or game unbound";
+    switch (stage) {
+        case 1:  return "no local player or network identity";
+        case 2:  return "FPManager missing or dead";
+        case 3:  return "weapon slot in hands is empty";
+        case 4:  return "weapon type not supported";
+        case 5:  return "weapon backlink to player mismatch";
+        case 6:  return "fire mode or burst wait unreadable";
+        case 7:  return "weapon timings unreadable or out of range";
+        case 8:  return "weapon context changed mid-write";
+        case 9:  return "originals could not be restored (restart the game)";
+        case 10: return "period write not confirmed by readback";
+        case 11: return "burst overlap guard: cache shorter than full burst cycle";
+        default: return "waiting for bind or player";
+    }
+}
+// Переходы статуса быстрой стрельбы в лог; отдельно подсвечивается сам факт
+// остановки («перестала работать») с причиной. Зовётся после КАЖДОГО
+// rapid_fire.tick и после ручных смен статуса на отвязанном пути.
+void log_fast_fire_transition() {
+    static int last_stage = -1;
+    static viewmodel::Status last_status = viewmodel::Status::Off;
+    const int stage = rapid_fire.stage();
+    const viewmodel::Status status = rapid_fire.status;
+    if (stage == last_stage && status == last_status) return;
+    if (last_status == viewmodel::Status::Active && status != viewmodel::Status::Active)
+        LogLine("fast fire: stopped — %s (status=%d stage=%d)",
+                fast_fire_stop_reason(status, stage), (int)status, stage);
+    else
+        LogLine("fast fire: status=%d stage=%d (1 local,2 FPManager,3 slot,4 type,5 owner,6 mode/wait,7 timing,8 changed,9 restore,10 write,11 burst overlap guard)",
+                (int)status, stage);
+    last_stage = stage; last_status = status;
+}
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -340,6 +378,7 @@ void esp_viewmodel_reset(bool restore) {
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
     if (!rapid_fire.reset(restore && g_mem.bound()))
         LogLine("fast fire: originals could not all be restored before disconnect; restart game");
+    log_fast_fire_transition();
     loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
@@ -355,6 +394,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
         rapid_fire.reset(false);
         rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        log_fast_fire_transition();
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
@@ -422,6 +462,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             controller.status={wait,wait};
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire);
+            log_fast_fire_transition();
             return;
         }
         local_source_failed=false;
@@ -441,13 +482,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_last_flags = weapon_flags;
         weapons.tick(epoch, g_il2cpp_base, player, want_no_spread);
         rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire);
-        static int last_fire_stage = -1;
-        static auto last_fire_status = viewmodel::Status::Off;
-        if (last_fire_stage != rapid_fire.stage() || last_fire_status != rapid_fire.status) {
-            last_fire_stage = rapid_fire.stage(); last_fire_status = rapid_fire.status;
-            LogLine("fast fire: status=%d stage=%d (1 local,2 FPManager,3 slot,4 type,5 owner,6 mode/wait,7 timing,8 changed,9 restore,10 write,11 burst overlap guard)",
-                    (int)last_fire_status, last_fire_stage);
-        }
+        log_fast_fire_transition();
     }
     {
         // Log no-spread resolution changes only; this is intentionally independent
