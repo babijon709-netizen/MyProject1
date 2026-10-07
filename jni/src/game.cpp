@@ -7832,10 +7832,16 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
             if (!has) { ++gone; if (!gone_first) gone_first = q; }
         }
         s_watch_pop = g_frame_transforms;
-        if ((added || gone) && watch_allow())
-            LogLine("визуал: состав %u: +%d -%d (первый +0x%llx -0x%llx)",
+        if ((added || gone) && watch_allow()) {
+            auto uid_of = [](uint64_t addr) -> const char* {
+                auto it = g_player_track.find(addr);
+                return (it != g_player_track.end() && it->second.uid[0]) ? it->second.uid : "—";
+            };
+            LogLine("визуал: состав %u: +%d -%d (первый +0x%llx uid=%s -0x%llx uid=%s)",
                     (unsigned)g_frame_transforms.size(), added, gone,
-                    (unsigned long long)added_first, (unsigned long long)gone_first);
+                    (unsigned long long)added_first, uid_of(added_first),
+                    (unsigned long long)gone_first, uid_of(gone_first));
+        }
     }
 
     // Локальный: смена адреса.
@@ -8291,6 +8297,25 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!std::isfinite(distance)) { skip_reason[i] = 'D'; continue; }
         }
 
+        // Призрачные копии из пула объектов: игра держит в реестре второй
+        // объект того же игрока (копия после посадки в транспорт, остаток
+        // респауна). У копии тот же uid — подавляем всё, кроме объекта,
+        // который рисовали в прошлый раз. Иначе копия попадает в счётчик
+        // игроков «фантомом»: бокс у неё на замороженной точке посадки или за
+        // экраном, а число сверху мигает 1/0, когда копия приходит и уходит.
+        {
+            auto track_it = g_player_track.find(s_transforms[i]);
+            if (track_it != g_player_track.end() && track_it->second.uid[0]) {
+                uint64_t& pick = g_player_track_pick[track_it->second.uid];
+                if (pick && pick != s_transforms[i]) {
+                    bool pick_alive = false;
+                    for (uint64_t p : s_transforms) if (p == pick) { pick_alive = true; break; }
+                    if (pick_alive) { skip_reason[i] = 'S'; continue; }
+                }
+                pick = s_transforms[i];
+            }
+        }
+
         // Counted before any screen-space checks: the pill counter must see
         // players behind us too (360 degrees), not only the ones on screen.
         ++g_frame_player_count;
@@ -8645,6 +8670,42 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     append_bot_boxes(result);
     g_box_frame_transient = false;
     watch_boxes(result, local_entity_index, &skip_reason, 0);
+
+    // Фантом счётчика: игрок учтён в числе сверху, но бокса на экране нет
+    // (за экраном, за камерой или меньше двух пикселей). Раз в секунду и не
+    // больше четырёх строк — иначе при каждом повороте камеры поток. По строке
+    // видно, реальный ли это игрок вне экрана или призрачный объект: у
+    // призрака обычно пустой uid и позиция, далёкая от всех.
+    {
+        static double phantom_at = -1e9;
+        static int phantom_budget = 0;
+        const double t_ph = memio::now_seconds();
+        if (t_ph - phantom_at >= 1.0) { phantom_at = t_ph; phantom_budget = 4; }
+        if (phantom_budget > 0) {
+            for (size_t i = 0; i < skip_reason.size() && i < s_transforms.size(); ++i) {
+                const char r = skip_reason[i];
+                if (r != 'B' && r != 'T' && r != 'H' && r != 'O') continue;
+                const char* why =
+                    r == 'B' ? "низ не спроецировался" :
+                    r == 'T' ? "верх не спроецировался" :
+                    r == 'H' ? "высота < 2px" : "за пределами экрана";
+                auto it = g_player_track.find(s_transforms[i]);
+                const char* uid = (it != g_player_track.end() && it->second.uid[0]) ? it->second.uid : "—";
+                double dist = -1.0;
+                if (g_frame_local_valid) {
+                    const float dx = positions[i].x - g_frame_local_pos.x;
+                    const float dy = positions[i].y - g_frame_local_pos.y;
+                    const float dz = positions[i].z - g_frame_local_pos.z;
+                    dist = sqrtf(dx * dx + dy * dy + dz * dz);
+                }
+                --phantom_budget;
+                LogLine("фантом: 0x%llx в счётчике, но не нарисован: %s, дистанция=%.0fм, позиция=(%.1f %.1f %.1f), uid=%s",
+                        (unsigned long long)s_transforms[i], why, dist,
+                        (double)positions[i].x, (double)positions[i].y, (double)positions[i].z, uid);
+                if (phantom_budget <= 0) break;
+            }
+        }
+    }
     return result;
 }
 
