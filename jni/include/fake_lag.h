@@ -1,18 +1,24 @@
 #pragma once
 
-#include <sys/types.h>
-
 namespace fake_lag {
 
 enum class Status { Off, Waiting, Active, Failed };
 
-// Applies the original INPUT UDP toggle cycle. The PID is retained in the API
-// for the existing call site but the firewall rule intentionally is not UID-scoped.
-void update(bool enabled, int percent, pid_t game_pid);
-void shutdown();
-Status status();
 inline int clamp_percent(int percent) {
     return percent < 1 ? 1 : (percent > 100 ? 100 : percent);
 }
+
+inline int blocked_ms(int percent) {
+    return (1000 * clamp_percent(percent)) / 100;
+}
+
+inline int unblocked_ms(int percent) {
+    return 1000 - blocked_ms(percent);
+}
+
+// Mirrors the Drive implementation: non-loopback incoming UDP is toggled.
+void update(bool enabled, int percent);
+void shutdown();
+Status status();
 
 } // namespace fake_lag

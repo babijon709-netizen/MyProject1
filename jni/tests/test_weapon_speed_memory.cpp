@@ -52,6 +52,18 @@ int main() {
     CHECK(std::fabs(scalar.original - 1.f) < 0.0001f, "intermediate value does not replace original");
     CHECK(scalar.put(io, 0.2f), "target remains based on lifecycle original");
 
+    weapon_speed::Context before_shot;
+    before_shot.player.object = 0x110000;
+    before_shot.fp.object = 0x120000;
+    before_shot.weapon.object = 0x130000;
+    before_shot.config.object = 0x140000;
+    weapon_speed::Context after_shot = before_shot;
+    after_shot.burst_wait.object = 0x150000;
+    CHECK(before_shot == after_shot,
+          "lazy burst wait creation does not change weapon context");
+    after_shot.weapon.object = 0x160000;
+    CHECK(!(before_shot == after_shot), "active weapon change changes context");
+
     if (failures) return 1;
     std::cout << "ALL WEAPON-SPEED TESTS PASS\n";
     return 0;

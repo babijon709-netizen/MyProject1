@@ -129,10 +129,10 @@ template <class IO> class Controller {
     int class_state(std::uint64_t klass, const char* name, const char* ns) {
         if (klass < 0x10000) return 0;
         std::uint64_t np = 0, sp = 0;
-        if (!pointer(klass + go_active::IL2CPP_CLASS_NAME, np) || np < 0x10000)
-            return 0;
-        if (!pointer(klass + go_active::IL2CPP_CLASS_NAMESPACE, sp) || sp < 0x10000)
-            return 0;
+        if (!pointer(klass + go_active::IL2CPP_CLASS_NAME, np)) return -1;
+        if (np < 0x10000) return 0;
+        if (!pointer(klass + go_active::IL2CPP_CLASS_NAMESPACE, sp)) return -1;
+        if (sp < 0x10000) return 0;
         const int a = text_state(np, name);
         if (a <= 0) return a;
         return text_state(sp, ns);

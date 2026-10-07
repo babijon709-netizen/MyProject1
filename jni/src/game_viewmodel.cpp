@@ -238,9 +238,9 @@ fast_loot::Controller<HeapMemory> loot(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
-Clock::time_point weapon_last_tick{}, loot_last_tick{};
-uint64_t weapon_last_player = 0;
-unsigned weapon_last_flags = ~0u;
+Clock::time_point weapon_last_tick{}, weapon_speed_last_tick{}, loot_last_tick{};
+uint64_t weapon_last_player = 0, weapon_speed_last_player = 0;
+unsigned weapon_last_flags = ~0u, weapon_speed_last_flags = ~0u;
 bool loot_last_enabled = false;
 int fps_last_limit = 0;
 viewmodel::Status fps_last_log = viewmodel::Status::Off;
@@ -325,6 +325,7 @@ void esp_viewmodel_reset(bool restore) {
     loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
+    weapon_speed_last_tick = {}; weapon_speed_last_player = 0; weapon_speed_last_flags = ~0u;
     loot_last_tick = {}; loot_last_enabled = false;
     invalidate_maps_snapshot();
     ++epoch;
@@ -343,6 +344,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_speeds.fire = g_state.fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapon_speeds.reload = g_state.fast_reload ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
+        weapon_speed_last_tick = {}; weapon_speed_last_player = 0; weapon_speed_last_flags = ~0u;
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
                              settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
         return;
@@ -409,9 +411,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // every scalar). They only need a watchdog cadence, not the uncapped
     // overlay rate. Setting/player changes bypass the limiter immediately.
     const unsigned weapon_flags = (settings.no_recoil ? 1u : 0u) |
-                                  (want_no_spread ? 2u : 0u) |
-                                  (g_state.fast_fire ? 4u : 0u) |
-                                  (g_state.fast_reload ? 8u : 0u);
+                                  (want_no_spread ? 2u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -421,6 +421,18 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_last_player = player;
         weapon_last_flags = weapon_flags;
         weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
+    }
+
+    const unsigned speed_flags = (g_state.fast_fire ? 1u : 0u) |
+                                 (g_state.fast_reload ? 2u : 0u);
+    const bool speed_due = speed_flags != weapon_speed_last_flags ||
+                           player != weapon_speed_last_player ||
+                           ((speed_flags || weapon_speeds.has_state()) &&
+                            weapon_now - weapon_speed_last_tick >= std::chrono::milliseconds(33));
+    if (speed_due) {
+        weapon_speed_last_tick = weapon_now;
+        weapon_speed_last_player = player;
+        weapon_speed_last_flags = speed_flags;
         weapon_speeds.tick(epoch, g_il2cpp_base, player,
                            g_state.fast_fire, g_state.fast_reload);
     }

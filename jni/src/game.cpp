@@ -11,6 +11,7 @@
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // выбранный Release/Beta профиль
 #include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
+#include "camera_local_guard.h"
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -3921,6 +3922,24 @@ struct FrameViewGuard {
     int  rot_streak = 0;
 };
 static FrameViewGuard s_fv_guard;
+static Mat4 s_camera_last_view{}, s_camera_last_proj{};
+static bool s_camera_last_ok = false;
+static Vec3 s_last_cam_pos{};
+static bool s_last_cam_pos_ok = false;
+static int s_pose_jump_streak = 0;
+static float s_fv_aspect = 0.f, s_fv_zn = 0.f, s_fv_zf = 0.f, s_fv_fov = 0.f;
+static int s_fv_aspect_streak = 0, s_fv_clip_streak = 0, s_fv_fov_streak = 0;
+static unsigned s_camera_anchor_mismatch_streak = 0;
+
+static void reset_camera_frame_cache() {
+    s_fv_guard = {};
+    s_camera_last_view = {}; s_camera_last_proj = {}; s_camera_last_ok = false;
+    s_last_cam_pos = {}; s_last_cam_pos_ok = false; s_pose_jump_streak = 0;
+    s_fv_aspect = s_fv_zn = s_fv_zf = s_fv_fov = 0.f;
+    s_fv_aspect_streak = s_fv_clip_streak = s_fv_fov_streak = 0;
+    s_cam_arr_m = s_cam_arr_n = 0; s_cam_arr_idx = -1; s_cam_arr_valid = false; s_cam_arr_at = -1e9;
+    g_cam_pose_valid = false; g_cam_pose_derived = false; g_aim_ref_valid = false;
+}
 
 // Ортонормальность поворота: camera_basis_from_view нормирует оси, дальше они
 // обязаны быть попарно ортогональными. 0.45 (~63°) — запас против почти
@@ -3963,10 +3982,6 @@ static bool frame_view_accepted(const Mat4& view) {
 static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
     if (!native_cam) return false;
 
-    static Mat4 s_last_view{};
-    static Mat4 s_last_proj{};
-    static bool s_last_ok = false;
-
     // Матрица вида из кеша камеры (+0x70) — эталон: по ней игра и рисует кадр.
     // Живая поза берётся только если она с этим эталоном согласна.
     const Mat4 cached_view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
@@ -3988,10 +4003,7 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         // cannot move 30 m in one frame — reject the sample and reuse the
         // last view; a REAL teleport (respawn) sticks, so after a few
         // consecutive "jumps" the new position is accepted.
-        static Vec3 s_last_cam_pos{};
-        static bool s_last_cam_pos_ok = false;
-        static int  s_pose_jump_streak = 0;
-        if (quat_ok && s_last_cam_pos_ok && s_last_ok) {
+        if (quat_ok && s_last_cam_pos_ok && s_camera_last_ok) {
             float jx = cam_pos.x - s_last_cam_pos.x;
             float jy = cam_pos.y - s_last_cam_pos.y;
             float jz = cam_pos.z - s_last_cam_pos.z;
@@ -4020,15 +4032,15 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     if (!have_live_view) {
         if (have_ref) {
             view = cached_view;          // эталон: ровно то, чем рисует игра
-        } else if (s_last_ok && matrix_is_finite(s_last_view)) {
-            view = s_last_view;
+        } else if (s_camera_last_ok && matrix_is_finite(s_camera_last_view)) {
+            view = s_camera_last_view;
         } else {
             return false;
         }
         g_cam_pose_derived = true;
     } else {
         g_cam_pose_derived = false;
-        s_last_view = view;
+        s_camera_last_view = view;
     }
     // Кадровый барьер (см. FrameViewGuard): структурная проверка и скачки.
     // Отклонённый образец заменяется прошлой принятой матрицей — один кадр
@@ -4062,8 +4074,6 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     // тот же полузаписанный кадр разом с видом. Реальный повод для смены
     // aspect — поворот экрана, держится серией; одиночный скачок растягивает
     // все визуалы по горизонтали на кадр («телепорт на миллисекунды»).
-    static float s_fv_aspect = 0.0F;
-    static int   s_fv_aspect_streak = 0;
     if (0.001F <= s_fv_aspect && fabsf(aspect - s_fv_aspect) > 0.3F && s_fv_aspect_streak < 3) {
         ++s_fv_aspect_streak;
         aspect = s_fv_aspect;
@@ -4071,8 +4081,6 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         s_fv_aspect_streak = 0;
         s_fv_aspect = aspect;
     }
-    static float s_fv_zn = 0.0F, s_fv_zf = 0.0F;
-    static int   s_fv_clip_streak = 0;
     if (s_fv_zn > 0.0F && s_fv_zf > 0.0F) {
         const bool clip_jump = z_near > s_fv_zn * 4.0F || z_near < s_fv_zn * 0.25F ||
                                z_far  > s_fv_zf * 4.0F || z_far  < s_fv_zf * 0.25F;
@@ -4089,8 +4097,6 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     // FOV входит в ту же формулу кадра. Реальная смена (прицеливание, настройка)
     // идёт серией; одиночный скачок — кривой отсчёт, кадр дорисовываем прошлым
     // FOV (иначе вся сцена на миллисекунду меняет масштаб).
-    static float s_fv_fov = 0.0F;
-    static int   s_fv_fov_streak = 0;
     if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) {
         if (s_fv_fov > 0.0F && fabsf(fov - s_fv_fov) > 25.0F && s_fv_fov_streak < 3) {
             ++s_fv_fov_streak;
@@ -4105,8 +4111,8 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) g_cam_fov_deg = fov;
     projection = mat_perspective(fov, aspect, z_near, z_far);
     if (!matrix_is_finite(projection)) {
-        if (s_last_ok && matrix_is_finite(s_last_proj)) {
-            projection = s_last_proj;
+        if (s_camera_last_ok && matrix_is_finite(s_camera_last_proj)) {
+            projection = s_camera_last_proj;
         } else {
             projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
             if (!matrix_is_finite(projection)) return false;
@@ -4120,10 +4126,10 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
                 !(mat_get(projection, 1, 1) > 0.0F)) return false;
         }
     }
-    if (matrix_is_finite(projection)) s_last_proj = projection;
+    if (matrix_is_finite(projection)) s_camera_last_proj = projection;
     if (have_live_view && matrix_is_finite(view)) {
-        s_last_view = view;
-        s_last_ok = true;
+        s_camera_last_view = view;
+        s_camera_last_ok = true;
     }
     return true;
 }
@@ -7371,6 +7377,9 @@ static int s_adopt_ident_streak = 0;
 static void reset_world_caches() {
     g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
     g_player_position_validated = false;
+    g_game_controller_static_fields_cached = 0; g_camera_manager_cached = 0; g_native_camera = 0;
+    reset_camera_frame_cache();
+    s_camera_anchor_mismatch_streak = 0;
     g_population_snapshot.clear(); g_world_change_streak = 0;
     s_adopt_cand.clear(); s_adopt_ident_streak = 0;
     // Раскладка, выученная по костям, умирает вместе со старым миром: после
@@ -7393,9 +7402,7 @@ static void reset_world_caches() {
     g_mount_latch.clear();
     g_skeletons.clear();
     reset_marker_caches();
-    // Камерный страж нового мира ничему не следит: прошлая планета тётушка
-    // задержала бы новую камеру на 3 кадра подтверждения «телепорта».
-    s_fv_guard = {};
+    // Камера будет разрешена заново вместе с новым населением.
 }
 
 void esp_reset() {
@@ -7408,6 +7415,8 @@ void esp_reset() {
     g_native_camera = 0;
     g_game_controller_static_fields_cached = 0;
     g_camera_manager_cached = 0;
+    reset_camera_frame_cache();
+    s_camera_anchor_mismatch_streak = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
     g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
@@ -7473,26 +7482,110 @@ static uint64_t resolve_native_camera_pointer(bool allow_last_confirmed) {
     return allow_last_confirmed ? g_native_camera : 0;
 }
 
+enum class CameraAnchorState { Unknown, Near, Far };
+
+static CameraAnchorState camera_anchor_state(const Mat4& view, float* nearest_distance = nullptr) {
+    if (g_freecam_on) return CameraAnchorState::Near;
+    const uint64_t player = resolve_local_player();
+    if (!player) return CameraAnchorState::Unknown;
+    if (!g_frame_transforms.empty()) {
+        bool in_population = false;
+        for (uint64_t candidate : g_frame_transforms) in_population |= candidate == player;
+        if (!in_population) return CameraAnchorState::Unknown;
+    } else if (player_is_local(player) != 1) {
+        return CameraAnchorState::Unknown;
+    }
+
+    Vec3 camera{};
+    if (!camera_position_from_view(view, camera)) return CameraAnchorState::Unknown;
+    const bool mounted = player_is_mounted(player);
+    int valid_positions = 0;
+    float nearest = INFINITY;
+    auto consider = [&](const Vec3& position) {
+        if (!position_looks_like_world_space(position) || position_near_world_origin(position))
+            return false;
+        const float dx = camera.x - position.x;
+        const float dy = camera.y - position.y;
+        const float dz = camera.z - position.z;
+        const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(distance)) return false;
+        ++valid_positions;
+        nearest = std::min(nearest, distance);
+        return camera_local_guard::within(camera.x, camera.y, camera.z,
+                                          position.x, position.y, position.z, 50.f);
+    };
+
+    Vec3 position{};
+    if (!mounted && player_saved_position(player, position) && consider(position))
+        return CameraAnchorState::Near;
+    if (player_rendered_position(player, position) && consider(position))
+        return CameraAnchorState::Near;
+    if (mounted) {
+        const PlayerAux& aux = player_aux(player);
+        if (player_kcc_position(aux, position) && consider(position))
+            return CameraAnchorState::Near;
+    }
+    if (player_model_position(player, position) && consider(position))
+        return CameraAnchorState::Near;
+    if (nearest_distance && valid_positions > 0) *nearest_distance = nearest;
+    return valid_positions >= 2 ? CameraAnchorState::Far : CameraAnchorState::Unknown;
+}
+
+static void invalidate_camera_resolver() {
+    g_game_controller_static_fields_cached = 0;
+    g_camera_manager_cached = 0;
+    g_native_camera = 0;
+    reset_camera_frame_cache();
+}
+
 static bool read_camera_frame(float aspect, uint64_t& native, Mat4& projection, Mat4& view) {
+    auto read_candidate = [&](uint64_t candidate, bool& anchor_mismatch, float& distance) {
+        anchor_mismatch = false;
+        distance = -1.f;
+        if (!candidate || !read_native_camera_matrices(candidate, aspect, projection, view))
+            return false;
+        anchor_mismatch = camera_anchor_state(view, &distance) == CameraAnchorState::Far;
+        return !anchor_mismatch;
+    };
+
     native = resolve_native_camera_pointer(true);
-    if (native && read_native_camera_matrices(native, aspect, projection, view)) {
+    bool anchor_mismatch = false;
+    float mismatch_distance = -1.f;
+    if (read_candidate(native, anchor_mismatch, mismatch_distance)) {
+        s_camera_anchor_mismatch_streak = 0;
         xray_apply(native);
         always_day_tick();
         return true;
     }
 
-    // A stale anchor after a camera/world replacement must not pin recovery to
-    // the old object. Re-resolve once from the class, but retain the last native
-    // pointer across ordinary EIO bursts.
+    // Re-read the managed camera chain once. A single far anchor can be a
+    // transient local-position read; only repeated frame-level mismatches
+    // invalidate the resolver and its matrix history.
     g_game_controller_static_fields_cached = 0;
     g_camera_manager_cached = 0;
     const uint64_t refreshed = resolve_native_camera_pointer(false);
-    if (refreshed && refreshed != native &&
-        read_native_camera_matrices(refreshed, aspect, projection, view)) {
+    bool refreshed_mismatch = false;
+    float refreshed_distance = -1.f;
+    if (refreshed && read_candidate(refreshed, refreshed_mismatch, refreshed_distance)) {
+        s_camera_anchor_mismatch_streak = 0;
         native = refreshed;
         xray_apply(native);
         always_day_tick();
         return true;
+    }
+
+    if (anchor_mismatch || refreshed_mismatch) {
+        const float distance = refreshed_mismatch ? refreshed_distance : mismatch_distance;
+        if (camera_local_guard::confirm_mismatch(true, s_camera_anchor_mismatch_streak)) {
+            static double last_mismatch_log = -1e9;
+            const double now = memio::now_seconds();
+            if (now - last_mismatch_log >= 1.0) {
+                last_mismatch_log = now;
+                LogLine("ESP: камера не совпала с локальным игроком на %.1fм; сбрасываю camera resolver",
+                        (double)distance);
+            }
+            invalidate_camera_resolver();
+        }
     }
     return false;
 }
@@ -7539,6 +7632,7 @@ static void reset_player_pipeline_resolvers(bool deep) {
     g_player_manager_static_fields = 0;
     g_local_position_fail_streak = 0;
     if (deep) {
+        invalidate_camera_resolver();
         // Keep the established position path. Re-discovering it during an EIO
         // burst removed every box even though each track still had a position.
         g_direct_position_fail_streak = 0;

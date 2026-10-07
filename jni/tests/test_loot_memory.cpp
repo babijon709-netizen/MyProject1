@@ -158,6 +158,33 @@ int main() {
 
     controller.tick(1, kBase, false);
     CHECK(controller.status == viewmodel::Status::Off, "disable -> Off");
+
+    // A transient read failure on Il2CppClass::name must not cache a real
+    // promise as a permanent non-promise.
+    FakeIO unreadable_promise_name;
+    seed_scene(unreadable_promise_name);
+    for (std::size_t i = 0; i < sizeof(uint64_t); ++i)
+        unreadable_promise_name.mem.erase(kDelayClass + go_active::IL2CPP_CLASS_NAME + i);
+    fast_loot::Controller<FakeIO> structural_controller(unreadable_promise_name);
+    structural_controller.tick(1, kBase, true);
+    CHECK(structural_controller.status == viewmodel::Status::Active,
+          "unreadable promise class name uses cadence fallback");
+    CHECK(cadence(unreadable_promise_name, kPromise1) == 0.f,
+          "promise still neutralized after class-name read failure");
+
+    // The helper TypeInfo RVA is authoritative when metadata strings cannot be
+    // read; a failed name-pointer read is transient, not a build mismatch.
+    FakeIO unreadable_helper_name;
+    seed_scene(unreadable_helper_name);
+    for (std::size_t i = 0; i < sizeof(uint64_t); ++i)
+        unreadable_helper_name.mem.erase(kHelperClass + go_active::IL2CPP_CLASS_NAME + i);
+    fast_loot::Controller<FakeIO> helper_controller(unreadable_helper_name);
+    helper_controller.tick(1, kBase, true);
+    CHECK(helper_controller.status == viewmodel::Status::Active,
+          "unreadable helper class name trusts validated TypeInfo RVA");
+    CHECK(cadence(unreadable_helper_name, kPromise1) == 0.f,
+          "promise neutralized with unreadable helper name");
+
     if (failures) { std::printf("%d FAILURES\n", failures); return 1; }
     std::puts("ALL FAST-LOOT TESTS PASS");
     return 0;

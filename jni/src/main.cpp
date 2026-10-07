@@ -410,8 +410,7 @@ int main(int argc, char* argv[]) {
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
-        fake_lag::update(g_state.fake_lag, (int)std::lround(g_state.fake_lag_percent),
-                         esp_target_pid());
+        fake_lag::update(g_state.fake_lag, (int)std::lround(g_state.fake_lag_percent));
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
