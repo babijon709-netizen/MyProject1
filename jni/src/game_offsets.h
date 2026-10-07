@@ -101,7 +101,8 @@ inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = 0x18;
 inline constexpr std::uint64_t FPHITSCAN_CONFIG = 0x130;
 // FPHitscan copies config values into these live fields during lMf/sPo.  The
 // config alone is therefore not enough for a weapon which is already drawn.
-inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = 0xE8;
+inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = 0xE8;  // rVA: effective full-reload cache; sVS() пишет сюда результат sry()
+inline constexpr std::uint64_t FPWEAPON_RELOAD_PERIOD = 0x104;  // [SerializeField] reloadPeriod; источник sry() для не-hitscan (сверено в обоих дампах)
 inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = 0x124;
 // Per-instance source fields copied into the attack cache; checked in both supplied dumps.
 inline constexpr std::uint64_t FPHITSCAN_FIRE_MODE = 0x138;

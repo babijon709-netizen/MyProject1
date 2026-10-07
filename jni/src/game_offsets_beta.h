@@ -40,6 +40,7 @@ inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED = game_offsets::DELAY
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = game_offsets::DELAYPROMISE_SCALED_INITIAL_FRAME;
 inline constexpr std::uint64_t FPHITSCAN_CONFIG = game_offsets::FPHITSCAN_CONFIG;
 inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = game_offsets::FPWEAPON_EFFECTIVE_RELOAD_PERIOD;
+inline constexpr std::uint64_t FPWEAPON_RELOAD_PERIOD = game_offsets::FPWEAPON_RELOAD_PERIOD;
 inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = game_offsets::FPWEAPON_SHOT_PERIOD;
 inline constexpr std::uint64_t FPHITSCAN_FIRE_MODE = game_offsets::FPHITSCAN_FIRE_MODE;
 inline constexpr std::uint64_t FPHITSCAN_FIRE_DURATION = game_offsets::FPHITSCAN_FIRE_DURATION;

@@ -1009,8 +1009,10 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##fastfire", XS("Быстрая стрельба"), &g_state.fast_fire,
                   g_state.a_fast_fire, false, true);
         if (oldFastFire != g_state.fast_fire) esp_viewmodel_tick(vm);
+        const bool oldFastReload = g_state.fast_reload;
         ToggleRow("##fastreload", XS("Быстрая перезарядка"), &g_state.fast_reload,
                   g_state.a_fast_reload, true, false);
+        if (oldFastReload != g_state.fast_reload) esp_viewmodel_tick(vm);
 
         SHdr(XS("Сеть"));
         CardBg(Layout::RowH + Layout::SliderH);
