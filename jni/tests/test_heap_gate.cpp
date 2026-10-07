@@ -43,6 +43,19 @@ int main() {
     // (строка — сам хвост, накрывающий адрес, а не файловая перед ним).
     assert(check(maps, 0x7000002800, Reject::FileTail, "7000002000-7000003000"));
 
+    // Большой анонимный хвост (арена аллокатора, ≥8 МБ) рядом с библиотекой —
+    // это куча, а не .bss: лог 22:19 показал живое оружие в 16-МБ хвосте.
+    const std::string arena_maps =
+        "7000000000-7000100000 rw-p 00001000 fd:01 1234   /system/lib64/libgame.so\n"
+        "7000100000-7001100000 rw-p 00000000 00:00 0      \n"   // 16 МБ арена
+        "7001100000-7001500000 rw-p 00000000 00:00 0      \n";  // 4 МБ — ещё .bss
+    {
+        uint64_t lo = 0, hi = 0;
+        assert(object_data::heap_writable_range(arena_maps, 0x7000200800, 4, lo, hi));
+        assert(lo == 0x7000100000 && hi == 0x7001100000);
+    }
+    assert(check(arena_maps, 0x7001200800, Reject::FileTail, "7001100000-7001500000"));
+
     // Файловое отображение (даже с правами на запись).
     assert(check(maps, 0x7000001800, Reject::FileBacked, "libc.so"));
     assert(check(maps, 0x7500000800, Reject::FileBacked, "ashmem"));

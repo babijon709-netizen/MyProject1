@@ -54,6 +54,7 @@ inline bool heap_writable_range(const std::string& maps, uint64_t address, size_
         address > std::numeric_limits<uint64_t>::max() - size) return fail(Reject::BadArgs);
     uint64_t previous_end = 0;
     bool file_tail = false;
+    constexpr uint64_t kFileTailArenaMin = 8ull * 1024 * 1024;
     size_t pos = 0;
     while (pos < maps.size()) {
         size_t end = maps.find('\n', pos);
@@ -99,8 +100,13 @@ inline bool heap_writable_range(const std::string& maps, uint64_t address, size_
             name_is("[anon:libc_malloc]") || name_is("[anon:scudo:primary]") ||
             name_is("[anon:scudo:secondary]");
         // ELF .bss may be inode=0, unnamed, and writable. Reject anonymous
-        // tails contiguous with file mappings, including intervening guards.
-        // Also intentionally reject unknown named mappings, ashmem and memfd.
+        // tails contiguous with file mappings, including intervening guards —
+        // но только НЕБОЛЬШИЕ: .bss библиотек измеряется килобайтами (миллионами
+        // в крайнем случае), а арены аллокаторов — десятками мегабайт. Лог
+        // 22:19 показал живое оружие в 16-мегабайтном анонимном хвосте, который
+        // старое правило отвергало, и быстрая стрельба молчала до смены оружия.
+        // Также намеренно отвергаются неизвестные именованные отображения,
+        // ashmem и memfd.
         file_tail = file || (lo == previous_end && file_tail);
         previous_end = hi;
         if (address >= lo && address < hi) {
@@ -109,7 +115,7 @@ inline bool heap_writable_range(const std::string& maps, uint64_t address, size_
             // не пустило: порядок от самого частного к самому общему.
             if (inode || offset || major || minor || file) return fail(Reject::FileBacked);
             if (std::strcmp(perms, "rw-p") != 0) return fail(Reject::Perms);
-            if (file_tail) return fail(Reject::FileTail);
+            if (file_tail && hi - lo < kFileTailArenaMin) return fail(Reject::FileTail);
             if (!anonymous) return fail(Reject::NamedRegion);
             if (address + size > hi) return fail(Reject::SpansBoundary);
             range_lo = lo; range_hi = hi;
