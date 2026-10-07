@@ -3840,17 +3840,80 @@ static bool camera_position_from_view(const Mat4& view, Vec3& position) {
     return vec3_is_finite(position);
 }
 
-bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out, bool clip_to_screen) {
+enum class W2SProjectionState : unsigned char {
+    NotRun,
+    NonFiniteClip,
+    BehindCamera,
+    NonFiniteScreen,
+    OutsideScreen,
+    Projected,
+    InvalidViewport,
+    NonFiniteCamera,
+    CameraBehind
+};
+
+struct W2SProjectionTrace {
+    bool camera_space = false;
+    float x = 0.0F, y = 0.0F, z = 0.0F, w = 0.0F;
+    float screen_x = 0.0F, screen_y = 0.0F;
+    W2SProjectionState state = W2SProjectionState::NotRun;
+};
+
+static const char* w2s_projection_state_name(W2SProjectionState state) {
+    switch (state) {
+        case W2SProjectionState::NonFiniteClip: return "nonfinite-clip";
+        case W2SProjectionState::BehindCamera: return "behind-camera";
+        case W2SProjectionState::NonFiniteScreen: return "nonfinite-screen";
+        case W2SProjectionState::OutsideScreen: return "outside-screen";
+        case W2SProjectionState::Projected: return "projected";
+        case W2SProjectionState::InvalidViewport: return "invalid-viewport";
+        case W2SProjectionState::NonFiniteCamera: return "nonfinite-camera";
+        case W2SProjectionState::CameraBehind: return "camera-behind";
+        default: return "not-run";
+    }
+}
+
+static bool w2s_with_trace(const Mat4& vp, const Vec3& world, float sw, float sh,
+                           Vec2& out, bool clip_to_screen, W2SProjectionTrace* trace) {
+    if (trace) *trace = {};
     // clip = VP * float4(world, 1) with column-major VP
-    float clip_x = mat_get(vp, 0, 0) * world.x + mat_get(vp, 0, 1) * world.y + mat_get(vp, 0, 2) * world.z + mat_get(vp, 0, 3);
-    float clip_y = mat_get(vp, 1, 0) * world.x + mat_get(vp, 1, 1) * world.y + mat_get(vp, 1, 2) * world.z + mat_get(vp, 1, 3);
-    float clip_w = mat_get(vp, 3, 0) * world.x + mat_get(vp, 3, 1) * world.y + mat_get(vp, 3, 2) * world.z + mat_get(vp, 3, 3);
-    if (!std::isfinite(clip_x) || !std::isfinite(clip_y) || !std::isfinite(clip_w) || clip_w <= 0.001F) return false;
+    const float clip_x = mat_get(vp, 0, 0) * world.x + mat_get(vp, 0, 1) * world.y + mat_get(vp, 0, 2) * world.z + mat_get(vp, 0, 3);
+    const float clip_y = mat_get(vp, 1, 0) * world.x + mat_get(vp, 1, 1) * world.y + mat_get(vp, 1, 2) * world.z + mat_get(vp, 1, 3);
+    const float clip_w = mat_get(vp, 3, 0) * world.x + mat_get(vp, 3, 1) * world.y + mat_get(vp, 3, 2) * world.z + mat_get(vp, 3, 3);
+    if (trace) {
+        trace->x = clip_x;
+        trace->y = clip_y;
+        trace->z = mat_get(vp, 2, 0) * world.x + mat_get(vp, 2, 1) * world.y + mat_get(vp, 2, 2) * world.z + mat_get(vp, 2, 3);
+        trace->w = clip_w;
+    }
+    if (!std::isfinite(clip_x) || !std::isfinite(clip_y) || !std::isfinite(clip_w)) {
+        if (trace) trace->state = W2SProjectionState::NonFiniteClip;
+        return false;
+    }
+    if (clip_w <= 0.001F) {
+        if (trace) trace->state = W2SProjectionState::BehindCamera;
+        return false;
+    }
     out.x = ((clip_x / clip_w) + 1.0F) * 0.5F * sw;
     out.y = ((-clip_y / clip_w) + 1.0F) * 0.5F * sh;
-    if (!std::isfinite(out.x) || !std::isfinite(out.y)) return false;
-    if (clip_to_screen && (out.x < 0.0F || out.x > sw || out.y < 0.0F || out.y > sh)) return false;
+    if (trace) {
+        trace->screen_x = out.x;
+        trace->screen_y = out.y;
+    }
+    if (!std::isfinite(out.x) || !std::isfinite(out.y)) {
+        if (trace) trace->state = W2SProjectionState::NonFiniteScreen;
+        return false;
+    }
+    if (clip_to_screen && (out.x < 0.0F || out.x > sw || out.y < 0.0F || out.y > sh)) {
+        if (trace) trace->state = W2SProjectionState::OutsideScreen;
+        return false;
+    }
+    if (trace) trace->state = W2SProjectionState::Projected;
     return true;
+}
+
+bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out, bool clip_to_screen) {
+    return w2s_with_trace(vp, world, sw, sh, out, clip_to_screen, nullptr);
 }
 
 
@@ -4128,22 +4191,61 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     return true;
 }
 
-static bool w2s_transform_camera(const Vec3& camera_position, const Vec4& camera_rotation, const Vec3& world, float screen_width, float screen_height, Vec2& output, bool clip_to_screen = true) {
-    if (screen_width < 100.0F || screen_height < 100.0F) return false;
+static bool w2s_transform_camera(const Vec3& camera_position, const Vec4& camera_rotation,
+                                 const Vec3& world, float screen_width, float screen_height,
+                                 Vec2& output, bool clip_to_screen = true,
+                                 W2SProjectionTrace* trace = nullptr) {
+    if (trace) {
+        *trace = {};
+        trace->camera_space = true;
+    }
+    if (screen_width < 100.0F || screen_height < 100.0F) {
+        if (trace) trace->state = W2SProjectionState::InvalidViewport;
+        return false;
+    }
     Vec3 relative = {world.x - camera_position.x, world.y - camera_position.y, world.z - camera_position.z};
     Vec4 inverse_rotation = {-camera_rotation.x, -camera_rotation.y, -camera_rotation.z, camera_rotation.w};
     Vec3 camera_space = rotate_vector(inverse_rotation, relative);
-    if (!vec3_is_finite(camera_space) || camera_space.z <= 0.05F) return false;
+    if (trace) {
+        trace->x = camera_space.x;
+        trace->y = camera_space.y;
+        trace->z = camera_space.z;
+    }
+    if (!vec3_is_finite(camera_space)) {
+        if (trace) trace->state = W2SProjectionState::NonFiniteCamera;
+        return false;
+    }
+    if (camera_space.z <= 0.05F) {
+        if (trace) trace->state = W2SProjectionState::CameraBehind;
+        return false;
+    }
     constexpr float vertical_fov_radians = 1.0471975512F;
     float tangent = tanf(vertical_fov_radians * 0.5F);
     float aspect = screen_width / screen_height;
     float normalized_x = camera_space.x / (camera_space.z * tangent * aspect);
     float normalized_y = camera_space.y / (camera_space.z * tangent);
-    if (!std::isfinite(normalized_x) || !std::isfinite(normalized_y)) return false;
-    if (clip_to_screen && (fabsf(normalized_x) > 1.0F || fabsf(normalized_y) > 1.0F)) return false;
+    if (trace) {
+        trace->screen_x = (normalized_x + 1.0F) * 0.5F * screen_width;
+        trace->screen_y = (1.0F - normalized_y) * 0.5F * screen_height;
+    }
+    if (!std::isfinite(normalized_x) || !std::isfinite(normalized_y)) {
+        if (trace) trace->state = W2SProjectionState::NonFiniteScreen;
+        return false;
+    }
+    if (clip_to_screen && (fabsf(normalized_x) > 1.0F || fabsf(normalized_y) > 1.0F)) {
+        if (trace) trace->state = W2SProjectionState::OutsideScreen;
+        return false;
+    }
     output.x = (normalized_x + 1.0F) * 0.5F * screen_width;
     output.y = (1.0F - normalized_y) * 0.5F * screen_height;
-    return std::isfinite(output.x) && std::isfinite(output.y);
+    if (trace) {
+        trace->screen_x = output.x;
+        trace->screen_y = output.y;
+    }
+    const bool projected = std::isfinite(output.x) && std::isfinite(output.y);
+    if (trace) trace->state = projected ? W2SProjectionState::Projected
+                                        : W2SProjectionState::NonFiniteScreen;
+    return projected;
 }
 
 // Кадры подряд, в которых выборка позиций игроков сошлась в одну точку (см.
@@ -7778,6 +7880,173 @@ static void watch_camera_and_local(const Mat4& view, const Vec3& local) {
     have_previous_camera = true;
 }
 
+enum PositionReadFlags : unsigned short {
+    PositionDirectTried = 1U << 0,
+    PositionDirectReadOk = 1U << 1,
+    PositionDirectValid = 1U << 2,
+    PositionKccTried = 1U << 3,
+    PositionKccOk = 1U << 4,
+    PositionModelTried = 1U << 5,
+    PositionModelReadOk = 1U << 6,
+    PositionModelValid = 1U << 7,
+    PositionCacheUsed = 1U << 8
+};
+
+struct EspSkipLog {
+    uint64_t player = 0;
+    uint64_t duplicate_of = 0;
+    size_t index = 0;
+    size_t population = 0;
+    char reason = 0;
+    char position_source = 0;
+    unsigned short position_read_flags = 0;
+    bool has_position = false;
+    bool camera_basis_valid = false;
+    bool camera_rotation_valid = false;
+    bool camera_from_transform = false;
+    bool has_bottom_world = false;
+    bool has_top_world = false;
+    bool has_box_bounds = false;
+    Vec3 position{};
+    Vec3 camera_position{};
+    Vec3 camera_right{};
+    Vec3 camera_up{};
+    Vec3 camera_forward{};
+    Vec4 camera_rotation{};
+    Vec3 bottom_world{};
+    Vec3 top_world{};
+    float distance = -1.0F;
+    float screen_width = 0.0F;
+    float screen_height = 0.0F;
+    float body_height = 0.0F;
+    float box_cx = 0.0F;
+    float box_cy = 0.0F;
+    float box_half_width = 0.0F;
+    float box_half_height = 0.0F;
+    float screen_margin = 0.0F;
+    unsigned long long read_fails_total = 0;
+    W2SProjectionTrace bottom_projection{};
+    W2SProjectionTrace top_projection{};
+};
+
+static void format_debug_vec3(const Vec3* value, char* out, size_t out_size) {
+    if (!value) {
+        std::snprintf(out, out_size, "n/a");
+        return;
+    }
+    std::snprintf(out, out_size, "(%.1f %.1f %.1f)",
+                  (double)value->x, (double)value->y, (double)value->z);
+}
+
+static void format_position_read_flags(unsigned short flags, char* out, size_t out_size) {
+    const char* direct = !(flags & PositionDirectTried) ? "not-tried" :
+        !(flags & PositionDirectReadOk) ? "read-fail" :
+        (flags & PositionDirectValid) ? "valid" : "invalid-world";
+    const char* kcc = !(flags & PositionKccTried) ? "not-tried" :
+        (flags & PositionKccOk) ? "ok" : "read-fail";
+    const char* model = !(flags & PositionModelTried) ? "not-tried" :
+        !(flags & PositionModelReadOk) ? "read-fail" :
+        (flags & PositionModelValid) ? "valid" : "invalid-world";
+    std::snprintf(out, out_size, "direct=%s,kcc=%s,model=%s,cache=%s",
+                  direct, kcc, model, (flags & PositionCacheUsed) ? "used" : "none");
+}
+
+static void format_projection_trace(const W2SProjectionTrace& trace, char* out, size_t out_size) {
+    if (trace.state == W2SProjectionState::NotRun) {
+        std::snprintf(out, out_size, "not-run");
+        return;
+    }
+    if (trace.camera_space) {
+        std::snprintf(out, out_size, "%s:camera=(%.3f %.3f %.3f) screen=(%.1f %.1f)",
+                      w2s_projection_state_name(trace.state),
+                      (double)trace.x, (double)trace.y, (double)trace.z,
+                      (double)trace.screen_x, (double)trace.screen_y);
+    } else {
+        std::snprintf(out, out_size, "%s:clip=(%.3f %.3f %.3f %.3f) clip_w=%.3f screen=(%.1f %.1f)",
+                      w2s_projection_state_name(trace.state),
+                      (double)trace.x, (double)trace.y, (double)trace.z, (double)trace.w,
+                      (double)trace.w, (double)trace.screen_x, (double)trace.screen_y);
+    }
+}
+
+static void log_esp_skip(const EspSkipLog& event) {
+    struct LastSkipLog { double at = 0.0; char reason = 0; };
+    static double window_at = -1e9;
+    static int window_count = 0;
+    static std::unordered_map<uint64_t, LastSkipLog> player_last_log;
+
+    const double now = memio::now_seconds();
+    if (now - window_at >= 1.0) {
+        window_at = now;
+        window_count = 0;
+    }
+    if (window_count >= 4) return;
+    auto previous = player_last_log.find(event.player);
+    if (previous != player_last_log.end() && previous->second.reason == event.reason &&
+        now - previous->second.at < 1.0) return;
+    if (player_last_log.size() > 1024) {
+        for (auto it = player_last_log.begin(); it != player_last_log.end();) {
+            if (now - it->second.at >= 5.0) it = player_last_log.erase(it);
+            else ++it;
+        }
+    }
+    player_last_log[event.player] = {now, event.reason};
+    ++window_count;
+
+    const char* reason = "unknown";
+    switch (event.reason) {
+        case 'P': reason = "position-unavailable"; break;
+        case 'D': reason = "nonfinite-distance"; break;
+        case 'S': reason = "duplicate-uid"; break;
+        case 'B': reason = "bottom-projection"; break;
+        case 'T': reason = "top-projection"; break;
+        case 'H': reason = "invalid-height"; break;
+        case 'O': reason = "offscreen"; break;
+        case 'X': reason = "dead"; break;
+    }
+    const char* source = "none";
+    switch (event.position_source) {
+        case 'D': source = "direct"; break;
+        case 'K': source = "kcc"; break;
+        case 'M': source = "model"; break;
+        case 'C': source = "cached"; break;
+    }
+    auto tracked = g_player_track.find(event.player);
+    const char* uid = (tracked != g_player_track.end() && tracked->second.uid[0])
+        ? tracked->second.uid : "—";
+    char position[64], position_reads[128], camera[64], right[64], up[64], forward[64], camera_rotation[96];
+    char bottom_world[64], top_world[64], bottom_projection[256], top_projection[256];
+    format_debug_vec3(event.has_position ? &event.position : nullptr, position, sizeof(position));
+    format_position_read_flags(event.position_read_flags, position_reads, sizeof(position_reads));
+    format_debug_vec3(&event.camera_position, camera, sizeof(camera));
+    format_debug_vec3(event.camera_basis_valid ? &event.camera_right : nullptr, right, sizeof(right));
+    format_debug_vec3(event.camera_basis_valid ? &event.camera_up : nullptr, up, sizeof(up));
+    format_debug_vec3(event.camera_basis_valid ? &event.camera_forward : nullptr, forward, sizeof(forward));
+    format_debug_vec3(event.has_bottom_world ? &event.bottom_world : nullptr, bottom_world, sizeof(bottom_world));
+    format_debug_vec3(event.has_top_world ? &event.top_world : nullptr, top_world, sizeof(top_world));
+    if (event.camera_rotation_valid) {
+        std::snprintf(camera_rotation, sizeof(camera_rotation), "(%.3f %.3f %.3f %.3f)",
+                      (double)event.camera_rotation.x, (double)event.camera_rotation.y,
+                      (double)event.camera_rotation.z, (double)event.camera_rotation.w);
+    } else {
+        std::snprintf(camera_rotation, sizeof(camera_rotation), "n/a");
+    }
+    format_projection_trace(event.bottom_projection, bottom_projection, sizeof(bottom_projection));
+    format_projection_trace(event.top_projection, top_projection, sizeof(top_projection));
+
+    LogLine("ESP-SKIP: id=0x%llx uid=%s reason=%s registry=%zu/%zu pos_src=%s pos=%s pos_reads={%s} dist=%.1f camera_src=%s camera=%s basis_valid=%d right=%s up=%s forward=%s cam_q=%s viewport=%.0fx%.0f read_fails=%llu bottom_world=%s bottom={%s} top_world=%s top={%s} body_h=%.2f duplicate_of=0x%llx box_valid=%d box=(%.1f %.1f %.1f %.1f) margin=%.1f",
+            (unsigned long long)event.player, uid, reason,
+            event.index + 1, event.population, source, position, position_reads, (double)event.distance,
+            event.camera_from_transform ? "transform" : "view", camera,
+            (int)event.camera_basis_valid, right, up, forward, camera_rotation,
+            (double)event.screen_width, (double)event.screen_height,
+            event.read_fails_total, bottom_world, bottom_projection, top_world, top_projection,
+            (double)event.body_height, (unsigned long long)event.duplicate_of,
+            (int)event.has_box_bounds, (double)event.box_cx, (double)event.box_cy,
+            (double)event.box_half_width, (double)event.box_half_height,
+            (double)event.screen_margin);
+}
+
 // tag: 0 = главный путь (боксы строились), иначе номер раннего выхода.
 static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
                         const std::vector<char>* skip, int tag) {
@@ -8143,6 +8412,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // must see exactly the same values the local player was picked with.
     std::vector<Vec3> positions(s_transforms.size());
     std::vector<char> position_ok(s_transforms.size(), 0);
+    std::vector<char> position_source(s_transforms.size(), 0);
+    std::vector<unsigned short> position_read_flags(s_transforms.size(), 0);
     std::vector<char> skip_reason(s_transforms.size(), 0); // наблюдатель мерцаний: код пропуска
     size_t live_player_positions = 0;
 
@@ -8153,22 +8424,44 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
     local = camera_position;
     has_local_position = true;
+    Vec3 projection_camera_right{}, projection_camera_up{}, projection_camera_forward{};
+    const bool projection_camera_basis_valid = camera_basis_from_view(
+        view, projection_camera_right, projection_camera_up, projection_camera_forward);
 
     for (size_t index = 0; index < s_transforms.size(); ++index) {
         const uint64_t player = s_transforms[index];
         if (!player) continue;
 
         Vec3 candidate{};
-        bool read_ok = read_entity_position(player, candidate) &&
-                       position_looks_like_world_space(candidate);
+        char source = 0;
+        unsigned short read_flags = PositionDirectTried;
+        const bool direct_read_ok = read_entity_position(player, candidate);
+        if (direct_read_ok) read_flags |= PositionDirectReadOk;
+        bool read_ok = direct_read_ok && position_looks_like_world_space(candidate);
+        if (read_ok) {
+            read_flags |= PositionDirectValid;
+            source = 'D';
+        }
         if (!read_ok) {
             const PlayerAux& aux = player_aux(player);
+            read_flags |= PositionKccTried;
             read_ok = player_kcc_position(aux, candidate);
             if (read_ok) {
+                read_flags |= PositionKccOk;
+                source = 'K';
                 if (!g_use_direct_player_position) candidate.y += 1.60F;
-            } else if (player_model_position(player, candidate)) {
-                candidate.y += g_use_direct_player_position ? -0.90F : 0.90F;
-                read_ok = position_looks_like_world_space(candidate);
+            } else {
+                read_flags |= PositionModelTried;
+                const bool model_read_ok = player_model_position(player, candidate);
+                if (model_read_ok) {
+                    read_flags |= PositionModelReadOk;
+                    candidate.y += g_use_direct_player_position ? -0.90F : 0.90F;
+                    read_ok = position_looks_like_world_space(candidate);
+                    if (read_ok) {
+                        read_flags |= PositionModelValid;
+                        source = 'M';
+                    }
+                }
             }
         }
 
@@ -8176,16 +8469,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!read_ok) {
             // A read failure never removes a visible player. Keep the last
             // accepted world position until the confirmed list retires him.
-            if (tracked == g_player_track.end() || !tracked->second.has_last) continue;
+            if (tracked == g_player_track.end() || !tracked->second.has_last) {
+                position_read_flags[index] = read_flags;
+                continue;
+            }
             candidate = tracked->second.last;
+            read_flags |= PositionCacheUsed;
+            source = 'C';
         } else {
             ++live_player_positions;
             track_player(player, candidate);
             tracked = g_player_track.find(player);
         }
 
+        position_read_flags[index] = read_flags;
         positions[index] = candidate;
         position_ok[index] = 1;
+        position_source[index] = source;
         if (tracked != g_player_track.end()) {
             tracked->second.filt.drawn = candidate;
             tracked->second.filt.drawn_t = mono_seconds();
@@ -8255,6 +8555,28 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         local = transform_camera_position; has_local_position = true;
     }
 
+    Vec3 diagnostic_camera_position = transform_camera_mode ? transform_camera_position : camera_position;
+    Vec3 diagnostic_camera_right = projection_camera_right;
+    Vec3 diagnostic_camera_up = projection_camera_up;
+    Vec3 diagnostic_camera_forward = projection_camera_forward;
+    bool diagnostic_camera_basis_valid = projection_camera_basis_valid;
+    const bool diagnostic_camera_rotation_valid = transform_camera_mode &&
+        std::isfinite(transform_camera_rotation.x) && std::isfinite(transform_camera_rotation.y) &&
+        std::isfinite(transform_camera_rotation.z) && std::isfinite(transform_camera_rotation.w);
+    if (transform_camera_mode) {
+        diagnostic_camera_basis_valid = false;
+        if (diagnostic_camera_rotation_valid) {
+            Vec4 normalized_rotation = transform_camera_rotation;
+            if (normalize_quaternion(normalized_rotation)) {
+                diagnostic_camera_right = rotate_vector(normalized_rotation, {1.0F, 0.0F, 0.0F});
+                diagnostic_camera_up = rotate_vector(normalized_rotation, {0.0F, 1.0F, 0.0F});
+                diagnostic_camera_forward = rotate_vector(normalized_rotation, {0.0F, 0.0F, 1.0F});
+                diagnostic_camera_basis_valid = vec3_is_finite(diagnostic_camera_right) &&
+                    vec3_is_finite(diagnostic_camera_up) && vec3_is_finite(diagnostic_camera_forward);
+            }
+        }
+    }
+
     // Our own team / clan, read once per frame and compared against every
     // player below. Without it nobody can be an ally.
     PlayerGroup local_group;
@@ -8280,22 +8602,48 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // Draw every remote PlayerManager returned by the player registry.
     // No UID, name, mount-point or movement heuristic is allowed to hide one.
     for (size_t i = 0; i < s_transforms.size(); ++i) {
+        EspSkipLog diagnostic{};
+        diagnostic.player = s_transforms[i];
+        diagnostic.index = i;
+        diagnostic.population = s_transforms.size();
+        diagnostic.position_source = position_source[i];
+        diagnostic.position_read_flags = position_read_flags[i];
+        diagnostic.has_position = position_ok[i] != 0;
+        if (diagnostic.has_position) diagnostic.position = positions[i];
+        diagnostic.camera_position = diagnostic_camera_position;
+        diagnostic.camera_right = diagnostic_camera_right;
+        diagnostic.camera_up = diagnostic_camera_up;
+        diagnostic.camera_forward = diagnostic_camera_forward;
+        diagnostic.camera_basis_valid = diagnostic_camera_basis_valid;
+        diagnostic.camera_rotation_valid = diagnostic_camera_rotation_valid;
+        diagnostic.camera_from_transform = transform_camera_mode;
+        diagnostic.camera_rotation = transform_camera_rotation;
+        diagnostic.screen_width = sw;
+        diagnostic.screen_height = sh;
+        auto mark_skip = [&](char reason) {
+            skip_reason[i] = reason;
+            diagnostic.reason = reason;
+            diagnostic.read_fails_total = g_mem.read_fails_total();
+            log_esp_skip(diagnostic);
+        };
         if (i == local_entity_index) { skip_reason[i] = 'L'; continue; }
         if (!s_transforms[i]) { skip_reason[i] = 'Z'; continue; }
-        if (!position_ok[i]) { skip_reason[i] = 'P'; continue; }
+        if (!position_ok[i]) { mark_skip('P'); continue; }
         Vec3 feet = positions[i];
         // На транспорте поле позиции замирает в точке посадки, и бокс едет
         // «по памяти» либо отстаёт. Пока пассажир в седле, позиция берётся из
         // трансформа, привязанного к сиденью; состояние видно в логе по
         // префиксу «транспорт:».
         apply_mounted_position(s_transforms[i], feet);
+        diagnostic.position = feet;
 
         float distance = -1.0F;
         if (has_local_position) {
             float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
             distance = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (!std::isfinite(distance)) { skip_reason[i] = 'D'; continue; }
+            if (!std::isfinite(distance)) { diagnostic.distance = distance; mark_skip('D'); continue; }
         }
+        diagnostic.distance = distance;
 
         // Призрачные копии из пула объектов: игра держит в реестре второй
         // объект того же игрока (копия после посадки в транспорт, остаток
@@ -8310,7 +8658,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (pick && pick != s_transforms[i]) {
                     bool pick_alive = false;
                     for (uint64_t p : s_transforms) if (p == pick) { pick_alive = true; break; }
-                    if (pick_alive) { skip_reason[i] = 'S'; continue; }
+                    if (pick_alive) {
+                        diagnostic.duplicate_of = pick;
+                        mark_skip('S');
+                        continue;
+                    }
                 }
                 pick = s_transforms[i];
             }
@@ -8325,34 +8677,45 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         const bool crouched = player_is_crouched(aux);
         float body_height = crouched ? aux.crouch_height : aux.normal_height;
         if (!(body_height > 0.6F && body_height < 2.6F)) body_height = PLAYER_HEIGHT;
+        diagnostic.body_height = body_height;
 
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
         Vec3 body_top = {feet.x, feet.y + body_height, feet.z};
         if (transform_camera_mode || !g_use_direct_player_position) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
+        diagnostic.bottom_world = body_bottom;
+        diagnostic.top_world = body_top;
+        diagnostic.has_bottom_world = true;
+        diagnostic.has_top_world = true;
 
         Vec2 sf{}, sh2{};
         bool bottom_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false)
-            : w2s(vp, body_bottom, sw, sh, sf, false);
-        if (!bottom_visible) { skip_reason[i] = 'B'; continue; }
+            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false, &diagnostic.bottom_projection)
+            : w2s_with_trace(vp, body_bottom, sw, sh, sf, false, &diagnostic.bottom_projection);
+        if (!bottom_visible) { mark_skip('B'); continue; }
         bool top_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false)
-            : w2s(vp, body_top, sw, sh, sh2, false);
-        if (!top_visible) { skip_reason[i] = 'T'; continue; }
+            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false, &diagnostic.top_projection)
+            : w2s_with_trace(vp, body_top, sw, sh, sh2, false, &diagnostic.top_projection);
+        if (!top_visible) { mark_skip('T'); continue; }
 
         float height = fabsf(sh2.y - sf.y);
-        if (!std::isfinite(height) || height <= 0.001F) { skip_reason[i] = 'H'; continue; }
+        if (!std::isfinite(height) || height <= 0.001F) { mark_skip('H'); continue; }
         float cx = (sf.x + sh2.x) * 0.5F;
         float cy = (sf.y + sh2.y) * 0.5F;
         float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
         float half_h = height * 0.5F;
         const float screen_margin = std::max(sw, sh) * 0.25F;
+        diagnostic.box_cx = cx;
+        diagnostic.box_cy = cy;
+        diagnostic.box_half_width = half_w;
+        diagnostic.box_half_height = half_h;
+        diagnostic.screen_margin = screen_margin;
+        diagnostic.has_box_bounds = true;
         // Test the box edges, not only its centre. At 5-10 m a player can
         // cover much of the viewport while the centre is already past the old
         // margin, which made close ESP vanish despite still intersecting it.
         if (cx + half_w < -screen_margin || cx - half_w > sw + screen_margin ||
             cy + half_h < -screen_margin || cy - half_h > sh + screen_margin) {
-            skip_reason[i] = 'O';
+            mark_skip('O');
             continue;
         }
 
@@ -8660,7 +9023,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // A confirmed corpse must disappear immediately. The five-second list
         // grace protects living players from read gaps, not dead PlayerManagers.
         if (box.dead) {
-            skip_reason[i] = 'X';
+            mark_skip('X');
             if (g_frame_player_count > 0) --g_frame_player_count;
             continue;
         }
@@ -8671,41 +9034,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_box_frame_transient = false;
     watch_boxes(result, local_entity_index, &skip_reason, 0);
 
-    // Фантом счётчика: игрок учтён в числе сверху, но бокса на экране нет
-    // (за экраном, за камерой или меньше двух пикселей). Раз в секунду и не
-    // больше четырёх строк — иначе при каждом повороте камеры поток. По строке
-    // видно, реальный ли это игрок вне экрана или призрачный объект: у
-    // призрака обычно пустой uid и позиция, далёкая от всех.
-    {
-        static double phantom_at = -1e9;
-        static int phantom_budget = 0;
-        const double t_ph = memio::now_seconds();
-        if (t_ph - phantom_at >= 1.0) { phantom_at = t_ph; phantom_budget = 4; }
-        if (phantom_budget > 0) {
-            for (size_t i = 0; i < skip_reason.size() && i < s_transforms.size(); ++i) {
-                const char r = skip_reason[i];
-                if (r != 'B' && r != 'T' && r != 'H' && r != 'O') continue;
-                const char* why =
-                    r == 'B' ? "низ не спроецировался" :
-                    r == 'T' ? "верх не спроецировался" :
-                    r == 'H' ? "высота < 2px" : "за пределами экрана";
-                auto it = g_player_track.find(s_transforms[i]);
-                const char* uid = (it != g_player_track.end() && it->second.uid[0]) ? it->second.uid : "—";
-                double dist = -1.0;
-                if (g_frame_local_valid) {
-                    const float dx = positions[i].x - g_frame_local_pos.x;
-                    const float dy = positions[i].y - g_frame_local_pos.y;
-                    const float dz = positions[i].z - g_frame_local_pos.z;
-                    dist = sqrtf(dx * dx + dy * dy + dz * dz);
-                }
-                --phantom_budget;
-                LogLine("фантом: 0x%llx в счётчике, но не нарисован: %s, дистанция=%.0fм, позиция=(%.1f %.1f %.1f), uid=%s",
-                        (unsigned long long)s_transforms[i], why, dist,
-                        (double)positions[i].x, (double)positions[i].y, (double)positions[i].z, uid);
-                if (phantom_budget <= 0) break;
-            }
-        }
-    }
     return result;
 }
 
