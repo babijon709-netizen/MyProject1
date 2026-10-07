@@ -1,4 +1,4 @@
-// Хост-тест состава боксов ESP (esp_box_hold.h) — без устройства.
+// Host tests for the shared player-box and world-marker frame hold policy.
 //
 // Проверяется именно то, на что была жалоба 07.10:
 //   * убитый/вышедший игрок исчезает в первый же ЗДОРОВЫЙ кадр;
@@ -41,8 +41,21 @@ float distance_of(const std::vector<EspBox>& boxes, unsigned long long id, float
     return fallback;
 }
 
-using espboxhold::Entry;
+using Entry = espboxhold::Entry<EspBox>;
 using espboxhold::update;
+
+EspMarker make_marker(unsigned long long id, float x) {
+    EspMarker marker{};
+    marker.id = id;
+    marker.x = x;
+    return marker;
+}
+
+const EspMarker* find_marker(const std::vector<EspMarker>& markers, unsigned long long id) {
+    for (const EspMarker& marker : markers)
+        if (marker.id == id) return &marker;
+    return nullptr;
+}
 } // namespace
 
 int main() {
@@ -141,13 +154,34 @@ int main() {
         CHECK(has(out, 0x9000), "new world player drawn");
     }
 
-    // 10) Маркеры ограничены той же по смыслу границей.
+    // 10) World markers use the same per-id update/expiry rules as player ESP.
     {
-        CHECK(espboxhold::marker_snapshot_is_fresh(1.00, 1.40, 0.50), "marker snapshot fresh");
-        CHECK(!espboxhold::marker_snapshot_is_fresh(1.00, 1.60, 0.50), "marker snapshot expires");
+        std::vector<espboxhold::Entry<EspMarker>> hold;
+        std::vector<EspMarker> out;
+        update(hold, {make_marker(1, 10.0F), make_marker(2, 20.0F)}, false, 1.0, kHold, out);
+        CHECK(out.size() == 2, "healthy marker frame keeps every id");
+
+        update(hold, {make_marker(1, 15.0F)}, true, 1.1, kHold, out);
+        CHECK(out.size() == 2, "transient marker frame holds the missing id");
+        CHECK(find_marker(out, 1) && find_marker(out, 1)->x == 15.0F,
+              "transient marker frame refreshes a readable id");
+        CHECK(find_marker(out, 2) && find_marker(out, 2)->x == 20.0F,
+              "held marker keeps its last screen position");
+
+        update(hold, {}, true, 1.29, kHold, out);
+        CHECK(out.size() == 2, "marker hold remains inside the time window");
+        update(hold, {}, true, 1.31, kHold, out);
+        CHECK(out.size() == 1 && find_marker(out, 1) && !find_marker(out, 2),
+              "only markers whose own hold expired are removed");
+        update(hold, {}, true, 1.41, kHold, out);
+        CHECK(out.empty(), "marker hold expires without permanent ghosts");
+
+        update(hold, {make_marker(3, 30.0F)}, false, 2.0, kHold, out);
+        update(hold, {}, false, 2.016, kHold, out);
+        CHECK(out.empty(), "healthy empty marker frame clears immediately");
     }
 
     if (failures) { printf("%d FAILURES\n", failures); return 1; }
-    printf("ALL ESP-BOX-HOLD TESTS PASS\n");
+    printf("ALL ESP-FRAME-HOLD TESTS PASS\n");
     return 0;
 }

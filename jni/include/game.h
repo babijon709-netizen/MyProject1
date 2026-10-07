@@ -81,6 +81,7 @@ struct EspBox {
 // so one struct covers them.
 enum EspMarkerKind { ESP_MARKER_ORE = 0, ESP_MARKER_ANIMAL = 1, ESP_MARKER_LOOT = 2, ESP_MARKER_PICKUP = 3, ESP_MARKER_BOT = 4, ESP_MARKER_VEHICLE = 5, ESP_MARKER_SCRAP = 6, ESP_MARKER_TURRET = 7, ESP_MARKER_BACKPACK = 8, ESP_MARKER_SLEEPER = 9, ESP_MARKER_HOUSE = 10 };
 struct EspMarker {
+    unsigned long long id = 0;  // marker component pointer; stable across readable frames
     float x = 0.0F, y = 0.0F;   // screen position (top-centre of the pill)
     float distance = 0.0F;      // metres from the local player
     int   kind = ESP_MARKER_ORE;

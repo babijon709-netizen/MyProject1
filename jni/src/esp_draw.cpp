@@ -14,7 +14,6 @@
 #include <cfloat>
 #include <cmath>
 #include <cstddef>
-#include <utility>
 #include <time.h>
 
 // Radius (px) of the aim FOV circle. Original logic: cfg::aim::fov is an
@@ -33,18 +32,11 @@ float AimFovRadiusPx(float sw, float sh) {
 // One remote snapshot per frame, shared by the ESP overlay and the aimbot.
 // Сколько боксов нарисовано в последнем кадре — для сводки в мини-логе.
 
-// Сколько секунд бокс игрока живёт после последнего ЗДОРОВОГО кадра, если
-// кадры пошли рваные (EIO на чтении, неразобранный реестр). Держим ровно
-// столько и не больше: покадровое «оставить прошлый полный снимок» превращало
-// один сбойный кадр в вечно висящий кадр — бокс убитого игрока оставался на
-// экране, а у кого-то ESP замирал целиком и не оживал.
-constexpr double kBoxHoldSeconds = 0.30;
-// То же для маркеров: у них нет стабильного id, поэтому снимок живёт целиком
-// по времени — не дольше этого от последнего здорового кадра.
-constexpr double kMarkerHoldSeconds = 0.50;
+// One short hold window for every ESP visual, including world-marker labels.
+constexpr double kEspHoldSeconds = 0.30;
 
 const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
-    static std::vector<espboxhold::Entry> s_hold;
+    static std::vector<espboxhold::Entry<EspBox>> s_hold;
     static std::vector<EspBox> s_out;
     static int s_frame = -1;
     int frame = ImGui::GetFrameCount();
@@ -87,11 +79,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         const bool transient = esp_box_frame_transient();
         const size_t raw_count = next.size();
 
-        // Состав на экран собирает espboxhold::update: здоровый кадр — ровно
-        // конвейерный состав (смерть и выход с сервера видны сразу), рваный —
-        // удержание пропавших не дольше kBoxHoldSeconds. Правила и разбор,
-        // почему раньше было иначе, — в esp_box_hold.h.
-        espboxhold::update(s_hold, next, transient, now, kBoxHoldSeconds, s_out);
+        espboxhold::update(s_hold, next, transient, now, kEspHoldSeconds, s_out);
 
         static double diag_at = -1e9;
         static int diag_frames = 0, diag_transient = 0;
@@ -123,26 +111,20 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
 }
 
 static const std::vector<EspMarker>& FrameMarkers() {
-    static std::vector<EspMarker> cached;
+    static std::vector<espboxhold::Entry<EspMarker>> hold;
+    static std::vector<EspMarker> out;
     static int cached_frame = -1;
-    static double last_healthy_at = -1e9;
     const int frame = ImGui::GetFrameCount();
-    if (frame == cached_frame) return cached;
+    if (frame == cached_frame) return out;
     cached_frame = frame;
 
     std::vector<EspMarker> next = esp_get_markers();
     timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-    const bool transient = esp_marker_frame_transient();
-    // Та же граница, что у боксов: сбойный кадр не гасит маркеры, но и не
-    // продлевает им жизнь дольше kMarkerHoldSeconds.
-    if (!transient || cached.empty() ||
-        !espboxhold::marker_snapshot_is_fresh(last_healthy_at, now, kMarkerHoldSeconds)) {
-        cached = std::move(next);
-        if (!transient) last_healthy_at = now;
-    }
-    return cached;
+    espboxhold::update(hold, next, esp_marker_frame_transient(),
+                       now, kEspHoldSeconds, out);
+    return out;
 }
 
 void DrawEspOverlay() {

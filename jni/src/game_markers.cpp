@@ -46,7 +46,17 @@ static bool g_markers_house_enabled = false;
 static bool g_bot_aim_enabled = false;
 static float g_marker_max_distance = 150.0F;
 static bool g_marker_frame_transient = false;
+static bool g_marker_scan_unavailable = false;
 bool esp_marker_frame_transient() { return g_marker_frame_transient; }
+
+static bool marker_visuals_enabled() {
+    return g_markers_ore_enabled || g_markers_animal_enabled ||
+           g_markers_loot_enabled || g_markers_pickup_enabled ||
+           g_markers_vehicle_enabled || g_markers_bot_enabled ||
+           g_markers_scrap_enabled || g_markers_turret_enabled ||
+           g_markers_backpack_enabled || g_markers_sleeper_enabled ||
+           g_markers_house_enabled;
+}
 // Когда можно начинать следующий проход скана маркеров, в mono_seconds().
 // Раньше здесь был счётчик кадров (180, при пустом списке 30) из расчёта на
 // 60 fps; устройство пользователя рисует 118 кадров/с, поэтому скан шёл вдвое
@@ -90,14 +100,14 @@ static std::vector<uint8_t> g_marker_scan_buffer;
 // объявлены ниже, вместе с MarkerEntity; фильтр категорий меняется раньше по
 // файлу, поэтому здесь только объявление.
 static void marker_scan_abort();
+enum class MarkerScanResult { Complete, Pending, Unavailable };
 
 void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
                              bool vehicles, bool bots, bool scrap, bool turrets,
                              bool backpacks, bool sleepers, bool house) {
-    // Loot containers and ground pickups are filtered out during the registry
-    // walk, so switching a category on has to invalidate the cached list.
+    // Loot, pickups, scrap and house boxes are filtered during the registry walk.
     if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled ||
-        scrap != g_markers_scrap_enabled) {
+        scrap != g_markers_scrap_enabled || house != g_markers_house_enabled) {
         g_marker_next_scan = 0.0;
         marker_scan_abort();   // половина списка собрана по старым фильтрам
     }
@@ -112,10 +122,7 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
     g_markers_backpack_enabled = backpacks;
     g_markers_sleeper_enabled = sleepers;
     g_markers_house_enabled = house;
-    // Машины и боты опознаются при скане всегда (как руда и животные) и
-    // отфильтровываются при отрисовке — инвалидация кэша им не нужна. Ящики
-    // в домах — так же: сканируются вместе с loot-семьёй, а тумблер режет
-    // их только при отрисовке (esp_get_markers).
+    // Машины и боты всегда сканируются и фильтруются при отрисовке.
 }
 
 
@@ -128,6 +135,7 @@ void esp_set_marker_max_distance(float metres) {
 
 struct MarkerEntity {
     uint64_t identity = 0;
+    uint64_t id = 0;            // source component pointer, distinct within NetworkIdentity
     uint64_t transform = 0;     // native Transform of the GameObject
     Vec3     position{};
     bool     position_valid = false;
@@ -1074,13 +1082,12 @@ bool marker_world_position(uint64_t transform, Vec3& out) {
            position_looks_like_world_space(out);
 }
 
-// Walk Mirror's client registry and cache every ore node / animal in it.
-// true  — цикл завершён: список собран целиком и подменён (или собирать нечего,
-//         тогда он пустой);
-// false — обработана только порция, продолжать нужно на следующем кадре.
-// Все отказы (словарь не читается, мир грузится) возвращают true: иначе вызывающий
-// поставит «продолжать немедленно» и будет долбить в стену каждый кадр.
-static bool rebuild_marker_entities() {
+static MarkerScanResult rebuild_marker_entities() {
+    auto unavailable = []() {
+        g_marker_scan_unavailable = true;
+        marker_scan_abort();
+        return MarkerScanResult::Unavailable;
+    };
     if (g_marker_scan_cursor < 0) {
         // Начало цикла: действующий список НЕ трогаем — он показывается до
         // завершения сборки, поэтому маркеры не мигают.
@@ -1088,25 +1095,29 @@ static bool rebuild_marker_entities() {
         g_marker_scan_buffer.clear();
 
         uint64_t dictionary = resolve_network_client_spawned();
-        if (!dictionary) { marker_scan_abort(); return true; }
+        if (!dictionary) return unavailable();
         // Needed to read prefab names (wolves / rats); harmless if it fails, the
         // loot and entityType paths still work.
         if (!g_go_name_offset_valid && g_local_player) ensure_gameobject_name_offset(g_local_player);
         g_marker_scan_identity_class = resolve_network_identity_class();
 
+        int32_t count = 0;
+        if (!rd_exact(dictionary + DICT_COUNT, count) || count < 0) return unavailable();
+        if (count == 0) {
+            g_marker_entities.clear();
+            g_marker_scan_unavailable = false;
+            marker_scan_abort();
+            return MarkerScanResult::Complete;
+        }
         uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
-        int32_t count = rd<int32_t>(dictionary + DICT_COUNT);
-        if (!valid_obj(entries) || count <= 0) { marker_scan_abort(); return true; }
+        if (!valid_obj(entries)) return unavailable();
         if (count > kMarkerRegistryLimit) count = kMarkerRegistryLimit;
 
-        // One bulk read for the whole entry array instead of one read per entry.
-        // Буфер живёт до конца цикла: порции разбирают уже прочитанное.
         g_marker_scan_buffer.resize((size_t)count * DICT_ENTRY_STRIDE);
         if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, g_marker_scan_buffer.data(),
-                    g_marker_scan_buffer.size())) {
-            marker_scan_abort();
-            return true;
-        }
+                    g_marker_scan_buffer.size()))
+            return unavailable();
+        g_marker_scan_unavailable = false;
         g_marker_scan_total  = count;
         g_marker_scan_cursor = 0;
     }
@@ -1280,6 +1291,7 @@ static bool rebuild_marker_entities() {
 
             MarkerEntity entity;
             entity.identity = identity;
+            entity.id = component;
             entity.kind = look.kind;
             entity.label = look.label;
             if (!look.label) memcpy(entity.text, pickup_text, sizeof(entity.text));
@@ -1313,7 +1325,7 @@ static bool rebuild_marker_entities() {
         // Порция израсходована (вышло время), цикл не закончен — продолжим на
         // следующем кадре с этого же узла.
         g_marker_scan_cursor = i;
-        return false;
+        return MarkerScanResult::Pending;
     }
     // Конец цикла: словарь пройден либо уперлись в защитный лимит списка.
     // Порядок — по стабильному ключу, а не по порядку реестра: словарь игры
@@ -1322,16 +1334,24 @@ static bool rebuild_marker_entities() {
     std::sort(g_marker_scan_pending.begin(), g_marker_scan_pending.end(),
               [](const MarkerEntity& a, const MarkerEntity& b) {
                   if (a.identity != b.identity) return a.identity < b.identity;
-                  return a.transform < b.transform;
+                  if (a.transform != b.transform) return a.transform < b.transform;
+                  return a.id < b.id;
               });
     g_marker_entities.swap(g_marker_scan_pending);
     marker_scan_abort();
-    return true;
+    return MarkerScanResult::Complete;
+}
+
+static void schedule_next_marker_scan(MarkerScanResult result, double now) {
+    if (result == MarkerScanResult::Pending) g_marker_next_scan = now;
+    else if (result == MarkerScanResult::Unavailable) g_marker_next_scan = now + 0.25;
+    else g_marker_next_scan = now + (g_marker_entities.empty() ? 0.25 : 1.0);
 }
 
 void reset_marker_caches() {
     g_marker_entities.clear();
     g_marker_next_scan = 0.0;
+    g_marker_scan_unavailable = false;
     marker_scan_abort();   // незавершённая порция после перезагрузки мира не нужна
     g_marker_class_kind.clear();
     g_network_client_class = 0;
@@ -1420,7 +1440,7 @@ static bool marker_watch_allow() {
 }
 
 static uint64_t marker_watch_key(const MarkerEntity& entity) {
-    return entity.identity ? entity.identity : entity.transform;
+    return entity.id ? entity.id : entity.identity;
 }
 
 static void marker_watch_observe(const MarkerEntity& entity, bool visible,
@@ -1512,15 +1532,11 @@ std::vector<EspMarker> esp_get_markers() {
     ++s_marker_watch_frame;
     g_marker_frame_transient = false;
     std::vector<EspMarker> result;
-    if (!g_markers_ore_enabled && !g_markers_animal_enabled &&
-        !g_markers_loot_enabled && !g_markers_pickup_enabled &&
-        !g_markers_vehicle_enabled && !g_markers_bot_enabled &&
-        !g_markers_scrap_enabled && !g_markers_turret_enabled &&
-        !g_markers_backpack_enabled && !g_markers_sleeper_enabled &&
-        !g_bot_aim_enabled) {
+    if (!marker_visuals_enabled() && !g_bot_aim_enabled) {
         if (!g_marker_entities.empty()) g_marker_entities.clear();
         g_marker_next_scan = 0.0;
-        marker_scan_abort();   // не тащить незавершённую порцию через выключенный ESP
+        marker_scan_abort();
+        g_marker_scan_unavailable = false;
         s_marker_watch.clear();
         return result;
     }
@@ -1545,18 +1561,14 @@ std::vector<EspMarker> esp_get_markers() {
 
     {
         const double now = mono_seconds();
-        if (now >= g_marker_next_scan) {
-            const bool scan_done = rebuild_marker_entities();
-            // ~1 s between scans so newly spawned entities appear promptly. An empty
-            // result means the registry was not readable (world still loading in
-            // after a respawn), so retry in a quarter second instead. Интервал в
-            // секундах: при счёте в кадрах на 118 fps скан выходил вдвое чаще.
-            // Незавершённую порцию продолжаем на следующем кадре (scan_done ==
-            // false), иначе список собирался бы по кусочку раз в 3 секунды.
-            g_marker_next_scan = scan_done
-                ? now + (g_marker_entities.empty() ? 0.25 : 1.0)
-                : now;
-        }
+        if (now >= g_marker_next_scan)
+            schedule_next_marker_scan(rebuild_marker_entities(), now);
+    }
+    if (g_marker_scan_unavailable) {
+        g_marker_frame_transient = true;
+        ++s_marker_watch_frame_early;
+        marker_watch_finish(0);
+        return result;
     }
 
     // No usable layout (fresh join / respawn, nobody around): learn it from
@@ -1625,6 +1637,7 @@ std::vector<EspMarker> esp_get_markers() {
         // Animals and bots DO move — throttled re-reads, see marker_track_position.
         marker_track_position(entity);
         if (!entity.position_valid) {
+            g_marker_frame_transient = true;
             marker_watch_observe(entity, false, "POSITION", -1.0F, 0.0F, 0.0F);
             continue;
         }
@@ -1665,6 +1678,7 @@ std::vector<EspMarker> esp_get_markers() {
 
         marker_watch_observe(entity, true, "VISIBLE", distance, screen.x, screen.y);
         EspMarker marker;
+        marker.id = entity.id;
         marker.x = screen.x;
         marker.y = screen.y;
         marker.distance = distance;
@@ -1724,12 +1738,8 @@ void esp_bot_aim_maintain() {
     if (!g_bot_aim_enabled) return;
     if (g_pid <= 0 || !g_il2cpp_base) return;
     const double now = mono_seconds();
-    if (now >= g_marker_next_scan) {
-        const bool scan_done = rebuild_marker_entities();
-        g_marker_next_scan = scan_done
-            ? now + (g_marker_entities.empty() ? 0.25 : 1.0)
-            : now;
-    }
+    if (now >= g_marker_next_scan)
+        schedule_next_marker_scan(rebuild_marker_entities(), now);
     for (MarkerEntity& entity : g_marker_entities) {
         if (entity.kind != ESP_MARKER_BOT) continue;
         marker_track_position(entity);
