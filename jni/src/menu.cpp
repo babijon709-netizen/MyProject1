@@ -1003,15 +1003,16 @@ float TabContent(int tab, float dt, float cW) {
         if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
         // Диагностические строки («не применено» / «ожидание») убраны по
         // просьбе пользователя: применение видно в игре, подробности — в журнале.
+        // Тумблеры оставлены по просьбе 07.10, логики за ними больше нет: ни
+        // быстрой стрельбы, ни быстрой перезарядки в дереве не существует, так
+        // что esp_viewmodel_tick здесь нечего сообщать. Состояние по-прежнему
+        // щёлкается и уходит в конфиг.
         SHdr(XS("Темп оружия"));
         CardBg(Layout::RowH * 2.f);
-        const bool oldFastFire = g_state.fast_fire, oldFastReload = g_state.fast_reload;
         ToggleRow("##fastfire", XS("Быстрая стрельба"), &g_state.fast_fire,
                   g_state.a_fast_fire, false, true);
         ToggleRow("##fastreload", XS("Быстрая перезарядка"), &g_state.fast_reload,
                   g_state.a_fast_reload, true, false);
-        if (oldFastFire != g_state.fast_fire || oldFastReload != g_state.fast_reload)
-            esp_viewmodel_tick(vm);
 
         SHdr(XS("Сеть"));
         CardBg(Layout::RowH + Layout::SliderH);
@@ -1020,11 +1021,11 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##fakelagpct", XS("Интенсивность"), &g_state.fake_lag_percent,
                   1.f, 100.f, XS("%.0f%%"), true, false, g_state.sl_fake_lag, dt);
 
+        // «Быстрый подбор» — тумблер без логики: обход промисов удалён целиком,
+        // значение живёт только в настройках и в конфиге.
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);
-        const bool oldLoot = vm.fast_loot;
         ToggleRow("##instantloot", XS("Быстрый подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);
-        if (oldLoot != vm.fast_loot) esp_viewmodel_tick(vm);
 
         SHdr(XS("Лимит FPS"));
         {

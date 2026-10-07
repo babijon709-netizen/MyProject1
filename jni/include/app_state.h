@@ -11,20 +11,6 @@ struct InputState {
 };
 extern InputState g_input;
 
-// Снятые с продакшена функции (просьба 07.10): тумблеры в меню, их анимация и
-// запись в конфиг остаются, но в память игры значения больше не уходят — ни
-// записью полей оружия, ни файрвол-правилами. Единая точка: вернуть функцию —
-// одна правка false -> true здесь, все точки потребления подхватят сразу.
-inline constexpr bool kFeatureFastFire   = false;  // «Быстрая стрельба»
-inline constexpr bool kFeatureFastReload = false;  // «Быстрая перезарядка»
-inline constexpr bool kFeatureFastLoot   = false;  // «Быстрый подбор»
-inline constexpr bool kFeatureFakeLag    = false;  // FakeLag
-
-inline bool fast_fire_active()   { return kFeatureFastFire; }
-inline bool fast_reload_active() { return kFeatureFastReload; }
-inline bool fast_loot_active()   { return kFeatureFastLoot; }
-inline bool fake_lag_active()    { return kFeatureFakeLag; }
-
 struct AppState {
     struct SliderAnim { float pos = -1.f; float vel = 0.f; };
     struct RadioAnim  { float scale = 1.f, scaleVel = 0.f, ring = 0.f, ringVel = 0.f; };

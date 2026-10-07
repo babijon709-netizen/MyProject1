@@ -1,8 +1,6 @@
 #include "fps_memory.h"
 #include "game.h"
 #include "weapon_tuning_memory.h"
-#include "weapon_speed_memory.h"
-#include "loot_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
 #include "farm.h"
@@ -233,15 +231,12 @@ struct HeapMemory {
 };
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
-weapon_speed::Controller<HeapMemory> weapon_speeds(heap_memory);
-fast_loot::Controller<HeapMemory> loot(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
-Clock::time_point weapon_last_tick{}, loot_last_tick{};
+Clock::time_point weapon_last_tick{};
 uint64_t weapon_last_player = 0;
 unsigned weapon_last_flags = ~0u;
-bool loot_last_enabled = false;
 int fps_last_limit = 0;
 viewmodel::Status fps_last_log = viewmodel::Status::Off;
 // Build ID libunity, который не прошёл таблицу kFpsLayouts (0 — движок
@@ -320,12 +315,8 @@ void esp_viewmodel_reset(bool restore) {
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
-    if (!weapon_speeds.reset(restore && g_mem.bound()))
-        LogLine("weapon speed: originals could not all be restored before disconnect; restart game");
-    loot.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
-    loot_last_tick = {}; loot_last_enabled = false;
     invalidate_maps_snapshot();
     ++epoch;
 }
@@ -333,37 +324,20 @@ void esp_viewmodel_reset(bool restore) {
 void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
-    // Снятые функции (app_state.h): состояние тумблеров в конфиге и меню живёт
-    // своей жизнью, но в контроллеры уходит уже погашенный запрос. Так
-    // включатель в GUI ничего не пишет в игру, а если функция была активна в
-    // прошлой сессии — первый же тик с false вернёт оригиналы на место.
-    const bool want_fast_fire   = g_state.fast_fire && fast_fire_active();
-    const bool want_fast_reload = g_state.fast_reload && fast_reload_active();
-    const bool want_fast_loot   = settings.fast_loot && fast_loot_active();
+    // Тумблеры снятых функций (быстрая стрельба/перезарядка/подбор, FakeLag)
+    // остались в меню и в конфиге, но их логики в дереве больше нет: сюда
+    // приходит только то, что действительно пишет в игру.
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
-        weapon_speeds.reset(false); loot.reset();
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        loot.status = want_fast_loot ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        weapon_speeds.fire = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        weapon_speeds.reload = want_fast_reload ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
                              settings.hands_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off};
         return;
     }
     tick_fps(epoch, settings.fps_limit);
-    // Promise traversal can inspect hundreds of loop items. Cap it at game
-    // cadence instead of repeating it at an uncapped overlay frame rate.
-    const auto now = Clock::now();
-    if (want_fast_loot != loot_last_enabled ||
-        now - loot_last_tick >= std::chrono::milliseconds(16)) {
-        loot_last_tick = now;
-        loot_last_enabled = want_fast_loot;
-        loot.tick(epoch, g_il2cpp_base, want_fast_loot);
-    }
     const bool want_no_spread = settings.no_spread || esp_silent_wants_no_spread();
     // Use the local identity already validated by the world reader first. The
     // fixed TypeInfo RVA can lag behind a game update even when every managed
@@ -372,7 +346,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || want_no_spread || weapons.has_state() ||
-        want_fast_fire || want_fast_reload || weapon_speeds.has_state() ||
         g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
@@ -406,8 +379,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             controller.status={wait,wait};
             weapons.recoil=settings.no_recoil||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
-            weapon_speeds.fire=want_fast_fire||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
-            weapon_speeds.reload=want_fast_reload||weapon_speeds.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             return;
         }
         local_source_failed=false;
@@ -416,9 +387,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // every scalar). They only need a watchdog cadence, not the uncapped
     // overlay rate. Setting/player changes bypass the limiter immediately.
     const unsigned weapon_flags = (settings.no_recoil ? 1u : 0u) |
-                                  (want_no_spread ? 2u : 0u) |
-                                  (want_fast_fire ? 4u : 0u) |
-                                  (want_fast_reload ? 8u : 0u);
+                                  (want_no_spread ? 2u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -428,8 +397,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_last_player = player;
         weapon_last_flags = weapon_flags;
         weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
-        weapon_speeds.tick(epoch, g_il2cpp_base, player,
-                           want_fast_fire, want_fast_reload);
     }
     {
         // Ступень, на которой оборвалась цепочка отдачи/разброса. Логируем
@@ -463,12 +430,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     controller.tick(epoch, player, visible_settings);
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
-        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread ||
-        st.fast_loot != last_log.fast_loot || st.fast_fire != last_log.fast_fire ||
-        st.fast_reload != last_log.fast_reload) {
-        LogLine("viewmodel: fov=%d hands=%d; recoil=%d spread=%d loot=%d fire=%d reload=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
-                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread,
-                (int)st.fast_loot, (int)st.fast_fire, (int)st.fast_reload);
+        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread) {
+        LogLine("viewmodel: fov=%d hands=%d; recoil=%d spread=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
+                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread);
         last_log = st;
     }
 }
@@ -478,9 +442,6 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     auto status = controller.status;
     status.no_recoil = weapons.recoil;
     status.no_spread = weapons.spread;
-    status.fast_loot = loot.status;
-    status.fast_fire = weapon_speeds.fire;
-    status.fast_reload = weapon_speeds.reload;
     return status;
 }
 

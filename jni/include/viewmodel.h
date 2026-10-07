@@ -94,7 +94,6 @@ enum class Status { Off, Waiting, Active, ADS, Failed };
 struct Diagnostics {
     Status fov = Status::Off, hands = Status::Off;
     Status no_recoil = Status::Off, no_spread = Status::Off;
-    Status fast_loot = Status::Off, fast_fire = Status::Off, fast_reload = Status::Off;
 };
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем
 // тике (до 100 мс назад), дополнительных обращений к памяти игры не делает.

@@ -9,7 +9,6 @@
 #include "aim.h"
 #include "silent_aim.h"
 #include "farm.h"
-#include "fake_lag.h"
 #include "widgets.h"
 #include "menu.h"
 #include "config.h"
@@ -362,7 +361,6 @@ int main(int argc, char* argv[]) {
         Blur::Free();
         shutdown();
         Touch_Close();
-        fake_lag::shutdown();
         silent_aim::shutdown();
         esp_freecam_set(false);
         stop_attach_thread();
@@ -410,13 +408,10 @@ int main(int argc, char* argv[]) {
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
-        // FakeLag снят с продакшена (app_state.h): выключатель в меню и слайдер
-        // интенсивности остаются, правила INPUT в iptables больше не ставятся.
-        // Вызов с false, а не пропуск вызова, — на случай, если правила остались
-        // от прошлой сессии: update(false) их и снимает.
-        fake_lag::update(g_state.fake_lag && fake_lag_active(),
-                         (int)std::lround(g_state.fake_lag_percent),
-                         esp_target_pid());
+        // FakeLag удалён вместе с логикой: тумблер и слайдер интенсивности
+        // остались в меню (просьба 07.10), но правил INPUT в iptables больше нет
+        // ни на этом кадре, ни где-либо ещё. Если правила остались от старой
+        // сборки — снимаются вручную, чистить их больше нечем.
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
@@ -505,9 +500,6 @@ int main(int argc, char* argv[]) {
     shutdown();
     Touch_Close();
     while (!g_frame_done.load()) {}
-    // Remove network rules first: unlike the remaining process-local resources,
-    // firewall state must not survive a forced shutdown deadline.
-    fake_lag::shutdown();
     // Сначала останавливаем фонового writer: во время восстановления камеры и
     // object-data он уже не должен менять ось выстрела.
     silent_aim::shutdown();
