@@ -1,5 +1,6 @@
 #include "hud.h"
 #include "cfg.h"
+#include <cmath>
 #include "theme.h"       // C:: палитра
 #include "main.h"        // displayInfo, native_window_screen_*
 #include "game.h"        // esp_nearby_player_count
@@ -333,6 +334,60 @@ void DrawWatermark(float dt) {
         fg->AddCircleFilled({ex, ey}, pr, IM_COL32(20, 20, 26, 255), 24);
         fg->AddCircleFilled({ex - pr * 0.3f, ey - pr * 0.3f}, pr * 0.28f,
                             IM_COL32(235, 235, 240, 255), 12);
+    }
+
+    // ---- Кнопка FakeLag: квадрат с надписью FL ---------------------------
+    // Тап включает/выключает FakeLag напрямую. Положение — центр квадрата
+    // в долях экрана, дефолт справа ниже фрикама; двигается в «Разное → Сеть
+    // → Настроить кнопку FakeLag». Прячется тумблером «Кнопка на экране».
+    if (g_state.fakelag_btn_show)
+    {
+        const float side = kFlBtnSide, rad = kFlBtnRadius;
+        float cx = (g_state.fakelag_btn_x >= 0.f ? g_state.fakelag_btn_x : kFlBtnDefX) * scrW;
+        float cy = (g_state.fakelag_btn_y >= 0.f ? g_state.fakelag_btn_y : kFlBtnDefY) * scrH;
+        float qX = cx - side * 0.5f, qY = cy - side * 0.5f;
+        if (scrW > side + 16.f) qX = ImClamp(qX, 8.f, scrW - side - 8.f);
+        if (scrH > side + 16.f) qY = ImClamp(qY, 8.f, scrH - side - 8.f);
+
+        const bool on = g_state.fake_lag;
+        if (!menu_open && g_calibMode == 0 && io.MouseClicked[0] &&
+            io.MousePos.x >= qX && io.MousePos.x <= qX + side &&
+            io.MousePos.y >= qY && io.MousePos.y <= qY + side) {
+            g_state.fake_lag = !g_state.fake_lag;
+            PlaySound(SND_CLICK);
+            ShowToast(g_state.fake_lag ? XS("FakeLag включён") : XS("FakeLag выключен"));
+        }
+
+        fg->AddRectFilled({qX, qY}, {qX + side, qY + side}, C::UA(C::Card(), 0.90f), rad);
+        fg->AddRect({qX, qY}, {qX + side, qY + side},
+                    on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), rad, 0, on ? 3.f : 1.5f);
+
+        // Иконка: крупные буквы FL + три полоски-лаг снизу
+        const char* label = "FL";
+        const float fs = 44.f;
+        auto lsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, label);
+        float lx = qX + (side - lsz.x) * 0.5f;
+        float ly = qY + (side - lsz.y) * 0.5f - 10.f;
+        ImU32 txtCol = on ? C::U(C::Acc()) : C::UA(C::Txt(), 0.95f);
+        fg->AddText(fn, fs, {lx, ly}, txtCol, label);
+
+        // три полоски лаг-индикатора под текстом
+        const float barW = 10.f, barGap = 6.f, barY = ly + lsz.y + 8.f;
+        float totalW = barW*3 + barGap*2;
+        float bx0 = qX + (side - totalW) * 0.5f;
+        float h1 = 10.f, h2 = 16.f, h3 = 22.f;
+        // при выключенном FakeLag полоски приглушены, при включённом — яркие
+        ImU32 b1 = C::UA(on ? C::Acc() : C::Dim(), on ? 0.95f : 0.45f);
+        ImU32 b2 = C::UA(on ? C::Acc() : C::Dim(), on ? 0.95f : 0.55f);
+        ImU32 b3 = C::UA(on ? C::Acc() : C::Dim(), on ? 0.95f : 0.65f);
+        // мигание средней полоски когда вкл — лёгкий пульс
+        if (on) {
+            float pulse = 0.75f + 0.25f * sinf((float)ImGui::GetTime() * 5.f);
+            b2 = C::UA(C::Acc(), pulse);
+        }
+        fg->AddRectFilled({bx0, barY + h3 - h1}, {bx0 + barW, barY + h3}, b1, 3.f);
+        fg->AddRectFilled({bx0 + barW + barGap, barY + h3 - h2}, {bx0 + barW*2 + barGap, barY + h3}, b2, 3.f);
+        fg->AddRectFilled({bx0 + (barW + barGap)*2, barY}, {bx0 + (barW + barGap)*2 + barW, barY + h3}, b3, 3.f);
     }
 }
 

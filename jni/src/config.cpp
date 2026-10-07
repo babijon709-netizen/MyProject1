@@ -124,8 +124,8 @@ void RememberLayout() {
     mkdir(kCfgDir, 0777);
     std::ofstream f(CfgLayoutPath(), std::ios::trunc);
     if (!f) return;
-    char b[320];
-    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
+    char b[420];
+    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
              g_state.farm_joy_x, g_state.farm_joy_y,
              g_state.farm_fire_x, g_state.farm_fire_y,
              g_state.freecam_joy_x, g_state.freecam_joy_y,
@@ -134,7 +134,8 @@ void RememberLayout() {
              g_state.aim_tx, g_state.aim_ty,
              g_state.freecam_look_x, g_state.freecam_look_y,
              g_state.freecam_look_radius,
-             g_state.freecam_joy_size);
+             g_state.freecam_joy_size,
+             g_state.fakelag_btn_x, g_state.fakelag_btn_y);
     f << b;
 }
 
@@ -164,6 +165,11 @@ void RestoreLayout() {
     if (f >> joy_size)
         g_state.freecam_joy_size = (joy_size >= 60.f && joy_size <= 200.f)
             ? joy_size : 100.f;
+    float fl_x = -1.f, fl_y = -1.f;
+    if (f >> fl_x >> fl_y) {
+        g_state.fakelag_btn_x = cl(fl_x);
+        g_state.fakelag_btn_y = cl(fl_y);
+    }
 }
 
 static void XorBuf(uint8_t* buf, size_t sz) {
@@ -331,7 +337,8 @@ static void ConfigSaveToPath(const std::string& path) {
                           (g_state.fast_fire ? 64 : 0) | (g_state.fast_reload ? 128 : 0) |
                           // Инвертировано, как бит 4: старые конфиги держат 0,
                           // то есть ящики в домах видны — как до разделения.
-                          (g_state.esp_house_boxes ? 0 : 256);
+                          (g_state.esp_house_boxes ? 0 : 256) |
+                          (g_state.fakelag_btn_show ? 0 : 1024);
         auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
         const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
                                    + ch(cfg::esp::pickup_col.y) * 256
@@ -455,7 +462,7 @@ void ConfigLoad(int idx, bool announce) {
     // Packed scalars. A config written before these existed holds the old ping
     // colour here, so each value is range-checked and falls back to its default.
     {
-        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 1024.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
+        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 2048.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
         g_state.esp_loot   = (flags & 1) != 0;
         g_state.esp_pickup = (flags & 2) != 0;
         g_state.esp_bots     = (flags & 4) != 0;
@@ -465,6 +472,7 @@ void ConfigLoad(int idx, bool announce) {
         g_state.fast_fire = (flags & 64) != 0;
         g_state.fast_reload = (flags & 128) != 0;
         g_state.esp_house_boxes = (flags & 256) == 0;
+        g_state.fakelag_btn_show = (flags & 1024) == 0;
         g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;

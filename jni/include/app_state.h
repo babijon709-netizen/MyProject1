@@ -85,6 +85,10 @@ struct AppState {
     float freecam_btn_x = -1.f, freecam_btn_y = -1.f;
     // Видимость экранной кнопки фрикама (тумблер «Кнопка на экране»).
     bool  freecam_btn_show = true;
+    // Экранная кнопка FakeLag (квадрат с FL): те же доли экрана = ЦЕНТР,
+    // -1 = дефолт справа чуть ниже фрикама. Ставится тапом в «Разное → Сеть».
+    float fakelag_btn_x = -1.f, fakelag_btn_y = -1.f;
+    bool  fakelag_btn_show = true;
     // Счётчик игроков (пилюля «Противники»): доли экрана = её ЦЕНТР, -1 = не
     // задан (дефолт — верх по центру). Задаётся тапом в Опциях → Худ, живёт
     // только до перезапуска — как и остальные калибровки.
@@ -123,6 +127,7 @@ struct AppState {
     float a_xray_on = 0;
     float a_freecam_on = 0;
     float a_freecam_btn_show = 0;
+    float a_fakelag_btn_show = 0;
     float a_fps_90 = 0, a_fps_120 = 0, a_fps_144 = 0, a_fps_rst = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size, sl_aim_lead, sl_screen_stretch;

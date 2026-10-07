@@ -21,6 +21,7 @@
 #include "mem_io.h"
 #include "kernel_io.h"
 #include "stealth.h"
+#include "FakeLag.h"
 #include <sys/socket.h>
 #include <sys/utsname.h>
 #include <cerrno>
@@ -261,6 +262,7 @@ std::atomic<bool> main_thread_flag{true};
 std::atomic<bool> g_frame_done{true};
 InputState g_input;
 AppState g_state;
+static FakeLag g_fakeLag;
 
 static void ArmShutdownDeadline() {
     static std::atomic<bool> armed{false};
@@ -358,6 +360,7 @@ int main(int argc, char* argv[]) {
         // Arm the deadline before touching EGL: a wedged compositor must not
         // keep the last overlay frame on screen indefinitely.
         ArmShutdownDeadline();
+        g_fakeLag.destroy();
         Blur::Free();
         shutdown();
         Touch_Close();
@@ -408,10 +411,31 @@ int main(int argc, char* argv[]) {
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
-        // FakeLag удалён вместе с логикой: тумблер и слайдер интенсивности
-        // остались в меню (просьба 07.10), но правил INPUT в iptables больше нет
-        // ни на этом кадре, ни где-либо ещё. Если правила остались от старой
-        // сборки — снимаются вручную, чистить их больше нечем.
+        // FakeLag: дроп UDP через iptables (DROP без очереди — пакеты не копятся,
+        // после выключения пинг сразу нормализуется). Управляется тумблером в
+        // «Разное → Сеть» и отдельной кнопкой на экране.
+        {
+            static bool lastOn = false;
+            static int lastPct = -1;
+            if (g_state.fake_lag != lastOn) {
+                if (g_state.fake_lag) {
+                    g_fakeLag.setPercent((int)g_state.fake_lag_percent);
+                    g_fakeLag.apply(true);
+                    LogLine("fakelag: включён %d%%", (int)g_state.fake_lag_percent);
+                } else {
+                    g_fakeLag.apply(false);
+                    LogLine("fakelag: выключен — правила iptables сняты");
+                }
+                lastOn = g_state.fake_lag;
+                lastPct = (int)g_state.fake_lag_percent;
+            } else if (g_state.fake_lag) {
+                int cur = (int)g_state.fake_lag_percent;
+                if (cur != lastPct) {
+                    g_fakeLag.setPercent(cur);
+                    lastPct = cur;
+                }
+            }
+        }
         LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
@@ -496,6 +520,7 @@ int main(int argc, char* argv[]) {
     // Start the deadline before EGL teardown as well: the compositor itself
     // may be the blocked component holding the last overlay frame on screen.
     ArmShutdownDeadline();
+    g_fakeLag.destroy();
     Blur::Free();
     shutdown();
     Touch_Close();

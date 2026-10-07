@@ -25,3 +25,9 @@ constexpr float kFcBtnSide = 100.f;
 constexpr float kFcBtnRadius = 26.f;
 constexpr float kFcBtnDefX = 0.90f;
 constexpr float kFcBtnDefY = 0.50f;
+// Экранная кнопка FakeLag: квадрат с надписью FL, дефолт справа чуть ниже
+// фрикама чтобы не перекрывать. Калибровка 8 — та же система что у фрикама.
+constexpr float kFlBtnSide = 100.f;
+constexpr float kFlBtnRadius = 26.f;
+constexpr float kFlBtnDefX = 0.90f;
+constexpr float kFlBtnDefY = 0.66f;
