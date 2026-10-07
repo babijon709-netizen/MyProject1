@@ -176,6 +176,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 | `jni/src/process.cpp` | attach-поток: поиск игры, `esp_init`, проверка живости |
 | `jni/src/silent_aim.cpp` | образец фонового потока с доступом через транспорт |
 | `jni/src/fast_loot_memory.h` | быстрый подбор: обход раннеров плеер-лупа UniTask, обнуление 0.35f задержек «Забрать все» (тик из `esp_viewmodel_tick`, память через `HeapMemory`/`g_mem`) |
+| `jni/src/no_recoil_memory.h` | «без отдачи»: гашение амплитуды в ассете `RecoilConfig` хитскан-ствола в руках (6 скаляр), сохранение/возврат оригиналов как у «нет разброса» (тик из `esp_viewmodel_tick`) |
 | `jni/src/stealth.h` | маскировка процесса, unlink/restore бинарника, ptrace-слот |
 | `jni/src/main.cpp` | порядок старта, `--check-driver`, teardown |
 | `reversing/NOTES_5.10.md` | протокол FT 5.10 (auth/чтение/запись, эмуляция до живого R/W) |

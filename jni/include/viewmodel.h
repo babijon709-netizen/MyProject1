@@ -10,7 +10,8 @@ struct ViewmodelSettings {
     float fov = 90.f;
     float x = 0.f, y = 0.f, z = 0.f;
     int fps_limit = 0; // 0 = original game limit; otherwise 90 / 120 / 144
-    // UI-only placeholder retained for the existing menu toggle and profiles.
+    // «Без отдачи»: гасит амплитуду в RecoilConfig хитскан-ствола в руках
+    // (реализация: no_recoil_memory.h, тик из esp_viewmodel_tick).
     bool no_recoil_button = false;
     bool no_spread = false;
     // Быстрый подбор («Забрать все» без пауз): не трогает код игры — обходит

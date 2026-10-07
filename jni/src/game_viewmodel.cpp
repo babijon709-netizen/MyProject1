@@ -3,6 +3,7 @@
 #include "weapon_tuning_memory.h"
 #include "fast_fire_memory.h"
 #include "fast_loot_memory.h"
+#include "no_recoil_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
 #include "farm.h"
@@ -285,6 +286,7 @@ HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
 fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
+no_recoil::Controller<HeapMemory> no_recoil_ctl(heap_memory);
 
 // Причина остановки быстрой стрельбы для лога: расшифровка стадии, которую
 // выставляет fast_fire::Controller (resolve/build_plan/apply в
@@ -320,6 +322,37 @@ void log_fast_fire_transition() {
                 fast_fire_stop_reason(status, stage), (int)status, stage);
     else
         LogLine("fast fire: status=%d stage=%d (1 local,2 FPManager,3 slot,4 type,5 owner,6 mode/wait,7 timing,8 changed,9 restore,10 write,11 burst overlap guard)",
+                (int)status, stage);
+    last_stage = stage; last_status = status;
+}
+// «Без отдачи»: расшифровка стадий из no_recoil_memory.h для лога.
+const char* no_recoil_stop_reason(viewmodel::Status status, int stage) {
+    if (status == viewmodel::Status::Off) return "disabled or game unbound";
+    switch (stage) {
+        case 1: case 2:  return "no local player";
+        case 3: case 4:  return "network identity missing or not local";
+        case 5:          return "FPManager missing or dead";
+        case 6:          return "not a hitscan in hands";
+        case 7:          return "weapon backlink to player mismatch";
+        case 8:          return "HitscanWeaponConfig not found";
+        case 9:          return "RecoilConfig asset not found";
+        case 10: case 12: return "recoil values unreadable";
+        case 11:         return "weapon context changed mid-write";
+        case 13: case 14: return "write not confirmed by readback";
+        default:         return "waiting for bind or player";
+    }
+}
+void log_no_recoil_transition() {
+    static int last_stage = -1;
+    static viewmodel::Status last_status = viewmodel::Status::Off;
+    const int stage = no_recoil_ctl.stage();
+    const viewmodel::Status status = no_recoil_ctl.status;
+    if (stage == last_stage && status == last_status) return;
+    if (last_status == viewmodel::Status::Active && status != viewmodel::Status::Active)
+        LogLine("no recoil: stopped — %s (status=%d stage=%d)",
+                no_recoil_stop_reason(status, stage), (int)status, stage);
+    else
+        LogLine("no recoil: status=%d stage=%d (1-2 local,3-4 identity,5 FPManager,6 not hitscan,7 owner,8 config,9 recoil asset,10-14 write)",
                 (int)status, stage);
     last_stage = stage; last_status = status;
 }
@@ -410,6 +443,9 @@ void esp_viewmodel_reset(bool restore) {
     if (!rapid_fire.reset(restore && g_mem.bound()))
         LogLine("fast fire: originals could not all be restored before disconnect; restart game");
     log_fast_fire_transition();
+    if (!no_recoil_ctl.reset(restore && g_mem.bound()))
+        LogLine("no recoil: originals could not all be restored before disconnect; restart game");
+    log_no_recoil_transition();
     loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
@@ -426,6 +462,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         rapid_fire.reset(false);
         rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         log_fast_fire_transition();
+        no_recoil_ctl.reset(false);
+        no_recoil_ctl.status = settings.no_recoil_button ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        log_no_recoil_transition();
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
@@ -460,6 +499,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         want_no_spread || weapons.has_state() ||
         want_fast_fire || rapid_fire.has_state() ||
+        settings.no_recoil_button || no_recoil_ctl.has_state() ||
         g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
@@ -494,6 +534,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire);
             log_fast_fire_transition();
+            no_recoil_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_recoil_button);
+            log_no_recoil_transition();
             return;
         }
         local_source_failed=false;
@@ -502,7 +544,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // every scalar). They only need a watchdog cadence, not the uncapped
     // overlay rate. Setting/player changes bypass the limiter immediately.
     const unsigned weapon_flags = (want_no_spread ? 1u : 0u) |
-                                  (want_fast_fire ? 2u : 0u);
+                                  (want_fast_fire ? 2u : 0u) |
+                                  (settings.no_recoil_button ? 4u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -514,10 +557,11 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapons.tick(epoch, g_il2cpp_base, player, want_no_spread);
         rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire);
         log_fast_fire_transition();
+        no_recoil_ctl.tick(epoch, g_il2cpp_base, player, settings.no_recoil_button);
+        log_no_recoil_transition();
     }
     {
-        // Log no-spread resolution changes only; this is intentionally independent
-        // of the GUI-only recoil placeholder.
+        // Log no-spread resolution changes only.
         static int last_stage = -1;
         const int stage = want_no_spread ? weapons.stage() : 0;
         if (stage != last_stage) {

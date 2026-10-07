@@ -997,10 +997,11 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Оружие"));
         CardBg(Layout::RowH * 2.f);
+        const bool oldRecoil = vm.no_recoil_button;
         const bool oldSpread = vm.no_spread;
         ToggleRow("##norecoil", XS("Без отдачи"), &vm.no_recoil_button, g_state.a_no_recoil, false, true);
         ToggleRow("##nospread", XS("Без разброса"), &vm.no_spread, g_state.a_no_spread, true, false);
-        if (oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
+        if (oldSpread != vm.no_spread || oldRecoil != vm.no_recoil_button) esp_viewmodel_tick(vm);
         // Диагностические строки («не применено» / «ожидание») убраны по
         // просьбе пользователя: применение видно в игре, подробности — в журнале.
         SHdr(XS("Темп оружия"));

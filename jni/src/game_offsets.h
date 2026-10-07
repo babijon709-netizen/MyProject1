@@ -142,6 +142,16 @@ inline constexpr std::uint64_t HITSCANCONFIG_LOOP_RELOAD = 0x4C;
 inline constexpr std::uint64_t HITSCANCONFIG_DISPERSION_CONFIG = 0x68;  // было 0x60
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
+// Отдача («без отдачи»): конфиг-ассет хитскана (поле 0x70 в
+// HitscanWeaponConfig, рядом с dispersionConfig 0x68). Гасятся в ноль
+// вертикальные Мин/Макс (Vector2) и боковые дельты; оригиналы «нет отдачи»
+// хранит и возвращает при выключении/смене ствола (проверено по дампам
+// 11946 и 11943 — раскладка одна).
+inline constexpr std::uint64_t HITSCANCONFIG_RECOIL_CONFIG = 0x70;
+inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = 0x18;   // Vector2
+inline constexpr std::uint64_t RECOILCONFIG_MAX_RECOIL = 0x20;   // Vector2
+inline constexpr std::uint64_t RECOILCONFIG_MIN_SIDE = 0x28;
+inline constexpr std::uint64_t RECOILCONFIG_MAX_SIDE = 0x2C;
 
 inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDCF6068; // release 11946: outer 0xD9A96F8 -> addend
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
