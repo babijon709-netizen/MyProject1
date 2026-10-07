@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 CXX=${CXX:-g++}
 OUT=/tmp/xvcen_host_tests
 mkdir -p "$OUT"
-for t in test_fps_memory test_pos_filter test_silent_aim_core test_esp_box_hold; do
+for t in test_fast_fire_memory test_fps_memory test_pos_filter test_silent_aim_core test_esp_box_hold; do
     $CXX -std=gnu++17 -Wall -Wextra \
         -I jni/src -I jni/include \
         "jni/tests/$t.cpp" -o "$OUT/$t"

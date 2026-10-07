@@ -1,6 +1,7 @@
 #include "fps_memory.h"
 #include "game.h"
 #include "weapon_tuning_memory.h"
+#include "fast_fire_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
 #include "farm.h"
@@ -196,6 +197,20 @@ struct HeapMemory {
         n[sizeof(n)-1]=0;
         return std::strstr(n,name)!=nullptr;
     }
+    bool exact(uint64_t object, const char* name, const char* namespaze) {
+        if (object < 0x10000) return false;
+        const uint64_t klass=memory.ptr(object);
+        if (klass < 0x10000) return false;
+        const uint64_t np=memory.ptr(klass+go_active::IL2CPP_CLASS_NAME);
+        const uint64_t sp=memory.ptr(klass+go_active::IL2CPP_CLASS_NAMESPACE);
+        char n[96]{}, ns[96]{};
+        const size_t nl=std::strlen(name)+1, sl=std::strlen(namespaze)+1;
+        // Type-specific timing offsets must never use the permissive
+        // metadata-read fallback used by the legacy recoil adapter.
+        return np>=0x10000 && sp>=0x10000 && nl<=sizeof(n) && sl<=sizeof(ns) &&
+            g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
+            std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
+    }
     bool named(uint64_t object, const char* name, const char* namespaze) {
         return object>=0x10000 && named_klass(memory.ptr(object),name,namespaze);
     }
@@ -231,6 +246,7 @@ struct HeapMemory {
 };
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
+fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -315,6 +331,8 @@ void esp_viewmodel_reset(bool restore) {
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
+    if (!rapid_fire.reset(restore && g_mem.bound()))
+        LogLine("fast fire: originals could not all be restored before disconnect; restart game");
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
     invalidate_maps_snapshot();
@@ -324,11 +342,11 @@ void esp_viewmodel_reset(bool restore) {
 void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
-    // Тумблеры снятых функций (быстрая стрельба/перезарядка/подбор, FakeLag)
-    // остались в меню и в конфиге, но их логики в дереве больше нет: сюда
-    // приходит только то, что действительно пишет в игру.
+    const bool want_fast_fire = g_state.fast_fire;
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
+        rapid_fire.reset(false);
+        rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
@@ -346,6 +364,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         settings.no_recoil || want_no_spread || weapons.has_state() ||
+        want_fast_fire || rapid_fire.has_state() ||
         g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
@@ -379,6 +398,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             controller.status={wait,wait};
             weapons.recoil=settings.no_recoil||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
+            rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire);
             return;
         }
         local_source_failed=false;
@@ -387,7 +407,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // every scalar). They only need a watchdog cadence, not the uncapped
     // overlay rate. Setting/player changes bypass the limiter immediately.
     const unsigned weapon_flags = (settings.no_recoil ? 1u : 0u) |
-                                  (want_no_spread ? 2u : 0u);
+                                  (want_no_spread ? 2u : 0u) |
+                                  (want_fast_fire ? 4u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -397,6 +418,14 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_last_player = player;
         weapon_last_flags = weapon_flags;
         weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
+        rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire);
+        static int last_fire_stage = -1;
+        static auto last_fire_status = viewmodel::Status::Off;
+        if (last_fire_stage != rapid_fire.stage() || last_fire_status != rapid_fire.status) {
+            last_fire_stage = rapid_fire.stage(); last_fire_status = rapid_fire.status;
+            LogLine("fast fire: status=%d stage=%d (1 local,2 FPManager,3 slot,4 type,5 owner,6 mode/wait,7 timing,8 changed,9 restore,10 write,11 burst overlap guard)",
+                    (int)last_fire_status, last_fire_stage);
+        }
     }
     {
         // Ступень, на которой оборвалась цепочка отдачи/разброса. Логируем
@@ -442,6 +471,7 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     auto status = controller.status;
     status.no_recoil = weapons.recoil;
     status.no_spread = weapons.spread;
+    status.fast_fire = rapid_fire.status;
     return status;
 }
 

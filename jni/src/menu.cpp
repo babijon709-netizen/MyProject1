@@ -1003,14 +1003,12 @@ float TabContent(int tab, float dt, float cW) {
         if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
         // Диагностические строки («не применено» / «ожидание») убраны по
         // просьбе пользователя: применение видно в игре, подробности — в журнале.
-        // Тумблеры оставлены по просьбе 07.10, логики за ними больше нет: ни
-        // быстрой стрельбы, ни быстрой перезарядки в дереве не существует, так
-        // что esp_viewmodel_tick здесь нечего сообщать. Состояние по-прежнему
-        // щёлкается и уходит в конфиг.
         SHdr(XS("Темп оружия"));
         CardBg(Layout::RowH * 2.f);
+        const bool oldFastFire = g_state.fast_fire;
         ToggleRow("##fastfire", XS("Быстрая стрельба"), &g_state.fast_fire,
                   g_state.a_fast_fire, false, true);
+        if (oldFastFire != g_state.fast_fire) esp_viewmodel_tick(vm);
         ToggleRow("##fastreload", XS("Быстрая перезарядка"), &g_state.fast_reload,
                   g_state.a_fast_reload, true, false);
 

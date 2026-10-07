@@ -103,8 +103,21 @@ inline constexpr std::uint64_t FPHITSCAN_CONFIG = 0x130;
 // config alone is therefore not enough for a weapon which is already drawn.
 inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = 0xE8;
 inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = 0x124;
+// Per-instance source fields copied into the attack cache; checked in both supplied dumps.
+inline constexpr std::uint64_t FPHITSCAN_FIRE_MODE = 0x138;
+inline constexpr std::uint64_t FPHITSCAN_FIRE_DURATION = 0x140;
+inline constexpr std::uint64_t FPHITSCAN_BURST_LENGTH = 0x144;
+inline constexpr std::uint64_t FPHITSCAN_BURST_DURATION = 0x148;
+inline constexpr std::uint64_t FPHITSCAN_BURST_PAUSE = 0x14C;
 inline constexpr std::uint64_t FPHITSCAN_BURST_WAIT = 0x1F0;
 inline constexpr std::uint64_t WAITFORSECONDS_SECONDS = 0x10;
+inline constexpr std::uint64_t FPBOW_MIN_SHOT_PERIOD = 0x138;
+inline constexpr std::uint64_t FPCROSSBOW_MIN_SHOT_PERIOD = 0x140;
+inline constexpr std::uint64_t FPROCKETLAUNCHER_MIN_SHOT_PERIOD = 0x140;
+inline constexpr std::uint64_t FPSNOWBALL_MIN_THROW_PERIOD = 0x12C;
+inline constexpr std::uint64_t FPEXPLOSIVECHARGE_MIN_THROW_PERIOD = 0x12C;
+inline constexpr std::uint64_t FPSPEAR_MIN_THROW_PERIOD = 0x168;
+inline constexpr std::uint64_t FPSPEAR_CACHED_THROW_PERIOD = 0x1A8;
 inline constexpr std::uint64_t FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD = 0x2A0;  // было 0x2E0; zrb: сеттер-инициализатор читает config[0x4C] (LoopReloadPeriod) и пишет в +0x2A0 — сверено дизассемблером
 inline constexpr std::uint64_t FPHITSCAN_CALCULATOR = 0x1F8;
 inline constexpr std::uint64_t CALCULATOR_DISPERSION_CONFIG = 0x10;

@@ -10,3 +10,6 @@ benzware.log
 
 # externally supplied game dumps
 google_drive/
+
+# local analysis environment
+.venv/
