@@ -14,14 +14,44 @@
 #include <limits>
 
 namespace object_data {
+// Причина отказа ворот записи в кучу — для лога: по одной только строке
+// «отклонено» раньше было не понять, какое именно правило сработало.
+enum class Reject : int {
+    None = 0,        // адрес подтверждён
+    BadArgs,         // адрес/размер не прошли базовую проверку
+    ParseAbort,      // битая строка или непорядок в карте — карта отвергнута целиком
+    NoMapping,       // ни одна строка карты не накрывает адрес
+    FileBacked,      // inode/устройство/смещение ненулевые или путь в имени
+    FileTail,        // анонимное отображение вплотную к файловому (.bss-защита)
+    NamedRegion,     // анонимное отображение с меткой ядра не из белого списка
+    Perms,           // права не «rw-p»
+    SpansBoundary,   // запись вылезает за конец отображения
+};
+
 // Подтверждает адрес и заодно отдаёт границы подтверждённого отображения:
 // вызывающий кэширует диапазон и не разбирает карту на каждую запись (разбор
 // нескольких сотен килобайт стоит миллисекунды — это и был лаг оверлея).
+// При отказе заполняет причину и строку карты, накрывающую адрес (если есть):
+// по ним в логе видно, какое отображение и какое правило не пустили запись.
 inline bool heap_writable_range(const std::string& maps, uint64_t address, size_t size,
-                                uint64_t& range_lo, uint64_t& range_hi) {
+                                uint64_t& range_lo, uint64_t& range_hi,
+                                Reject* reject = nullptr,
+                                char* line_out = nullptr, size_t line_cap = 0) {
+    auto fail = [&](Reject r) { if (reject) *reject = r; return false; };
+    auto copy_line = [&](const char* begin, size_t length) {
+        if (!line_out || !line_cap) return;
+        const size_t n = length < line_cap - 1 ? length : line_cap - 1;
+        std::memcpy(line_out, begin, n);
+        line_out[n] = '\0';
+        // Хвост длинного пути в лог не нужен: шапка строки — причина.
+        for (size_t i = 0; i < n; ++i)
+            if (line_out[i] == '\r' || line_out[i] == '\n') line_out[i] = ' ';
+    };
+    if (reject) *reject = Reject::None;
+    if (line_out && line_cap) line_out[0] = '\0';
     range_lo = range_hi = 0;
     if (address < 0x10000 || !size || size > 64 ||
-        address > std::numeric_limits<uint64_t>::max() - size) return false;
+        address > std::numeric_limits<uint64_t>::max() - size) return fail(Reject::BadArgs);
     uint64_t previous_end = 0;
     bool file_tail = false;
     size_t pos = 0;
@@ -51,7 +81,10 @@ inline bool heap_writable_range(const std::string& maps, uint64_t address, size_
         if (std::sscanf(header, "%llx-%llx %4s %llx %x:%x %llu %n",
                         &lo, &hi, perms, &offset, &major, &minor, &inode, &consumed) != 7 ||
             !consumed || (size_t)consumed > line_length ||
-            hi <= lo || lo < previous_end) return false;
+            hi <= lo || lo < previous_end) {
+            copy_line(line_begin, line_length);
+            return fail(Reject::ParseAbort);
+        }
 
         const char* name = line_begin + consumed;
         size_t name_length = line_length - (size_t)consumed;
@@ -71,14 +104,20 @@ inline bool heap_writable_range(const std::string& maps, uint64_t address, size_
         file_tail = file || (lo == previous_end && file_tail);
         previous_end = hi;
         if (address >= lo && address < hi) {
-            const bool ok = address + size <= hi && !file_tail && anonymous &&
-                !inode && !offset && !major && !minor &&
-                std::strcmp(perms, "rw-p") == 0;
-            if (ok) { range_lo = lo; range_hi = hi; }
-            return ok;
+            copy_line(line_begin, line_length);
+            // Каждое правило — отдельно, чтобы в логе было видно, какое именно
+            // не пустило: порядок от самого частного к самому общему.
+            if (inode || offset || major || minor || file) return fail(Reject::FileBacked);
+            if (std::strcmp(perms, "rw-p") != 0) return fail(Reject::Perms);
+            if (file_tail) return fail(Reject::FileTail);
+            if (!anonymous) return fail(Reject::NamedRegion);
+            if (address + size > hi) return fail(Reject::SpansBoundary);
+            range_lo = lo; range_hi = hi;
+            if (reject) *reject = Reject::None;
+            return true;
         }
     }
-    return false;
+    return fail(Reject::NoMapping);
 }
 
 inline bool heap_writable(const std::string& maps, uint64_t address, size_t size) {

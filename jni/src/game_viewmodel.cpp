@@ -140,24 +140,55 @@ bool heap_gate_allows(uint64_t address, size_t size) {
         if (address >= gate.lo && address + size <= gate.hi) return true;
     }
     uint64_t lo = 0, hi = 0;
+    object_data::Reject why = object_data::Reject::None;
+    char line[192] = {};
     const std::string* text = maps_snapshot(false);
-    if (!text || !object_data::heap_writable_range(*text, address, size, lo, hi)) {
+    if (!text || !object_data::heap_writable_range(*text, address, size, lo, hi, &why, line, sizeof(line))) {
         // Снимок мог устареть (отображение появилось только что) — решает
         // всегда свежая карта, а не кэш.
+        why = object_data::Reject::None; line[0] = '\0';
         text = maps_snapshot(true);
-        if (!text || !object_data::heap_writable_range(*text, address, size, lo, hi)) {
+        if (!text || !object_data::heap_writable_range(*text, address, size, lo, hi, &why, line, sizeof(line))) {
             // Отказ ворот — самая непрозрачная из причин «функция не
             // применилась»: сама запись не делается, а наружу видно только
-            // «не применено». Пишем адрес, чтобы его можно было сверить с
-            // картой процесса.
-            static double refused_at = -1e9;
+            // «не применено». Печатаем причину правила и строку карты,
+            // накрывающую адрес, — по ним понятно, какое отображение не
+            // пустило запись и можно ли это правило ослабить.
+            // Троттлинг по коду причины: разные причины не глушат друг друга.
+            static double refused_at[16] = {};
+            static int refused_kind[16] = {};
+            const int kind = ((int)why % 15) + 1; // 0 = «занято», потому не годится
             const double moment = memio::now_seconds();
-            if (moment - refused_at >= 5.0) {
-                refused_at = moment;
-                LogLine("запись в кучу отклонена воротами: адрес 0x%llx, %zu байт "
-                        "(карта %zu КБ) — отображение не анонимное rw-p",
-                        (unsigned long long)address, size,
-                        text ? text->size() / 1024 : (size_t)0);
+            bool print = true;
+            for (int i = 0; i < 16; ++i) {
+                if (refused_kind[i] == kind) {
+                    print = moment - refused_at[i] >= 5.0;
+                    refused_at[i] = moment;
+                    break;
+                }
+                if (refused_kind[i] == 0) { refused_kind[i] = kind; refused_at[i] = moment; break; }
+                if (i == 15) { // свободных нет — забираем самый старый слот
+                    int oldest = 0;
+                    for (int j = 1; j < 16; ++j) if (refused_at[j] < refused_at[oldest]) oldest = j;
+                    refused_kind[oldest] = kind; refused_at[oldest] = moment;
+                }
+            }
+            if (print) {
+                const char* reason = "unknown";
+                switch (why) {
+                    case object_data::Reject::BadArgs:      reason = "bad args"; break;
+                    case object_data::Reject::ParseAbort:   reason = "maps parse aborted"; break;
+                    case object_data::Reject::NoMapping:    reason = "no mapping covers the address"; break;
+                    case object_data::Reject::FileBacked:   reason = "file-backed mapping"; break;
+                    case object_data::Reject::FileTail:     reason = "anon tail of a file mapping (bss guard)"; break;
+                    case object_data::Reject::NamedRegion:  reason = "anon mapping with unknown label"; break;
+                    case object_data::Reject::Perms:        reason = "perms are not rw-p"; break;
+                    case object_data::Reject::SpansBoundary:reason = "write spans the mapping end"; break;
+                    default: break;
+                }
+                LogLine("запись в кучу отклонена воротами: адрес 0x%llx, %zu байт — %s; карта: %s",
+                        (unsigned long long)address, size, reason,
+                        line[0] ? line : (text ? "(строка не найдена)" : "(карта не прочиталась)"));
             }
             return false;
         }
