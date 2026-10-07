@@ -5433,12 +5433,37 @@ struct MountLatch {
     bool last_ok = false;
     Vec3 prev_saved{};
     bool have_saved = false;
+    // Счётчики для лога «бокс отстаёт на транспорте»: сколько раз подряд
+    // защита от мерцания удерживала бокс на прежнем месте и сколько кадров
+    // подряд не было ни одного живого отсчёта позиции.
+    int  hold_count = 0;
+    int  miss_streak = 0;
 };
 static std::unordered_map<uint64_t, MountLatch> g_mount_latch;
 
 static bool player_mount_engaged(uint64_t player) {
     auto found = g_mount_latch.find(player);
     return found != g_mount_latch.end() && found->second.engaged;
+}
+
+// Диагностика «бокс отстаёт на транспорте»: переходы защёлки пишутся сразу,
+// состояние — не чаще раза в секунду на игрока и не больше 4 строк в секунду
+// всего. Строка показывает, какие источники позиции живы (трансформ камеры /
+// модель), кто выбран, и на сколько метров бокс отстаёт от свежего отсчёта —
+// удержанием защитой от мерцания или нечитаемостью источников.
+static bool mount_log_allow(uint64_t player) {
+    static std::unordered_map<uint64_t, double> at;
+    static double window = -1e9;
+    static int budget = 0;
+    const double now = mono_seconds();
+    if (now - window >= 1.0) { window = now; budget = 4; }
+    auto it = at.find(player);
+    if (it != at.end() && now - it->second < 1.0) return false;
+    if (budget <= 0) return false;
+    at[player] = now;
+    if (at.size() > 64) at.clear();
+    --budget;
+    return true;
 }
 
 static void apply_mounted_position(uint64_t player, Vec3& feet) {
@@ -5477,6 +5502,7 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
     Vec3 live{};
     bool have_live = false;
     float live_h2 = -1.0F;
+    const char* live_source = "нет";
     if (have_cam) {
         Vec3 p = cam;
         if (ground) p.y -= kCameraRootHeight;
@@ -5484,6 +5510,7 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
             live = p;
             have_live = true;
             live_h2 = vec3_horiz2(p, saved);
+            live_source = "трансформ";
         }
     }
     if (have_model && !id_mounted && !latch.engaged) {
@@ -5500,6 +5527,7 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
             live = p;
             have_live = true;
             live_h2 = h2;
+            live_source = "модель";
         }
     } else if (!have_live && have_model) {
         Vec3 p = model;
@@ -5507,13 +5535,16 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
         live = p;
         have_live = true;
         live_h2 = vec3_horiz2(p, saved);
+        live_source = "модель";
     }
     if (!ground && !have_live && position_looks_like_world_space(feet)) {
         live = feet;
         have_live = true;
         live_h2 = vec3_horiz2(feet, saved);
+        live_source = "ноги";
     }
 
+    const bool was_engaged = latch.engaged;
     bool pos_mounted = latch.saved_still >= 8 && have_live && live_h2 > 1.6F * 1.6F;
     bool keep_mounted = latch.engaged && have_live && live_h2 > 1.6F * 1.6F;
     if (id_mounted || pos_mounted || keep_mounted) {
@@ -5524,29 +5555,60 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
             latch.engaged = false;
             latch.last_ok = false;
             latch.unmounted_streak = 0;
+            latch.hold_count = 0;
+            latch.miss_streak = 0;
         }
+    }
+    if (latch.engaged != was_engaged) {
+        const uint32_t vid = rd<uint32_t>(player + PLAYER_VEHICLE_ID);
+        const uint32_t sid = rd<uint32_t>(player + PLAYER_SEAT_ID);
+        if (latch.engaged)
+            LogLine("транспорт: 0x%llx поехал (ид=%u сид=%u) — бокс переведён на трансформ/модель",
+                    (unsigned long long)player, vid, sid);
+        else
+            LogLine("транспорт: 0x%llx слез — бокс обратно на поле позиции", (unsigned long long)player);
     }
     if (!latch.engaged) return;
 
+    const char* source = "нет";
+    bool held = false;
     if (have_live) {
+        source = live_source;
+        latch.miss_streak = 0;
         float last_h2 = latch.last_ok ? vec3_horiz2(latch.last, saved) : 0.0F;
         // Rendered transform snapped back to the frozen boarding point.
         if (latch.last_ok && live_h2 < 1.25F * 1.25F && last_h2 > 2.5F * 2.5F) {
             feet = latch.last;
-            return;
+            held = true;
         }
         // Same flicker, but the bad sample did not land exactly on lastSaved.
-        if (latch.last_ok && last_h2 > 4.0F &&
+        else if (latch.last_ok && last_h2 > 4.0F &&
             vec3_horiz2(live, latch.last) > 4.0F * 4.0F && live_h2 < last_h2 * 0.25F) {
             feet = latch.last;
-            return;
+            held = true;
+        } else {
+            latch.last = live;
+            latch.last_ok = true;
+            feet = live;
         }
-        latch.last = live;
-        latch.last_ok = true;
-        feet = live;
-        return;
+    } else {
+        ++latch.miss_streak;
+        if (latch.last_ok) feet = latch.last;
     }
-    if (latch.last_ok) feet = latch.last;
+    if (held) ++latch.hold_count;
+
+    // Отставание бокса от свежего отсчёта: удержание защитой (есть живой
+    // отсчёт, но бокс оставлен на прежнем) или нечитаемость источников
+    // (живого отсчёта нет вообще — тогда расстояние неизвестно, -1).
+    if (mount_log_allow(player)) {
+        float lag_m = -1.0F;
+        if (held) lag_m = sqrtf(vec3_horiz2(latch.last, live));
+        else if (!have_live) lag_m = -1.0F;
+        LogLine("транспорт: 0x%llx источник=%s камера=%d модель=%d отстал=%.1fм удержаний=%d пропусков=%d заморозка=%d",
+                (unsigned long long)player, source, (int)have_cam, (int)have_model,
+                (double)lag_m, latch.hold_count, latch.miss_streak, latch.saved_still);
+        latch.hold_count = 0;
+    }
 }
 
 static void prune_mount_latch(const std::vector<uint64_t>& players) {
@@ -8216,6 +8278,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!s_transforms[i]) { skip_reason[i] = 'Z'; continue; }
         if (!position_ok[i]) { skip_reason[i] = 'P'; continue; }
         Vec3 feet = positions[i];
+        // На транспорте поле позиции замирает в точке посадки, и бокс едет
+        // «по памяти» либо отстаёт. Пока пассажир в седле, позиция берётся из
+        // трансформа, привязанного к сиденью; состояние видно в логе по
+        // префиксу «транспорт:».
+        apply_mounted_position(s_transforms[i], feet);
 
         float distance = -1.0F;
         if (has_local_position) {
