@@ -38,6 +38,16 @@ inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME = game_offsets::DELAYP
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN = game_offsets::DELAYPROMISE_SCALED_TIMESPAN;
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED = game_offsets::DELAYPROMISE_SCALED_ELAPSED;
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = game_offsets::DELAYPROMISE_SCALED_INITIAL_FRAME;
+// TypeInfo-слоты промисов, бета 11943: у беты нет таблицы TypeInfoPointers,
+// поэтому слоты найдены по релокациям из UniTask.DelayPromise.Create /
+// DelayIgnoreTimeScalePromise.Create. Каждая пара кандидатов — это классный
+// слот и слот вложенного <>c (оба идут соседними парами в .data.rel.ro);
+// какой из двух пар классный, выбирается в рантайме сверкой имени класса
+// (см. fast_loot_memory.h), поэтому порядок кандидатов не критичен.
+inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA = 0xDD82788;     // кандидаты: пара к 0xDD82780
+inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA_ALT = 0xDD850B8; // пара к 0xDD850B0
+inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA = 0xDD82780;
+inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA_ALT = 0xDD850B0;
 inline constexpr std::uint64_t FPHITSCAN_CONFIG = game_offsets::FPHITSCAN_CONFIG;
 inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = game_offsets::FPWEAPON_EFFECTIVE_RELOAD_PERIOD;
 inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = game_offsets::FPWEAPON_SHOT_PERIOD;

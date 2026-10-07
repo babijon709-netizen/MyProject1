@@ -2,6 +2,7 @@
 #include "game.h"
 #include "weapon_tuning_memory.h"
 #include "fast_fire_memory.h"
+#include "fast_loot_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
 #include "farm.h"
@@ -247,6 +248,7 @@ struct HeapMemory {
 HeapMemory heap_memory;
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
+fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
 Clock::time_point fps_last_tick{}, fps_last_resolve{};
@@ -333,6 +335,7 @@ void esp_viewmodel_reset(bool restore) {
         LogLine("weapon data: originals could not all be restored before disconnect; restart game");
     if (!rapid_fire.reset(restore && g_mem.bound()))
         LogLine("fast fire: originals could not all be restored before disconnect; restart game");
+    loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
     invalidate_maps_snapshot();
@@ -355,6 +358,23 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         return;
     }
     tick_fps(epoch, settings.fps_limit);
+    {
+        // Быстрый подбор («Забрать все»): живёт в плеер-лупе UniTask и не
+        // зависит от цепочки игрока, поэтому тикается до её резолва.
+        static fast_loot::State loot_last_state = fast_loot::State::Off;
+        static bool loot_announced = false;
+        const int loot_zeroed = loot_speed.tick(g_il2cpp_base, settings.fast_loot);
+        if (loot_speed.state() != loot_last_state) {
+            loot_last_state = loot_speed.state();
+            LogLine("fast loot: state=%d stage=%d (0 off,1 waiting,2 active,3 failed; stage: 1 helper slot,2 statics,3 promise classes)",
+                    (int)loot_last_state, loot_speed.stage());
+        }
+        if (loot_zeroed > 0 && !loot_announced) {
+            loot_announced = true;
+            LogLine("fast loot: first zeroing — %d delay(s) of 0.35f completed early", loot_zeroed);
+        }
+        if (!settings.fast_loot) loot_announced = false;
+    }
     const bool want_no_spread = settings.no_spread || esp_silent_wants_no_spread();
     // Use the local identity already validated by the world reader first. The
     // fixed TypeInfo RVA can lag behind a game update even when every managed

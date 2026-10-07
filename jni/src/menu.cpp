@@ -1019,8 +1019,8 @@ float TabContent(int tab, float dt, float cW) {
         SliderRow("##fakelagpct", XS("Интенсивность"), &g_state.fake_lag_percent,
                   1.f, 100.f, XS("%.0f%%"), true, false, g_state.sl_fake_lag, dt);
 
-        // «Быстрый подбор» — тумблер без логики: обход промисов удалён целиком,
-        // значение живёт только в настройках и в конфиге.
+        // «Быстрый подбор» — обнуление 0.35f-задержек UniTask при «Забрать
+        // все» (логика в fast_loot_memory.h, тик из esp_viewmodel_tick).
         SHdr(XS("Подбор"));
         CardBg(Layout::RowH);
         ToggleRow("##instantloot", XS("Быстрый подбор"), &vm.fast_loot, g_state.a_fast_loot, true, true);

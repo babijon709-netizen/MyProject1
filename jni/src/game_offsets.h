@@ -92,12 +92,25 @@ inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS_OFFSET = 0xB8;
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS = 0x30;
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS = 0x38;
 inline constexpr std::uint64_t LOOPRUNNER_TAIL = 0x30;
-inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN = 0x18;
-inline constexpr std::uint64_t DELAYPROMISE_ELAPSED = 0x1C;
-inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME = 0x20;
-inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN = 0x1C;
-inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED = 0x20;
-inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = 0x18;
+// Две раскладки промисов UniTask.Delay, обе сверены с дампами 11946/11943
+// (поля в объекте: 0x10 nextNode, дальше тройка). Именование историческое:
+// «голый» набор полей — у DelayIgnoreTimeScalePromise (unscaled-таймер),
+// «SCALED» набор — у обычного DelayPromise (ждёт Time.deltaTime).
+inline constexpr std::uint64_t DELAYPROMISE_TIMESPAN = 0x18;          // DelayIgnoreTimeScalePromise.delayFrameTimeSpan
+inline constexpr std::uint64_t DELAYPROMISE_ELAPSED = 0x1C;           // DelayIgnoreTimeScalePromise.elapsed
+inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME = 0x20;     // DelayIgnoreTimeScalePromise.initialFrame
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN = 0x1C;   // DelayPromise.delayTimeSpan
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED = 0x20;    // DelayPromise.elapsed
+inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = 0x18; // DelayPromise.initialFrame
+// TypeInfo-слоты классов промисов для быстрого подбора (см.
+// fast_loot_memory.h): release 11946, найдены по релокациям из
+// UniTask.DelayPromise.Create и сверены с TypeInfoPointers дампера.
+// _ALT — запасной слот: в бете пара классов опознаётся по имени в рантайме
+// из двух кандидатов (см. game_offsets_beta.h), в релизе запасной не нужен.
+inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA = 0xDD0AA68;     // Cysharp...UniTask.DelayPromise
+inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA_ALT = 0;
+inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA = 0xDD0AA60;      // Cysharp...UniTask.DelayIgnoreTimeScalePromise
+inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA_ALT = 0;
 inline constexpr std::uint64_t FPHITSCAN_CONFIG = 0x130;
 // FPHitscan copies config values into these live fields during lMf/sPo.  The
 // config alone is therefore not enough for a weapon which is already drawn.

@@ -13,8 +13,10 @@ struct ViewmodelSettings {
     // UI-only placeholder retained for the existing menu toggle and profiles.
     bool no_recoil_button = false;
     bool no_spread = false;
-    // Быстрый подбор: не трогает код игры, обнуляет только точный 0.35f
-    // cadence активных UniTask promises в управляемой куче.
+    // Быстрый подбор («Забрать все» без пауз): не трогает код игры — обходит
+    // раннеры плеер-лупа UniTask и обнуляет точный 0.35f размер активных
+    // DelayPromise, на которых игра ждёт между предметами при сборе лута.
+    // Реализация: fast_loot_memory.h, тик из esp_viewmodel_tick.
     bool fast_loot = false;
 };
 
