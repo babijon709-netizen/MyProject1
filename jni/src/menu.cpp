@@ -977,8 +977,8 @@ float TabContent(int tab, float dt, float cW) {
             if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed) {
                 // This button resets only FOV/hands, not the other misc features.
                 const int fps = vm.fps_limit;
-                const bool nr = vm.no_recoil, ns = vm.no_spread, fl = vm.fast_loot;
-                vm = {}; vm.fps_limit = fps; vm.no_recoil = nr; vm.no_spread = ns;
+                const bool recoilButton = vm.no_recoil_button, ns = vm.no_spread, fl = vm.fast_loot;
+                vm = {}; vm.fps_limit = fps; vm.no_recoil_button = recoilButton; vm.no_spread = ns;
                 vm.fast_loot = fl;
                 g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
                 g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
@@ -997,10 +997,10 @@ float TabContent(int tab, float dt, float cW) {
 
         SHdr(XS("Оружие"));
         CardBg(Layout::RowH * 2.f);
-        const bool oldRecoil = vm.no_recoil, oldSpread = vm.no_spread;
-        ToggleRow("##norecoil", XS("Без отдачи"), &vm.no_recoil, g_state.a_no_recoil, false, true);
+        const bool oldSpread = vm.no_spread;
+        ToggleRow("##norecoil", XS("Без отдачи"), &vm.no_recoil_button, g_state.a_no_recoil, false, true);
         ToggleRow("##nospread", XS("Без разброса"), &vm.no_spread, g_state.a_no_spread, true, false);
-        if (oldRecoil != vm.no_recoil || oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
+        if (oldSpread != vm.no_spread) esp_viewmodel_tick(vm);
         // Диагностические строки («не применено» / «ожидание») убраны по
         // просьбе пользователя: применение видно в игре, подробности — в журнале.
         SHdr(XS("Темп оружия"));
@@ -1833,7 +1833,7 @@ void RenderMenu() {
     Tick(g_state.a_farm_sulfur, g_state.farm_sulfur, dt);
     Tick(g_state.a_custom_fov, g_state.viewmodel.fov_enabled, dt);
     Tick(g_state.a_custom_hands, g_state.viewmodel.hands_enabled, dt);
-    Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil, dt);
+    Tick(g_state.a_no_recoil, g_state.viewmodel.no_recoil_button, dt);
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_fast_fire, g_state.fast_fire, dt);

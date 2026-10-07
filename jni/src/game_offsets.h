@@ -127,11 +127,6 @@ inline constexpr std::uint64_t HITSCANCONFIG_FIRE_RATE = 0x34;
 inline constexpr std::uint64_t HITSCANCONFIG_FULL_RELOAD = 0x48;
 inline constexpr std::uint64_t HITSCANCONFIG_LOOP_RELOAD = 0x4C;
 inline constexpr std::uint64_t HITSCANCONFIG_DISPERSION_CONFIG = 0x68;  // было 0x60
-inline constexpr std::uint64_t HITSCANCONFIG_RECOIL_CONFIG = 0x70;  // было 0x68
-inline constexpr std::uint64_t FPHITSCAN_RECOIL = 0x200;
-inline constexpr std::uint64_t WEAPONRECOIL_RECOIL_CONFIG = 0x00;
-inline constexpr std::uint64_t WEAPONRECOIL_WEAPON_CONFIG = 0x08;
-inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = 0x18;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 

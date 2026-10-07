@@ -10,7 +10,9 @@ struct ViewmodelSettings {
     float fov = 90.f;
     float x = 0.f, y = 0.f, z = 0.f;
     int fps_limit = 0; // 0 = original game limit; otherwise 90 / 120 / 144
-    bool no_recoil = false, no_spread = false;
+    // UI-only placeholder retained for the existing menu toggle and profiles.
+    bool no_recoil_button = false;
+    bool no_spread = false;
     // Быстрый подбор: не трогает код игры, обнуляет только точный 0.35f
     // cadence активных UniTask promises в управляемой куче.
     bool fast_loot = false;
@@ -56,7 +58,7 @@ inline ConfigExtension encode(ViewmodelSettings s) {
     // Bits 2..3: 0 = default, 1 = 144 (legacy toggle), 2 = 90, 3 = 120.
     const uint32_t fps_mode = s.fps_limit == 144 ? 1u : s.fps_limit == 90 ? 2u : s.fps_limit == 120 ? 3u : 0u;
     e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2) |
-              (s.fast_loot ? 16u : 0u) | (s.no_recoil ? 32u : 0u) | (s.no_spread ? 64u : 0u);
+              (s.fast_loot ? 16u : 0u) | (s.no_recoil_button ? 32u : 0u) | (s.no_spread ? 64u : 0u);
     e.fov = s.fov; e.x = s.x; e.y = s.y; e.z = s.z;
     return e;
 }
@@ -66,17 +68,16 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     // the 36-byte struct and leaves aim_lead_ms at its default 0.
     if (size != 32 && size != sizeof(ConfigExtension)) return s;
     ConfigExtension e; std::memcpy(&e, bytes, size);
-    // v1: discard retired loot/instruction-patch flags 4..6. v2: bit 4 stays
-    // retired, bits 5..6 opt into the object-data implementations. v3: bit 4 is
-    // fast pickup, so a v1/v2 file that still carries the retired bit loads
-    // with the feature off instead of turning it on.
+    // v1: discard retired flags 4..6. v2 keeps bit 5 as the UI-only recoil
+    // toggle and bit 6 for no-spread. v3 assigns bit 4 to fast pickup; an
+    // older v1/v2 profile carrying retired bit 4 must not enable it.
     if (e.magic != 0x31574d56u || (e.version != 1 && e.version != 2 && e.version != 3 && e.version != 4 && e.version != 5) ||
         e.size != size || (e.flags & ~2047u)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
     const int fps_modes[] = {0, 144, 90, 120};
     s.fps_limit = fps_modes[(e.flags >> 2) & 3u];
-    s.no_recoil = e.version >= 2 && (e.flags & 32u) != 0;
+    s.no_recoil_button = e.version >= 2 && (e.flags & 32u) != 0;
     s.no_spread = e.version >= 2 && (e.flags & 64u) != 0;
     s.fast_loot = e.version >= 3 && (e.flags & 16u) != 0;
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
@@ -93,7 +94,7 @@ inline float decode_aim_lead_ms(const void* bytes, size_t size) {
 enum class Status { Off, Waiting, Active, ADS, Failed };
 struct Diagnostics {
     Status fov = Status::Off, hands = Status::Off;
-    Status no_recoil = Status::Off, no_spread = Status::Off;
+    Status no_spread = Status::Off;
     Status fast_fire = Status::Off;
 };
 // Снимок состояния limiting FPS для меню: снимается контроллером при последнем

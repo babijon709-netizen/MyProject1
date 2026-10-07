@@ -206,7 +206,7 @@ struct HeapMemory {
         char n[96]{}, ns[96]{};
         const size_t nl=std::strlen(name)+1, sl=std::strlen(namespaze)+1;
         // Type-specific timing offsets must never use the permissive
-        // metadata-read fallback used by the legacy recoil adapter.
+        // metadata-read fallback used by the legacy object-data chain.
         return np>=0x10000 && sp>=0x10000 && nl<=sizeof(n) && sl<=sizeof(ns) &&
             g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
             std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
@@ -215,7 +215,7 @@ struct HeapMemory {
         return object>=0x10000 && named_klass(memory.ptr(object),name,namespaze);
     }
     // Calculator names rotate between builds (Ze/FJ/...). Its empty namespace
-    // and both typed backlinks are checked by weapon_tuning before any write.
+    // and both typed backlinks are checked by the spread controller before any write.
     bool calculator_class(uint64_t object) {
         if (object < 0x10000) return false;
         const uint64_t klass=memory.ptr(object);
@@ -348,7 +348,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         rapid_fire.reset(false);
         rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
-        weapons.recoil = settings.no_recoil ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
         controller.status = {settings.fov_enabled ? viewmodel::Status::Waiting : viewmodel::Status::Off,
@@ -363,7 +362,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     uint64_t player = 0;
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
-        settings.no_recoil || want_no_spread || weapons.has_state() ||
+        want_no_spread || weapons.has_state() ||
         want_fast_fire || rapid_fire.has_state() ||
         g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
@@ -396,7 +395,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             // originals so a later successful frame can still restore them.
             auto wait=controller.has_state()?viewmodel::Status::Failed:viewmodel::Status::Waiting;
             controller.status={wait,wait};
-            weapons.recoil=settings.no_recoil||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire);
             return;
@@ -406,9 +404,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // Weapon chains are expensive (class names, backlinks and readbacks for
     // every scalar). They only need a watchdog cadence, not the uncapped
     // overlay rate. Setting/player changes bypass the limiter immediately.
-    const unsigned weapon_flags = (settings.no_recoil ? 1u : 0u) |
-                                  (want_no_spread ? 2u : 0u) |
-                                  (want_fast_fire ? 4u : 0u);
+    const unsigned weapon_flags = (want_no_spread ? 1u : 0u) |
+                                  (want_fast_fire ? 2u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -417,7 +414,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_last_tick = weapon_now;
         weapon_last_player = player;
         weapon_last_flags = weapon_flags;
-        weapons.tick(epoch, g_il2cpp_base, player, settings.no_recoil, want_no_spread);
+        weapons.tick(epoch, g_il2cpp_base, player, want_no_spread);
         rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire);
         static int last_fire_stage = -1;
         static auto last_fire_status = viewmodel::Status::Off;
@@ -428,19 +425,16 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         }
     }
     {
-        // Ступень, на которой оборвалась цепочка отдачи/разброса. Логируем
-        // только смену ступени, иначе строка шла бы каждый кадр.
+        // Log no-spread resolution changes only; this is intentionally independent
+        // of the GUI-only recoil placeholder.
         static int last_stage = -1;
-        const int stage = (settings.no_recoil || want_no_spread) ? weapons.stage() : 0;
+        const int stage = want_no_spread ? weapons.stage() : 0;
         if (stage != last_stage) {
             last_stage = stage;
             if (stage)
-                LogLine("оружие: отдача/разброс не применились, ступень %d "
-                        "(1-5 игрок/FPManager, 6-8 оружие и его конфиг, 9-11 RecoilConfig, "
-                        "12-14 калькулятор, 15-16 DispersionConfig, 17-19 значение, "
-                        "20 ворота записи, 21 запись не легла)", stage);
+                LogLine("weapon no-spread chain failed at stage %d (1-13 resolve, 14-18 validate/write)", stage);
             else
-                LogLine("оружие: цепочка отдачи/разброса разрешилась полностью");
+                LogLine("weapon no-spread chain resolved");
         }
     }
     // Magic-Farm keeps the verified normal hit path (and therefore server-side
@@ -459,9 +453,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     controller.tick(epoch, player, visible_settings);
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
-        st.no_recoil != last_log.no_recoil || st.no_spread != last_log.no_spread) {
-        LogLine("viewmodel: fov=%d hands=%d; recoil=%d spread=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
-                (int)st.fov, (int)st.hands, (int)st.no_recoil, (int)st.no_spread);
+        st.no_spread != last_log.no_spread) {
+        LogLine("viewmodel: fov=%d hands=%d; spread=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
+                (int)st.fov, (int)st.hands, (int)st.no_spread);
         last_log = st;
     }
 }
@@ -469,7 +463,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
 viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     auto status = controller.status;
-    status.no_recoil = weapons.recoil;
     status.no_spread = weapons.spread;
     status.fast_fire = rapid_fire.status;
     return status;
