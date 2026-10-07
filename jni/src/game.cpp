@@ -7454,6 +7454,23 @@ float g_last_overlay_sh = 2400.0F;
 // failed: the camera IS where the local player is.
 
 static uint64_t resolve_native_camera_pointer(bool allow_last_confirmed) {
+    // Класс GameControllerBase разрешается ЗДЕСЬ, а не только по дороге чтения
+    // реестра игроков.
+    //
+    // До этого g_game_controller_class выставлялся исключительно внутри
+    // read_configured_player_transforms, и при неразобранном списке игроков
+    // (resolve_player_lists вернул 0) до резолвера локального игрока дело не
+    // доходило вовсе. Камера в этом состоянии не находилась никогда: статики
+    // читать неоткуда, g_camera_manager_cached пуст, запасной g_native_camera
+    // тоже пуст на первом кадре — read_camera_frame падал, esp_get_boxes
+    // выходил по transient_return(5) на каждом кадре. Снаружи это выглядело
+    // ровно как «у некоторых юзеров еспы вообще не работают»: боксы не
+    // появлялись ни разу за сессию, а маркеры жили на camera-only кадре.
+    if (!g_game_controller_class && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
+        const uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+        if (class_identity(candidate, "GameControllerBase", "Oxide") != 0)
+            g_game_controller_class = candidate;
+    }
     if (!g_game_controller_static_fields_cached && g_game_controller_class)
         g_game_controller_static_fields_cached = get_class_static_fields(g_game_controller_class);
 

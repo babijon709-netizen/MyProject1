@@ -8,10 +8,12 @@
 #include "game_offsets_active.h" // go_active::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
 #include "logfile.h"
+#include "esp_box_hold.h"        // состав боксов/маркеров на кадр
 #include "overlay_geometry.h"
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
 #include <utility>
 #include <time.h>
 
@@ -31,8 +33,19 @@ float AimFovRadiusPx(float sw, float sh) {
 // One remote snapshot per frame, shared by the ESP overlay and the aimbot.
 // Сколько боксов нарисовано в последнем кадре — для сводки в мини-логе.
 
+// Сколько секунд бокс игрока живёт после последнего ЗДОРОВОГО кадра, если
+// кадры пошли рваные (EIO на чтении, неразобранный реестр). Держим ровно
+// столько и не больше: покадровое «оставить прошлый полный снимок» превращало
+// один сбойный кадр в вечно висящий кадр — бокс убитого игрока оставался на
+// экране, а у кого-то ESP замирал целиком и не оживал.
+constexpr double kBoxHoldSeconds = 0.30;
+// То же для маркеров: у них нет стабильного id, поэтому снимок живёт целиком
+// по времени — не дольше этого от последнего здорового кадра.
+constexpr double kMarkerHoldSeconds = 0.50;
+
 const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
-    static std::vector<EspBox> s_boxes;
+    static std::vector<espboxhold::Entry> s_hold;
+    static std::vector<EspBox> s_out;
     static int s_frame = -1;
     int frame = ImGui::GetFrameCount();
     if (frame != s_frame) {
@@ -68,47 +81,45 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_screen_stretch(g_state.screen_stretch_x);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
         std::vector<EspBox> next = esp_get_boxes((int)sw, (int)sh);
-        static double last_healthy_at = -1e9;
         timespec ts{};
         clock_gettime(CLOCK_MONOTONIC, &ts);
         const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
         const bool transient = esp_box_frame_transient();
         const size_t raw_count = next.size();
-        bool retained = false;
-        // A transient resolver failure does not mean that the players left.
-        // Keep the last complete frame until a confirmed healthy frame replaces
-        // it; only a healthy empty registry may clear visible players.
-        if (!transient || s_boxes.empty()) {
-            s_boxes = std::move(next);
-            if (!transient) last_healthy_at = now;
-        } else {
-            retained = true;
-        }
+
+        // Состав на экран собирает espboxhold::update: здоровый кадр — ровно
+        // конвейерный состав (смерть и выход с сервера видны сразу), рваный —
+        // удержание пропавших не дольше kBoxHoldSeconds. Правила и разбор,
+        // почему раньше было иначе, — в esp_box_hold.h.
+        espboxhold::update(s_hold, next, transient, now, kBoxHoldSeconds, s_out);
+
         static double diag_at = -1e9;
-        static int diag_frames = 0, diag_transient = 0, diag_retained = 0;
+        static int diag_frames = 0, diag_transient = 0;
         static size_t diag_raw_min = (size_t)-1, diag_raw_max = 0;
         static size_t diag_draw_min = (size_t)-1, diag_draw_max = 0;
+        static int diag_hold_max = 0;
         ++diag_frames;
         if (transient) ++diag_transient;
-        if (retained) ++diag_retained;
         diag_raw_min = std::min(diag_raw_min, raw_count);
         diag_raw_max = std::max(diag_raw_max, raw_count);
-        diag_draw_min = std::min(diag_draw_min, s_boxes.size());
-        diag_draw_max = std::max(diag_draw_max, s_boxes.size());
+        diag_draw_min = std::min(diag_draw_min, s_out.size());
+        diag_draw_max = std::max(diag_draw_max, s_out.size());
+        if (s_out.size() > raw_count)
+            diag_hold_max = std::max(diag_hold_max, (int)(s_out.size() - raw_count));
         if (now - diag_at >= 1.0) {
-            LogLine("ESP-ДИАГ-РЕНДЕР: кадры=%d raw=%u..%u draw=%u..%u transient=%d retained=%d age=%.0fмс",
+            LogLine("ESP-ДИАГ-РЕНДЕР: кадры=%d raw=%u..%u draw=%u..%u transient=%d удержано<=%d",
                     diag_frames,
                     (unsigned)(diag_raw_min == (size_t)-1 ? 0 : diag_raw_min),
                     (unsigned)diag_raw_max,
                     (unsigned)(diag_draw_min == (size_t)-1 ? 0 : diag_draw_min),
-                    (unsigned)diag_draw_max, diag_transient, diag_retained,
-                    (now - last_healthy_at) * 1000.0);
-            diag_at = now; diag_frames = diag_transient = diag_retained = 0;
+                    (unsigned)diag_draw_max, diag_transient, diag_hold_max);
+            diag_at = now; diag_frames = diag_transient = 0;
             diag_raw_min = diag_draw_min = (size_t)-1;
             diag_raw_max = diag_draw_max = 0;
+            diag_hold_max = 0;
         }
     }
-    return s_boxes;
+    return s_out;
 }
 
 static const std::vector<EspMarker>& FrameMarkers() {
@@ -124,7 +135,10 @@ static const std::vector<EspMarker>& FrameMarkers() {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
     const bool transient = esp_marker_frame_transient();
-    if (!transient || cached.empty() || now - last_healthy_at > 0.5) {
+    // Та же граница, что у боксов: сбойный кадр не гасит маркеры, но и не
+    // продлевает им жизнь дольше kMarkerHoldSeconds.
+    if (!transient || cached.empty() ||
+        !espboxhold::marker_snapshot_is_fresh(last_healthy_at, now, kMarkerHoldSeconds)) {
         cached = std::move(next);
         if (!transient) last_healthy_at = now;
     }

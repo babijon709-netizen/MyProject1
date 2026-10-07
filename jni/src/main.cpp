@@ -410,7 +410,12 @@ int main(int argc, char* argv[]) {
 
         esp_mem_frame_begin();   // кадр начался: кэш блоков памяти игры сброшен
         esp_viewmodel_tick(g_state.viewmodel); // independent of ESP/aim/farm
-        fake_lag::update(g_state.fake_lag, (int)std::lround(g_state.fake_lag_percent),
+        // FakeLag снят с продакшена (app_state.h): выключатель в меню и слайдер
+        // интенсивности остаются, правила INPUT в iptables больше не ставятся.
+        // Вызов с false, а не пропуск вызова, — на случай, если правила остались
+        // от прошлой сессии: update(false) их и снимает.
+        fake_lag::update(g_state.fake_lag && fake_lag_active(),
+                         (int)std::lround(g_state.fake_lag_percent),
                          esp_target_pid());
         LogStage(kStageEsp);
         DrawEspOverlay();
