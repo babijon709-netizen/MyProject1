@@ -1,68 +1,54 @@
 #include "FakeLag.h"
 
 #include <cstdio>
-#include <thread>
-#include <chrono>
+#include <cstring>
 
-// Фильтр длины 80:65535 целится в игровые UDP-пакеты, мелкий служебный трафик не трогаем.
-// Блочим обе стороны — INPUT и OUTPUT, иначе исходящие позиции продолжают лететь
-// и на сервере ты не лагаешь, а входящие дропаются отдельно. DROP именно
-// отбрасывает пакет, а не ставит в очередь: после выключения ничего не
-// всплывает пачкой и пинг сразу возвращается в норму.
-static const char* BLOCK_IN    = "iptables -I INPUT ! -i lo -p udp -m length --length 80:65535 -j DROP";
-static const char* UNBLOCK_IN  = "iptables -D INPUT ! -i lo -p udp -m length --length 80:65535 -j DROP 2>/dev/null";
-static const char* BLOCK_OUT   = "iptables -I OUTPUT ! -o lo -p udp -m length --length 80:65535 -j DROP";
-static const char* UNBLOCK_OUT = "iptables -D OUTPUT ! -o lo -p udp -m length --length 80:65535 -j DROP 2>/dev/null";
+static const char* BLOCK   = "iptables -I INPUT ! -i lo -p udp -m length --length 80:65535 -j DROP";
+static const char* UNBLOCK = "iptables -D INPUT ! -i lo -p udp -m length --length 80:65535 -j DROP 2>/dev/null";
 
+// Выполняет команду через su -c '...'
 static void executeRoot(const char* cmd) {
-    char buf[640];
-    // su -c '...' — одинарные кавычки внутри, поэтому cmd не должен их содержать
+    char buf[512];
     snprintf(buf, sizeof(buf), "su -c '%s'", cmd);
     FILE* f = popen(buf, "r");
     if (f) pclose(f);
 }
 
-FakeLag::FakeLag() = default;
+FakeLag::FakeLag()
+    : m_enabled(false)
+    , m_percent(45)
+    , m_blocked(false)
+    , m_running(false)
+{}
 
 FakeLag::~FakeLag() {
     destroy();
 }
 
 void FakeLag::setPercent(int percent) {
-    if (percent < 1) percent = 1;
+    if (percent < 1)   percent = 1;
     if (percent > 100) percent = 100;
-    m_percent.store(percent, std::memory_order_relaxed);
-}
-
-void FakeLag::ensureUnblocked() {
-    // Несколько -D подряд гарантированно снимают правило даже если из-за
-    // предыдущего креша/утечки в цепочке оказалось два одинаковых правила.
-    // Лишние -D просто падают в 2>/dev/null.
-    for (int i = 0; i < 3; ++i) {
-        executeRoot(UNBLOCK_IN);
-        executeRoot(UNBLOCK_OUT);
-    }
-    m_blocked = false;
+    m_percent.store(percent);
 }
 
 void FakeLag::apply(bool enable) {
     if (enable) {
-        if (m_running.load(std::memory_order_acquire)) return; // уже крутится
-        m_enabled.store(true, std::memory_order_release);
-        m_running.store(true, std::memory_order_release);
+        if (m_running.load()) return;   // уже запущен
+        m_enabled.store(true);
+        m_running.store(true);
         m_blocked = false;
         m_thread = std::thread(&FakeLag::loop, this);
     } else {
-        m_enabled.store(false, std::memory_order_release);
-        m_running.store(false, std::memory_order_release);
+        m_enabled.store(false);
+        m_running.store(false);
         if (m_thread.joinable()) m_thread.join();
-        if (m_blocked) {
-            ensureUnblocked();
-        } else {
-            // даже если m_blocked==false, на всякий случай чистим — правило
-            // могло залипнуть от прошлой сборки/креша до перезапуска потока
-            ensureUnblocked();
-        }
+        // DROP отбрасывает пакет сразу — он не копится, поэтому после
+        // выключения пинг не улетает пачкой. Делаем два -D подряд чтобы
+        // гарантированно снять правило даже если в цепочке оказалось два
+        // одинаковых (креш/дубль), лишние падают в 2>/dev/null.
+        executeRoot(UNBLOCK);
+        executeRoot(UNBLOCK);
+        m_blocked = false;
     }
 }
 
@@ -71,18 +57,15 @@ void FakeLag::destroy() {
 }
 
 void FakeLag::loop() {
-    while (m_running.load(std::memory_order_acquire)) {
-        if (!m_enabled.load(std::memory_order_acquire)) break;
+    while (m_running.load()) {
+        if (!m_enabled.load()) break;
 
-        int percent = m_percent.load(std::memory_order_relaxed);
-        if (percent < 1) percent = 1;
-        if (percent > 100) percent = 100;
+        int percent = m_percent.load();
 
         if (percent >= 90) {
-            // почти постоянный лаг: держим дроп и чекаем раз в секунду
+            // постоянный блок, проверяем раз в секунду
             if (!m_blocked) {
-                executeRoot(BLOCK_IN);
-                executeRoot(BLOCK_OUT);
+                executeRoot(BLOCK);
                 m_blocked = true;
             }
             sleepMs(1000);
@@ -91,36 +74,22 @@ void FakeLag::loop() {
 
         int blockMs   = (1000 * percent) / 100;
         int unblockMs = 1000 - blockMs;
-        if (blockMs < 20) blockMs = 20;
-        if (unblockMs < 20) unblockMs = 20;
 
         if (m_blocked) {
-            // сейчас залочено -> открываем окно
-            executeRoot(UNBLOCK_IN);
-            executeRoot(UNBLOCK_OUT);
+            executeRoot(UNBLOCK);
             m_blocked = false;
             sleepMs(unblockMs);
         } else {
-            executeRoot(BLOCK_IN);
-            executeRoot(BLOCK_OUT);
+            executeRoot(BLOCK);
             m_blocked = true;
             sleepMs(blockMs);
         }
     }
-    // выход из loop — поток уже не вернётся, но на всякий случай снимем блок
-    // если нас прервали посреди block-фазы. Основной apply(false) тоже снимет,
-    // двойной -D безвреден.
-    if (m_blocked) {
-        executeRoot(UNBLOCK_IN);
-        executeRoot(UNBLOCK_OUT);
-        m_blocked = false;
-    }
 }
 
 void FakeLag::sleepMs(int ms) {
-    // кусками по 50 мс — быстро реагируем на apply(false), пинг не зависает
-    // на лишнюю секунду после выключения тумблера
-    while (ms > 0 && m_running.load(std::memory_order_acquire)) {
+    // спим по 50мс кускам чтобы быстро реагировать на apply(false)
+    while (ms > 0 && m_running.load()) {
         int step = ms > 50 ? 50 : ms;
         std::this_thread::sleep_for(std::chrono::milliseconds(step));
         ms -= step;
