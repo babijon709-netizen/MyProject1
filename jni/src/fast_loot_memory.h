@@ -9,13 +9,16 @@
 // иконки. Пока идёт сбор, в плеер-лупе UniTask всегда висит активный
 // DelayPromise с delayTimeSpan == 0.35f.
 //
-// Что делает модуль: раз в 50 мс обходит
+// Что делает модуль: с периодом 16 мс (8 мс сразу после обнуления — пока
+// идёт сбор, следующий промис появляется в том же кадре) обходит
 // PlayerLoopHelper.static_fields.runners (массив PlayerLoopRunner) →
 // loopItems[0..tail) и у каждого промиса с точным размером 0.35f обнуляет
 // delayTimeSpan. UniTask.DelayPromise.MoveNext завершает промис, как только
 // elapsed >= delayTimeSpan, поэтому обнуление дотягивает его в следующем же
 // кадре — весь «Забрать все» схлопывается до пары кадров. Код игры не
-// трогается, пишется только одно поле в живых объектах кучи.
+// трогается, пишется только одно поле в живых объектах кучи. Чтения
+// пакетные (массив раннеров, пара tail+items, массив предметов — по одному
+// запросу на диапазон), чтобы частый проход не упирался в транспорт.
 //
 // Безопасность записи: классы промисов резолвятся ОДИН раз за сессию из
 // TypeInfo-слотов сборки и подтверждаются именем («DelayPromise» /
@@ -44,8 +47,15 @@ using Clock = std::chrono::steady_clock;
 inline constexpr float kCadence = 0.35f;
 inline constexpr int kMaxRunners = 64;         // PlayerLoopTiming значений ~24, берём с запасом
 inline constexpr int kMaxItemsPerRunner = 512; // живой плеер-луп обычно в пределах сотни
-inline constexpr auto kPeriod = std::chrono::milliseconds(50);
+// Период прохода: 16 мс в покое и 8 мс сразу после обнуления — пока идёт
+// «Забрать все», игра спавнит следующий промис в том же кадре, где дотянут
+// предыдущий, и горячий период подхватывает его почти без паузы на предмет.
+inline constexpr auto kPeriod = std::chrono::milliseconds(16);
+inline constexpr auto kHotPeriod = std::chrono::milliseconds(8);
 inline constexpr auto kResolveRetry = std::chrono::seconds(2);
+
+// TBI/MTE-метка в старшем байте указателей из памяти игры (см. mem_io.h).
+inline std::uint64_t untag(std::uint64_t p) { return p & 0x00ffffffffffffffULL; }
 
 enum class State { Off, Waiting, Active, Failed };
 
@@ -72,7 +82,7 @@ public:
     int tick(uint64_t il2cpp_base, bool enabled) {
         if (!enabled) { state_ = State::Off; return 0; }
         const auto now = Clock::now();
-        if (now - last_tick_ < kPeriod) return 0;
+        if (now - last_tick_ < (last_batch_ > 0 ? kHotPeriod : kPeriod)) return 0;
         last_tick_ = now;
         if (!il2cpp_base) return 0;
 
@@ -147,6 +157,10 @@ private:
         return io_.write_heap(item + timespan_off, zero) ? 1 : 0;
     }
 
+    // tail (0x30) и loopItems (0x38) лежат одним куском — читаются разом.
+    struct RunnerHead { std::int32_t tail; std::uint32_t pad; std::uint64_t items; };
+    static_assert(sizeof(RunnerHead) == 16, "tail+items pair layout");
+
     int sweep() {
         uint64_t runners = 0;
         if (!weapon_tuning::pointer(io_, helper_static_ + go_active::PLAYERLOOPHELPER_RUNNERS, runners) ||
@@ -159,29 +173,32 @@ private:
             runner_count <= 0 || runner_count > kMaxRunners)
             return 0;
 
+        std::uint64_t runner_ptrs[kMaxRunners] = {};
+        if (!io_.read_range(runners + go_active::IL2CPP_ARRAY_FIRST_ELEMENT,
+                            runner_ptrs, (std::size_t)runner_count * sizeof(std::uint64_t)))
+            return 0;
+
+        std::uint64_t items_buf[kMaxItemsPerRunner];
         int zeroed = 0;
         for (int32_t r = 0; r < runner_count; ++r) {
-            uint64_t runner = 0;
-            if (!weapon_tuning::pointer(
-                    io_, runners + go_active::IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)r * 8, runner) ||
-                runner < 0x10000)
-                continue;
-            int32_t tail = 0;
-            if (!io_.read(runner + go_active::LOOPRUNNER_TAIL, tail) || tail <= 0) continue;
-            uint64_t items = 0;
-            if (!weapon_tuning::pointer(io_, runner + go_active::LOOPRUNNER_ITEMS, items) ||
-                items < 0x10000)
-                continue;
+            const uint64_t runner = untag(runner_ptrs[r]);
+            if (runner < 0x10000) continue;
+            RunnerHead head{};
+            if (!io_.read(runner + go_active::LOOPRUNNER_TAIL, head)) continue;
+            if (head.tail <= 0) continue;
+            const uint64_t items = untag(head.items);
+            if (items < 0x10000) continue;
             int32_t capacity = 0;
             if (!io_.read(items + go_active::IL2CPP_ARRAY_LENGTH, capacity) || capacity <= 0) continue;
-            const int32_t count = tail < capacity ? tail : capacity;
+            const int32_t count = head.tail < capacity ? head.tail : capacity;
             const int32_t limit = count < kMaxItemsPerRunner ? count : kMaxItemsPerRunner;
+            // Указатели элементов — одним чтением на весь диапазон.
+            if (!io_.read_range(items + go_active::IL2CPP_ARRAY_FIRST_ELEMENT,
+                                items_buf, (std::size_t)limit * sizeof(std::uint64_t)))
+                continue;
             for (int32_t i = 0; i < limit; ++i) {
-                uint64_t item = 0;
-                if (!weapon_tuning::pointer(
-                        io_, items + go_active::IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8, item) ||
-                    item < 0x10000)
-                    continue;
+                const uint64_t item = untag(items_buf[i]);
+                if (item < 0x10000) continue;
                 uint64_t klass = 0;
                 if (!weapon_tuning::pointer(io_, item, klass)) continue;
                 // SCALED-набор полей — у DelayPromise, голый — у

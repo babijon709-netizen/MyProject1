@@ -30,6 +30,15 @@ struct FakeIO {
         }
         return true;
     }
+    bool read_range(uint64_t a, void* out, size_t size) {
+        auto* bytes = reinterpret_cast<uint8_t*>(out);
+        for (size_t i = 0; i < size; ++i) {
+            auto it = mem.find(a + i);
+            if (it == mem.end()) return false;
+            bytes[i] = it->second;
+        }
+        return true;
+    }
     template<class T> bool write_heap(uint64_t a, T v) {
         ++writes; put(a, v); return true;
     }
@@ -80,6 +89,7 @@ struct Fixture {
     // Регистрирует раннер с набором предметов; возвращает адрес раннера.
     uint64_t runner(uint64_t addr, int32_t tail, const std::vector<uint64_t>& items, int32_t capacity = -1) {
         io.put<int32_t>(addr + go_active::LOOPRUNNER_TAIL, tail);
+        io.put<uint32_t>(addr + go_active::LOOPRUNNER_TAIL + 4, 0); // pad до указателя
         const uint64_t items_array = addr + 0x100;
         io.put<uint64_t>(addr + go_active::LOOPRUNNER_ITEMS, items_array);
         io.put<int32_t>(items_array + IL2CPP_ARRAY_LENGTH,

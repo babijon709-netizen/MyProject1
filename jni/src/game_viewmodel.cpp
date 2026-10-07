@@ -173,6 +173,11 @@ viewmodel::FpsController<Memory> fps_controller(memory);
 // through the fresh anonymous-heap mapping gate.
 struct HeapMemory {
     template<class T> bool read(uint64_t address, T& value) { return memory.read(address,value); }
+    // Диапазонное чтение (пакетные обходы плеер-лупа быстрого подбора):
+    // один запрос на непрерывный кусок вместо чтения по элементу.
+    bool read_range(uint64_t address, void* out, std::size_t size) {
+        return address >= 0x10000 && size > 0 && g_mem.read_quiet(address, out, size);
+    }
     bool named_klass(uint64_t klass, const char* name, const char* namespaze) {
         if (klass < 0x10000) return false;
         uint64_t np=memory.ptr(klass+go_active::IL2CPP_CLASS_NAME);
