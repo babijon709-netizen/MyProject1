@@ -173,6 +173,8 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 | `jni/src/kernel_io.h` | KernelTransport (FT: bing+gong, детект протокола), RtDevTransport и RtHookTransport — вся специфика драйверов |
 | `jni/src/mode_select.h` | экран выбора режима, `.mode`, единственный вызов `esp_set_mem_backend` |
 | `jni/src/game.cpp` / `jni/include/game.h` | `g_mem`, `esp_set_mem_backend`, `esp_silent_*`, `esp_init` (привязка), `esp_alive_check` |
+| `jni/src/game_markers.cpp` | ESP-сканер маркеров через `g_mem` и Mirror `NetworkClient.spawned` |
+| `jni/src/manes_aim_source.h` | чистые helper-функции и имена сущностей из `manes_aim.zip`; доступа к памяти/устройствам нет |
 | `jni/src/process.cpp` | attach-поток: поиск игры, `esp_init`, проверка живости |
 | `jni/src/silent_aim.cpp` | образец фонового потока с доступом через транспорт |
 | `jni/src/fast_loot_memory.h` | быстрый подбор: обход раннеров плеер-лупа UniTask, обнуление 0.35f задержек «Забрать все» (тик из `esp_viewmodel_tick`, память через `HeapMemory`/`g_mem`) |
@@ -197,3 +199,10 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 | Отправлять драйверу «пробные» команды с придуманными кодами | Неизвестный код может потревожить драйвер/античит; изучение — только на экране выбора |
 | Закрыть «утёкший» сокет FT в `close()` | Сокеты драйвера живут весь процесс; `close()` — только отвязка pid |
 | Читать `argv`/свой файл на диске после старта | Маскировка затёрла argv, бинарник удалён (см. §5) |
+
+## 9. Перенос логики из `manes_aim.zip`
+
+- `mem_driver.hpp` из архива использует `open/pread64/pwrite64` для `/proc/<pid>/mem` и в проект не переносится. Все новые чтения/записи остаются на `g_mem` и существующих `esp_mem_aim_*`.
+- Архивные `Offsets` и `EspOffsets` по умолчанию нулевые, а scan/projection/visibility в нескольких местах помечены как `[RECONSTRUCTED]`. Не заменять ими рабочую привязку IL2CPP и текущие resolver-ы; точка входа ESP — `esp_get_boxes()` / `esp_get_markers()`.
+- `touch_input.cpp` создаёт второй uinput-путь и меняет SELinux/права устройств. Не импортировать его; тач-аим использует уже поднятый `TouchHelperA` (`Touch_Down/Move/Up`) с ориентацией и слотами текущего проекта.
+- Разрешённый перенос — чистые таблица имён и математика наведения в `manes_aim_source.h`; helper не открывает fd и не знает о транспорте.

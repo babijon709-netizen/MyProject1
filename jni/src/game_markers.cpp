@@ -2,6 +2,7 @@
 #include "cfg.h"
 #include "game_internal.h"
 #include "game_offsets_active.h"   // оффсеты (go_active)
+#include "manes_aim_source.h"
 #include "lang.h"
 #include "logfile.h"
 #include <algorithm>
@@ -297,6 +298,15 @@ static bool marker_for_entity_type(int32_t type, MarkerLook& look) {
     }
 }
 
+static bool recovered_ore_look(const char* raw_name, MarkerLook& look) {
+    if (manes_aim_source::classify_entity_name(raw_name) !=
+        manes_aim_source::EntityName::CompositeStone)
+        return false;
+    look = kOreStone;
+    apply_ore_cfg(look, 0);
+    return true;
+}
+
 // Split a prefab name into lower-case words and hand each one to `visit`.
 // Separators, digits and camelCase humps end a word, so "NPC_Wolf 02(Clone)"
 // yields npc / wolf / clone. Matching whole words (never substrings) is what
@@ -585,10 +595,20 @@ static void scan_loot_name(const char* raw, LootNameInfo& info) {
         {"container",  "Контейнер",          2, false},
         {"chest",      "Сундук",             2, false},
         {"case",       "Кейс",               2, false},
-        {"cache",      "Тайник",             2, false},
+        {"cache",      "Тайник",              2, false},
         {"trash",      "Мусорка",            2, false},
         {"garbage",    "Мусорка",            2, false},
     };
+    switch (manes_aim_source::classify_entity_name(raw)) {
+        case manes_aim_source::EntityName::EliteCrate:
+            info.rank = 4; info.label = "Элитный ящик"; info.rainbow = true;
+            break;
+        case manes_aim_source::EntityName::MilitaryCrate:
+            info.rank = 4; info.label = "Военный ящик";
+            break;
+        default:
+            break;
+    }
     for_each_name_token(raw, [&](const char* word) {
         // Слово-исключение больше не останавливает разбор: после него имя может
         // ещё сказать «box»/«large» (например «storage box»), а ящик в доме мы
@@ -1013,9 +1033,14 @@ uint8_t marker_class_of(uint64_t klass) {
     const std::string name = read_remote_string(rd_ptr(klass + IL2CPP_CLASS_NAME), &readable);
     uint8_t kind = readable ? MARKER_CLASS_NONE : MARKER_CLASS_UNKNOWN;
     if (readable) {
-        if (name.rfind("Mineable", 0) == 0)                       kind = MARKER_CLASS_MINEABLE;
-        else if (name == "LootObject" || name == "PumpkinTrick")  kind = MARKER_CLASS_LOOT;
-        else if (name == "ItemPickup")                            kind = MARKER_CLASS_PICKUP;
+        const auto recovered_name = manes_aim_source::classify_entity_name(name.c_str());
+        if (name.rfind("Mineable", 0) == 0 ||
+            recovered_name == manes_aim_source::EntityName::CompositeStone)
+            kind = MARKER_CLASS_MINEABLE;
+        else if (name == "LootObject" || name == "PumpkinTrick")
+            kind = MARKER_CLASS_LOOT;
+        else if (recovered_name == manes_aim_source::EntityName::ItemPickup)
+            kind = MARKER_CLASS_PICKUP;
         else if (name == "AutoTurret" || name == "AutoSnowballTurret" ||
                  name == "AutoTurretShotgun" || name == "SamTurret")                             kind = MARKER_CLASS_TURRET;
         else if (name == "DisconnectedSleeper")                   kind = MARKER_CLASS_SLEEPER;
@@ -1269,6 +1294,8 @@ static MarkerScanResult rebuild_marker_entities() {
                 if (!known && ((object_name[0] && skip_object_name(object_name)) ||
                                (root_name[0] && skip_object_name(root_name))))
                     continue;
+                if (!known && object_name[0]) known = recovered_ore_look(object_name, look);
+                if (!known && root_name[0]) known = recovered_ore_look(root_name, look);
                 if (!known) {
                     int32_t entity_type = rd<int32_t>(component + MINEABLE_ENTITY_TYPE);
                     known = marker_for_entity_type(entity_type, look);

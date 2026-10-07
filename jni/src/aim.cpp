@@ -13,6 +13,7 @@
 #include "str.h"               // XS(): строки интерфейса зашифрованы в бинарнике
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
+#include "manes_aim_source.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -513,25 +514,32 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         float dx = t.sx - crossX, dy = t.sy - crossY;
         t.dist = sqrtf(dx * dx + dy * dy);
         t.world_dist = b.distance;
-        // The target we are already pulling to may briefly leave the FOV
-        // circle (overshoot while the gain is still being learned) — keep it.
-        if (t.dist > (sticky ? fovR * 2.f : fovR)) { ++s_out_of_fov; continue; }
+        const bool memoryAim = g_state.aim_mode == AIM_MODE_MEMORY;
+        const float fovRadiusDeg = manes_aim_source::fov_radius_degrees(cfg::aim::fov);
+        const float angularDistance = memoryAim
+            ? manes_aim_source::angular_distance_degrees(t.yaw, t.pitch)
+            : 0.f;
+        // The source memory path selects by angular distance; the touch path
+        // keeps its screen-pixel circle because it steers through a touch drag.
+        const bool inFov = memoryAim
+            ? manes_aim_source::inside_angular_fov(
+                  t.yaw, t.pitch, cfg::aim::fov, sticky ? fovRadiusDeg : 0.f)
+            : t.dist <= (sticky ? fovR * 2.f : fovR);
+        if (!inFov) { ++s_out_of_fov; continue; }
 
-        // Target priority (see "Приоритет цели"):
-        //   0 balanced  — crosshair distance and range, both normalised
-        //                 (FOV radius, 120 m) and summed;
-        //   1 crosshair — purely the pixel distance from the crosshair;
-        //   2 range     — purely the world distance, crosshair only breaks ties.
-        // Whatever the mode, the current target gets a strong preference so the
-        // aim does not flip between two players standing next to each other.
+        // Memory aim ranks the same camera-relative angle used by the source;
+        // touch aim ranks the projected pixel distance used by its drag path.
         const float pixelTerm = t.dist / (fovR > 1.f ? fovR : 1.f);
+        const float angleTerm = angularDistance /
+            (fovRadiusDeg > 1.f ? fovRadiusDeg : 1.f);
+        const float aimTerm = memoryAim ? angleTerm : pixelTerm;
         const bool  haveRange = (t.world_dist >= 0.f) && std::isfinite(t.world_dist);
         const float rangeTerm = haveRange ? (t.world_dist / 120.f) : 1.f;
         float score;
         switch (g_state.aim_priority) {
-            case 1:  score = pixelTerm; break;
-            case 2:  score = rangeTerm * 4.f + pixelTerm * 0.05f; break;
-            default: score = pixelTerm + rangeTerm * 0.8f; break;
+            case 1:  score = aimTerm; break;
+            case 2:  score = rangeTerm * 4.f + aimTerm * 0.05f; break;
+            default: score = aimTerm + rangeTerm * 0.8f; break;
         }
         // A memory lock is target-sticky as well as bone-sticky: while its
         // exact selected bone is valid, no newly closer target may steal it.
@@ -1191,8 +1199,8 @@ static void UpdateAimTouch(float dt) {
     if (!(sm >= 1.f)) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
     float frac = 0.25f + (sm - 1.f) / 9.f * 0.75f;   // 0.25 .. 1.00 per frame @60fps
-    // Frame-rate independent: convert per-frame fraction to a rate.
-    float k = 1.f - powf(1.f - frac, dt * 60.f);
+    // Frame-rate independent source smoothing fraction, adapted to the current dt.
+    float k = manes_aim_source::frame_gain(frac, dt);
     // ...но не больше половины видимой ошибки за такт. Камера отвечает не в
     // этом такте: поза отстаёт от касания на 2 кадра (замер в контроллере
     // фарма, тот же палец и тот же экран), поэтому при k -> 1 петля идёт по
@@ -1392,7 +1400,6 @@ static void AimLogTick(float dt) {
 // на обычном FOV; за ней шаг плавно ограничен скоростью. Поэтому лок остаётся
 // на кости, а микроколебания анимации/чтения не превращаются в дёрганье камеры.
 static constexpr float kMemDeadbandDeg  = 0.035f;
-static constexpr float kMemFollowAt60Hz = 0.30f;
 static constexpr float kMemMaxSpeedDeg  = 72.0f;
 // ACK по накопителю: расхождение с нашей записью, в пределах которого игра
 // приняла значение. Это только диагностика отклика в меню.
@@ -1409,8 +1416,11 @@ const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 static float mem_axis_step(float err, float dt) {
     if (!std::isfinite(err)) return 0.f;
     if (fabsf(err) <= kMemDeadbandDeg) return 0.f;
-    const float framesAt60 = dt * 60.f;
-    const float gain = 1.f - powf(1.f - kMemFollowAt60Hz, framesAt60);
+    float speed = g_state.gun_str;
+    if (!(speed >= 1.f)) speed = 1.f;
+    if (speed > 10.f) speed = 10.f;
+    const float smooth = 0.25f + (speed - 1.f) / 9.f * 0.75f;
+    const float gain = manes_aim_source::frame_gain(smooth, dt);
     const float maxStep = kMemMaxSpeedDeg * dt;
     float step = err * gain;
     if (step >  maxStep) step =  maxStep;
