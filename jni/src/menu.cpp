@@ -2701,8 +2701,11 @@ void RenderMenu() {
 
     crash_note("menu: sheet");
     DrawSheet(dt, wp, WW, WH);
-    crash_note("menu: popover");
+    // vis= важен: DrawPopover при закрытом популяре выходит сразу, и падение
+    // после него — это уже ImGui::End() или затемнение, а не сам популяр.
+    crash_note("menu: popover vis=%d", (int)g_pop.visible);
     DrawPopover(dt, wp, WW, WH);
+    crash_note("menu: end");
     ImGui::End();
     if (g_menuFadeIn < 1.f) {
         float mA = 1.f - EaseInOut(g_menuFadeIn);
@@ -2711,6 +2714,7 @@ void RenderMenu() {
         ofg->AddRectFilled(g_win.pos, {g_win.pos.x + WW, g_win.pos.y + WH},
             IM_COL32(int(bgC.x*255), int(bgC.y*255), int(bgC.z*255), int(mA * 255)), R::Card);
     }
+    crash_note("menu: fade done");
 }
 
 

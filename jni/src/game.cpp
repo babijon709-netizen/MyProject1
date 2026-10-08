@@ -8291,26 +8291,107 @@ static int    s_direct_dead_frames  = 0;
 static double s_direct_dead_since   = 0.0;
 static double s_direct_dead_log_at  = -1e9;
 
+// Диапазон развёртки вокруг профильного смещения. После обновления игры поле
+// позиции уезжает внутри того же класса, далеко не уходит — но из всех восьми
+// известных смещений оно при этом выпадает.
+static const uint64_t k_position_scan_first = 0x1A0;
+static const uint64_t k_position_scan_last  = 0x300;
+static const uint64_t k_position_scan_step  = 0x4;
+
+// Сколько игроков отдают на этом смещении ту же точку, что и их kcc. kcc —
+// эталон, проверенный всей работой фолбэка: прямое поле либо совпадает с ней,
+// либо позицией не является. Прежняя эвристика (сколько игроков дали
+// правдоподобную позицию плюс разброс) таким доказательством не была: в логе
+// 19:16 она не подтвердила ни одного смещения из восьми за 3.5 минуты, и ESP
+// всё это время ехал на kcc, хотя поле просто уехало.
+static int count_position_offset_matches(const std::vector<uint64_t>& players,
+                                         const std::vector<Vec3>& reference,
+                                         const std::vector<char>& have_reference,
+                                         uint64_t offset) {
+    int matches = 0;
+    for (size_t i = 0; i < players.size(); ++i) {
+        if (!have_reference[i] || !players[i]) continue;
+        Vec3 position = rd_v3(players[i] + offset);
+        if (!vec3_is_finite(position)) continue;
+        const float dx = position.x - reference[i].x;
+        const float dy = position.y - reference[i].y;
+        const float dz = position.z - reference[i].z;
+        if (dx * dx + dy * dy + dz * dz < 9.0F) ++matches;   // < 3 м: тик синхронизации
+    }
+    return matches;
+}
+
 static void revalidate_dead_direct_position(const std::vector<uint64_t>& players) {
+    // Эталон — kcc-позиция тех же игроков этого же кадра.
+    std::vector<Vec3> reference(players.size());
+    std::vector<char> have_reference(players.size(), 0);
+    size_t reference_count = 0;
+    for (size_t i = 0; i < players.size(); ++i) {
+        if (!players[i]) continue;
+        auto aux = g_player_aux.find(players[i]);
+        if (aux == g_player_aux.end() || !aux->second.kcc) continue;
+        Vec3 kcc{};
+        if (player_kcc_position(aux->second, kcc)) {
+            reference[i] = kcc;
+            have_reference[i] = 1;
+            ++reference_count;
+        }
+    }
+
     uint64_t best_offset = 0;
-    double best_score = 0.0;
-    for (uint64_t offset : k_known_position_offsets) {
-        double score = 0.0;
-        if (!evaluate_player_position_offset(players, offset, score)) continue;
-        const double count = floor(score / 1000000.0);
-        const double best_count = floor(best_score / 1000000.0);
-        // Только разостное подтверждение: одному игроку «правдоподобную»
-        // мировую позицию отдаёт и чужое поле, и на пустом сервере это
-        // выродилось бы в миграцию боксов по мусорному смещению.
-        if (count >= 2.0 && count > best_count) { best_offset = offset; best_score = score; }
+    int best_matches = 0;
+    if (reference_count > 0) {
+        for (uint64_t offset : k_known_position_offsets) {
+            const int matches = count_position_offset_matches(players, reference, have_reference, offset);
+            if (matches > best_matches) { best_matches = matches; best_offset = offset; }
+        }
+        const int need = reference_count > 1 ? 2 : 1;
+        if (best_matches < need) {
+            for (uint64_t offset = k_position_scan_first; offset <= k_position_scan_last;
+                 offset += k_position_scan_step) {
+                bool known = false;
+                for (uint64_t k : k_known_position_offsets) {
+                    if (k == offset) { known = true; break; }
+                }
+                if (known) continue;
+                const int matches = count_position_offset_matches(players, reference, have_reference, offset);
+                if (matches > best_matches) { best_matches = matches; best_offset = offset; }
+            }
+        }
+        if (best_matches < (reference_count > 1 ? 2 : 1)) best_offset = 0;
+    }
+
+    if (!best_offset && reference_count == 0) {
+        // Эталона нет вовсе (kcc не отдался ни у одного игрока) — старая
+        // эвристика по разбросу, лучше чем ничего.
+        double best_score = 0.0;
+        for (uint64_t offset : k_known_position_offsets) {
+            double score = 0.0;
+            if (!evaluate_player_position_offset(players, offset, score)) continue;
+            const double count = floor(score / 1000000.0);
+            const double best_count = floor(best_score / 1000000.0);
+            // Только разостное подтверждение: одному игроку правдоподобную
+            // мировую позицию отдаёт и чужое поле, и на пустом сервере это
+            // вырождалось бы в миграцию боксов по мусорному смещению.
+            if (count >= 2.0 && count > best_count) { best_offset = offset; best_score = score; }
+        }
     }
     if (!best_offset) {
-        LogLine("позиция: прямой путь мёртв — среди %zu известных смещений рабочего нет, остаюсь на фолбэке",
-                sizeof(k_known_position_offsets) / sizeof(k_known_position_offsets[0]));
+        // Попытка повторяется каждые 5 c, а ситуация пока не меняется: в логе
+        // 19:16 это дало 45 одинаковых строк. Одна в минуту — достаточно.
+        static double s_fail_log_at = -1e9;
+        const double now = mono_seconds();
+        if (now - s_fail_log_at >= 60.0) {
+            s_fail_log_at = now;
+            LogLine("позиция: прямой путь мёртв — рабочего смещения нет ни среди %zu известных, ни в развёртке 0x%llx..0x%llx, остаюсь на фолбэке",
+                    sizeof(k_known_position_offsets) / sizeof(k_known_position_offsets[0]),
+                    (unsigned long long)k_position_scan_first, (unsigned long long)k_position_scan_last);
+        }
         return;
     }
-    LogLine("позиция: прямой путь мёртв — рабочее смещение 0x%llx (профиль давал 0x%llx), переключил",
-            (unsigned long long)best_offset, (unsigned long long)g_player_position_offset);
+    LogLine("позиция: прямой путь мёртв — рабочее смещение 0x%llx (профиль давал 0x%llx), сверка с kcc: %d из %d, переключил",
+            (unsigned long long)best_offset, (unsigned long long)g_player_position_offset,
+            best_matches, (int)reference_count);
     g_use_direct_player_position = true;
     g_player_position_offset = best_offset;
     g_player_position_validated = true;
