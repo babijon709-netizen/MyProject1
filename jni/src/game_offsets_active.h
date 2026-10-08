@@ -127,6 +127,8 @@ inline std::uint64_t WEAPONVIEW_ROOT_TRANSFORM = game_offsets::WEAPONVIEW_ROOT_T
 inline std::uint64_t WEAPONVIEW_INNER = game_offsets::WEAPONVIEW_INNER;
 inline std::uint64_t MODELINFO_RIGHT_WEAPON_HOLDER = game_offsets::MODELINFO_RIGHT_WEAPON_HOLDER;
 inline std::uint64_t MODELINFO_LEFT_WEAPON_HOLDER = game_offsets::MODELINFO_LEFT_WEAPON_HOLDER;
+inline std::uint64_t MODELINFO_HEAD = game_offsets::MODELINFO_HEAD;
+inline std::uint64_t NPC_BRAIN_MODEL_INFO = game_offsets::NPC_BRAIN_MODEL_INFO;
 inline std::uint64_t CHARANIM_PLAYER_MODEL_INFO = game_offsets::CHARANIM_PLAYER_MODEL_INFO;
 inline std::uint64_t INVDATA_PLAYER_MODEL_INFO = game_offsets::INVDATA_PLAYER_MODEL_INFO;
 inline std::uint64_t IL2CPP_CLASS_NAME = game_offsets::IL2CPP_CLASS_NAME;
@@ -403,6 +405,8 @@ inline void Select(GameVersion version) {
         WEAPONVIEW_INNER = game_offsets_beta::WEAPONVIEW_INNER;
         MODELINFO_RIGHT_WEAPON_HOLDER = game_offsets_beta::MODELINFO_RIGHT_WEAPON_HOLDER;
         MODELINFO_LEFT_WEAPON_HOLDER = game_offsets_beta::MODELINFO_LEFT_WEAPON_HOLDER;
+        MODELINFO_HEAD = game_offsets_beta::MODELINFO_HEAD;
+        NPC_BRAIN_MODEL_INFO = game_offsets_beta::NPC_BRAIN_MODEL_INFO;
         CHARANIM_PLAYER_MODEL_INFO = game_offsets_beta::CHARANIM_PLAYER_MODEL_INFO;
         INVDATA_PLAYER_MODEL_INFO = game_offsets_beta::INVDATA_PLAYER_MODEL_INFO;
         IL2CPP_CLASS_NAME = game_offsets_beta::IL2CPP_CLASS_NAME;
@@ -676,6 +680,8 @@ inline void Select(GameVersion version) {
         WEAPONVIEW_INNER = game_offsets::WEAPONVIEW_INNER;
         MODELINFO_RIGHT_WEAPON_HOLDER = game_offsets::MODELINFO_RIGHT_WEAPON_HOLDER;
         MODELINFO_LEFT_WEAPON_HOLDER = game_offsets::MODELINFO_LEFT_WEAPON_HOLDER;
+        MODELINFO_HEAD = game_offsets::MODELINFO_HEAD;
+        NPC_BRAIN_MODEL_INFO = game_offsets::NPC_BRAIN_MODEL_INFO;
         CHARANIM_PLAYER_MODEL_INFO = game_offsets::CHARANIM_PLAYER_MODEL_INFO;
         INVDATA_PLAYER_MODEL_INFO = game_offsets::INVDATA_PLAYER_MODEL_INFO;
         IL2CPP_CLASS_NAME = game_offsets::IL2CPP_CLASS_NAME;

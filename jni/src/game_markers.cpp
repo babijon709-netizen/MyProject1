@@ -1,5 +1,6 @@
 #include "game.h"
 #include "bot_life.h"
+#include "bot_lead.h"
 #include "cfg.h"
 #include "game_internal.h"
 #include "game_offsets_active.h"   // оффсеты (go_active)
@@ -155,6 +156,14 @@ struct MarkerEntity {
     double   position_last_ok = 0.0;
     int      position_fail_frames = 0;
     int      pos_cooldown = 0;  // frames until the next position re-read (far animals)
+    // Боты: точная кость головы модели (NPCBrainHumanoid.modelInfo.head) и своя
+    // скорость для упреждения. head_transform = 0, если NPCBrainHumanoid или
+    // модель не нашлись — тогда аим считает точку от ног и роста, как раньше.
+    uint64_t head_transform = 0;
+    Vec3     head_position{};
+    bool     head_valid = false;
+    double   head_last_ok = 0.0;
+    botlead::Track lead{};
     int      kind = ESP_MARKER_ORE;
     // Fixed labels point into static strings; ground pickups build their own
     // ("Ягоды x12"), in which case `text` holds it and `label` is null.
@@ -1192,7 +1201,11 @@ static MarkerScanResult rebuild_marker_entities() {
             continue;
 
         uint64_t death_handler = 0;
-        bool death_handler_searched = false;
+        // NPCBrainHumanoid — единственный путь к модели бота, а через неё к
+        // точной кости головы (modelInfo -> head). Ищется тем же проходом, что
+        // и обработчик смерти: оба — соседи Mineable-компонента в behaviours.
+        uint64_t bot_brain = 0;
+        bool bot_components_searched = false;
         // Mirror collects behaviours with GetComponentsInChildren, so one
         // identity can carry a whole rock cluster: every Mineable* component
         // becomes its own marker, positioned by its own GameObject.
@@ -1354,23 +1367,39 @@ static MarkerScanResult rebuild_marker_entities() {
             if (entity.kind == ESP_MARKER_BOT) {
                 // The death handler is a sibling behaviour, not the Mineable
                 // component used to classify the marker. Never read 0xE8 on it.
-                if (!death_handler_searched) {
-                    death_handler_searched = true;
+                if (!bot_components_searched) {
+                    bot_components_searched = true;
                     for (int32_t h = 0; h < behaviour_count; ++h) {
-                        if (valid_obj(behaviours[h]) &&
-                            object_class_name_is(behaviours[h], "NPCHumanoidDeathHandler")) {
+                        if (!valid_obj(behaviours[h])) continue;
+                        if (!death_handler &&
+                            object_class_name_is(behaviours[h], "NPCHumanoidDeathHandler"))
                             death_handler = behaviours[h];
-                            break;
-                        }
+                        if (!bot_brain &&
+                            object_class_name_is(behaviours[h], "NPCBrainHumanoid"))
+                            bot_brain = behaviours[h];
+                        if (death_handler && bot_brain) break;
                     }
                 }
                 entity.life.handler = death_handler;
+                if (bot_brain) {
+                    const uint64_t model_info = rd_ptr(bot_brain + NPC_BRAIN_MODEL_INFO);
+                    if (valid_obj(model_info))
+                        entity.head_transform =
+                            managed_object_native(rd_ptr(model_info + MODELINFO_HEAD));
+                }
                 for (const MarkerEntity& old : g_marker_entities) {
-                    if (old.id == component && old.identity == identity &&
-                        old.life.handler == death_handler) {
-                        entity.life.dead = old.life.dead;
-                        break;
+                    if (old.id != component || old.identity != identity) continue;
+                    if (old.life.handler == death_handler) entity.life.dead = old.life.dead;
+                    // Голова и скорость переживают рескан: без этого после
+                    // каждого цикла (~1-2 с) упреждение пропадало бы на время
+                    // набора оценки заново.
+                    if (old.head_transform && old.head_transform == entity.head_transform) {
+                        entity.head_position = old.head_position;
+                        entity.head_valid = old.head_valid;
+                        entity.head_last_ok = old.head_last_ok;
                     }
+                    entity.lead = old.lead;
+                    break;
                 }
                 marker_bot_dead(entity);
             }
@@ -1449,6 +1478,28 @@ void reset_marker_caches() {
     farm_scan_reset();
 }
 
+// Точка головы бота из модели (NPCBrainHumanoid.modelInfo.head) — та же кость,
+// что у игроков в слоте 0. Позиция принимается только правдоподобная
+// относительно маркера: голова выше корня и рядом с ним. Сбой чтения держит
+// последнюю подтверждённую точку не дольше, чем позицию самого маркера.
+static void marker_track_bot_head(MarkerEntity& entity, double now) {
+    if (!entity.head_transform || !entity.position_valid) return;
+    Vec3 head{};
+    const bool ok = marker_world_position(entity.head_transform, head) &&
+                    vec3_is_finite(head) &&
+                    head.y > entity.position.y + 0.4F && head.y < entity.position.y + 2.6F &&
+                    (head.x - entity.position.x) * (head.x - entity.position.x) +
+                    (head.z - entity.position.z) * (head.z - entity.position.z) <
+                        2.5F * 2.5F;
+    if (ok) {
+        entity.head_position = head;
+        entity.head_valid = true;
+        entity.head_last_ok = now;
+    } else if (entity.head_valid && now - entity.head_last_ok > 0.35) {
+        entity.head_valid = false;
+    }
+}
+
 // Position tracking for markers that move (animals always, bots when drawn
 // or aimed, vehicles — a driven car outruns the rescan in seconds): near
 // ones every frame, far ones a few times a second. Shared by
@@ -1481,6 +1532,10 @@ static void marker_track_position(MarkerEntity& entity) {
             entity.position_valid = true;
             entity.position_last_ok = mono_seconds();
             entity.position_fail_frames = 0;
+            if (entity.kind == ESP_MARKER_BOT) {
+                botlead::update(entity.lead, entity.position, entity.position_last_ok);
+                marker_track_bot_head(entity, entity.position_last_ok);
+            }
         } else if (entity.position_valid &&
                    mono_seconds() - entity.position_last_ok <= 0.35) {
             // Keep the last coherent sample. The object is often between two
@@ -1875,6 +1930,7 @@ void esp_bot_aim_maintain() {
 std::vector<BotAimEnt> esp_bot_aim_list() {
     std::vector<BotAimEnt> out;
     if (!g_bot_aim_enabled) return out;
+    const double now = mono_seconds();
     for (MarkerEntity& entity : g_marker_entities) {
         if (entity.kind != ESP_MARKER_BOT || marker_bot_dead(entity) || !entity.position_valid) continue;
         float dx = entity.position.x - g_frame_local_pos.x;
@@ -1885,6 +1941,20 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
         BotAimEnt bot;
         bot.id = entity.identity;
         bot.x = entity.position.x; bot.y = entity.position.y; bot.z = entity.position.z;
+        const double age = now - entity.position_last_ok;
+        bot.pos_age = (age > 0.0 && std::isfinite(age)) ? (float)age : 0.0F;
+        bot.head_valid = entity.head_valid;
+        if (bot.head_valid) {
+            bot.hx = entity.head_position.x;
+            bot.hy = entity.head_position.y;
+            bot.hz = entity.head_position.z;
+        }
+        if (botlead::fresh(entity.lead, now)) {
+            bot.vel_valid = true;
+            bot.vx = entity.lead.vel.x;
+            bot.vy = entity.lead.vel.y;
+            bot.vz = entity.lead.vel.z;
+        }
         out.push_back(bot);
     }
     return out;

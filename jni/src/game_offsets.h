@@ -297,6 +297,11 @@ inline constexpr std::uint64_t WEAPONVIEW_INNER          = 0x10;
 //   equipmentHolder 0x38, characterAnimation 0x60
 inline constexpr std::uint64_t MODELINFO_RIGHT_WEAPON_HOLDER = 0x28;
 inline constexpr std::uint64_t MODELINFO_LEFT_WEAPON_HOLDER  = 0x30;
+inline constexpr std::uint64_t MODELINFO_HEAD                = 0x20;
+// HyperHug...NPC.NPCBrainHumanoid.modelInfo (0x148) -> NPCHumanoidModelInfo,
+// the bot rig (head 0x20, body 0x40, headModel 0x48). Same layout in release
+// 11946 and beta 11943 dumps; the class name at runtime is unqualified.
+inline constexpr std::uint64_t NPC_BRAIN_MODEL_INFO          = 0x148;
 // CharacterAnimation.playerModelInfo (0x30) and PlayerInventoryData
 // .playerModelInfo (0x20) are the two ways to reach PlayerModelInfo.
 inline constexpr std::uint64_t CHARANIM_PLAYER_MODEL_INFO = 0x30;

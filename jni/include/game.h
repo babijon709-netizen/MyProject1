@@ -171,7 +171,21 @@ void        esp_set_aim_bones_enabled(bool enabled);
 // Bot aim feed: world positions of recognised bots, refreshed (scan +
 // throttled re-reads) even when bot markers are not drawn — so the aimbot
 // keeps working on bots after their ESP is switched off.
-struct BotAimEnt { uint64_t id = 0; float x = 0.f, y = 0.f, z = 0.f; };
+// x/y/z — корень маркера (ноги). head_* — точная кость головы модели
+// (NPCBrainHumanoid.modelInfo.head), когда её удалось прочитать; иначе аим
+// считает голову/шею/грудь от корня и роста. vel_* — своя скорость бота для
+// упреждения: до неё цель брала g_aim_lead, оставшийся от последнего игрока.
+struct BotAimEnt {
+    uint64_t id = 0;
+    float x = 0.f, y = 0.f, z = 0.f;
+    bool  head_valid = false;
+    float hx = 0.f, hy = 0.f, hz = 0.f;
+    bool  vel_valid = false;
+    float vx = 0.f, vy = 0.f, vz = 0.f;
+    // Сколько секунд назад позиция была прочитана. Дальние боты перечитываются
+    // раз в 6/15 кадров, и видимый на экране бот за это время успевает уйти.
+    float pos_age = 0.f;
+};
 void esp_set_bot_aim_enabled(bool enabled);
 void esp_bot_aim_maintain();
 std::vector<BotAimEnt> esp_bot_aim_list();

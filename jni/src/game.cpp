@@ -7773,11 +7773,16 @@ static void note_player_pipeline_health(bool player_data_ok) {
 }
 
 // Боты в списке боксов: только данные для аима (is_bot), оверлей их не рисует.
-// Бокс собирается из мировой позиции маркера: шея/голова/грудь — по росту от
-// земли, углы — тем же set_aim_point, что у игроков. Начало координат у
-// префаба бота — в ногах (конвенция Unity для персонажей): если тест покажет,
-// что аим уходит выше/ниже, двигать kBot*H.
+// Углы считает тот же set_aim_point, что у игроков. Точка прицела — кость
+// головы модели (NPCBrainHumanoid.modelInfo.head), когда её удалось прочитать;
+// иначе — оценка от корня маркера: начало координат префаба бота лежит в ногах
+// (конвенция Unity для персонажей), и если тест покажет, что аим уходит
+// выше/ниже, двигать kBot*H.
 static constexpr float kBotHeadH = 1.60F, kBotNeckH = 1.42F, kBotChestH = 1.18F;
+// Запасные слоты, когда голова прочитана по кости: шея и грудь вниз от неё.
+static constexpr float kBotNeckDrop = 0.17F, kBotChestDrop = 0.45F;
+// Потолок добавки за возраст отсчёта позиции бота (секунды, см. append_bot_boxes).
+static constexpr float kBotPosLeadMax = 0.25F;
 static void append_bot_boxes(std::vector<EspBox>& out) {
     if (!g_aim_bones_requested) return; // без аима боксы ботов не нужны никому
     if (!g_frame_vp_valid || !g_frame_local_valid) return;
@@ -7791,14 +7796,38 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
         float dy = feet.y - g_frame_local_pos.y;
         float dz = feet.z - g_frame_local_pos.z;
         box.distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        // Упреждение — по скорости САМОГО бота. Раньше здесь оставался
+        // g_aim_lead последнего обработанного игрока кадра (в мемори-режиме не
+        // меньше 50 мс), и бегущий игрок уводил прицел на бота в свою сторону.
+        // К задержке контура прибавляем возраст отсчёта позиции: далёкие боты
+        // перечитываются раз в 6/15 кадров, и видимый бот за это время уходит
+        // вперёд от той точки, которую мы ещё держим в кэше.
+        if (src.vel_valid) {
+            float lead = g_aim_lead_seconds;
+            if (src.pos_age > 0.0F)
+                lead += (src.pos_age < kBotPosLeadMax) ? src.pos_age : kBotPosLeadMax;
+            g_aim_lead.x = src.vx * lead;
+            g_aim_lead.y = src.vy * lead;
+            g_aim_lead.z = src.vz * lead;
+        } else {
+            g_aim_lead = {};
+        }
         // Цель — шея (как у игроков); голова и грудь — запасные слоты.
-        Vec3 head = feet;  head.y += kBotHeadH;
-        Vec3 neck = feet;  neck.y += kBotNeckH;
-        Vec3 chest = feet; chest.y += kBotChestH;
+        Vec3 head, neck, chest;
+        if (src.head_valid) {
+            // Точная кость головы модели: без оценки по росту от ног.
+            head = {src.hx, src.hy, src.hz};
+            neck = head;  neck.y -= kBotNeckDrop;
+            chest = head; chest.y -= kBotChestDrop;
+        } else {
+            head = feet;  head.y += kBotHeadH;
+            neck = feet;  neck.y += kBotNeckH;
+            chest = feet; chest.y += kBotChestH;
+        }
         set_aim_point(box, 0, head, g_frame_vp, g_frame_sw, g_frame_sh);
         if (!set_aim_point(box, 1, neck, g_frame_vp, g_frame_sw, g_frame_sh)) continue;
         set_aim_point(box, 2, chest, g_frame_vp, g_frame_sw, g_frame_sh);
-        box.aim_source = 3; // ноги + рост (оценка) — буквально этот случай
+        box.aim_source = src.head_valid ? 1 : 3; // 1 — кость, 3 — оценка от ног
         // Габариты для приличия: ноги и макушка в экранных координатах.
         Vec3 top = feet; top.y += 1.8F;
         Vec2 s_feet{}, s_top{};
@@ -7813,6 +7842,9 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
         out.push_back(box);
         ++g_frame_bot_count;
     }
+    // Чужая (последнего игрока) скорость не должна пережить кадр: следующий
+    // потребитель g_aim_lead обязан выставить её сам.
+    g_aim_lead = {};
 }
 
 
