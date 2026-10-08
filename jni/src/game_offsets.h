@@ -112,7 +112,16 @@ inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA_ALT = 0;
 inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA = 0xDD0AA60;      // Cysharp...UniTask.DelayIgnoreTimeScalePromise
 inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA_ALT = 0;
 inline constexpr std::uint64_t FPHITSCAN_CONFIG = 0x130;
-// FPHitscan copies config values into these live fields during lMf/sPo.  The
+// Ballistic sources shared by release 11946 and beta 11943.
+inline constexpr std::uint64_t FPBOW_PROJECTILE_PREFAB = 0x150;
+inline constexpr std::uint64_t FPCROSSBOW_CONFIG = 0x138;
+inline constexpr std::uint64_t FPCROSSBOW_PROJECTILE_PREFAB = 0x148;
+inline constexpr std::uint64_t FPROCKETLAUNCHER_CONFIG = 0x128;
+inline constexpr std::uint64_t FPROCKETLAUNCHER_PROJECTILE_PREFAB = 0x148;
+inline constexpr std::uint64_t FPEXPLOSIVECHARGE_PROJECTILE_PREFAB = 0x130;
+inline constexpr std::uint64_t FPSNOWBALL_PROJECTILE_PREFAB = 0x130;
+inline constexpr std::uint64_t FPSPEAR_PROJECTILE_PREFAB = 0x170;
+// FPHitscan copies config values into these live fields during lMf/sPo. The
 // config alone is therefore not enough for a weapon which is already drawn.
 inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = 0xE8;
 inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = 0x124;
@@ -139,7 +148,14 @@ inline constexpr std::uint64_t CALCULATOR_CACHED_BASE_DISPERSION = 0x20;
 inline constexpr std::uint64_t HITSCANCONFIG_FIRE_RATE = 0x34;
 inline constexpr std::uint64_t HITSCANCONFIG_FULL_RELOAD = 0x48;
 inline constexpr std::uint64_t HITSCANCONFIG_LOOP_RELOAD = 0x4C;
+inline constexpr std::uint64_t HITSCANCONFIG_BALLISTIC_PROFILE = 0x60;
 inline constexpr std::uint64_t HITSCANCONFIG_DISPERSION_CONFIG = 0x68;  // было 0x60
+inline constexpr std::uint64_t BALLISTICPROFILE_GRAVITY = 0x10;
+inline constexpr std::uint64_t BALLISTICPROFILE_AIR_DRAG = 0x14;
+inline constexpr std::uint64_t BALLISTICPROFILE_UNDERWATER_DRAG = 0x18;
+inline constexpr std::uint64_t SHAFTEDPROJECTILE_GRAVITY = 0xAC;
+inline constexpr std::uint64_t SHAFTEDPROJECTILE_AIR_DRAG = 0xB0;
+inline constexpr std::uint64_t SHAFTEDPROJECTILE_UNDERWATER_DRAG = 0xB4;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 // Отдача («без отдачи»): конфиг-ассет хитскана (поле 0x70 в

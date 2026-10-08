@@ -434,7 +434,7 @@ void ConfigLoad(int idx, bool announce) {
     XorBuf(extra, extraGot);
     g_state.viewmodel = viewmodel::decode(extra, extraGot);
     g_state.esp_turrets = g_state.esp_backpacks = g_state.esp_sleepers = false;
-    // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4/v5 ниже могут
+    // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4–v6 могут
     // вернуть своё значение. Сам прицеп 36 байт с v4; прицеп v3 был 32 —
     // обрабатываем оба размера, иначе старые конфиги потеряли бы турели,
     // рюкзаки и спящих.
@@ -443,7 +443,7 @@ void ConfigLoad(int idx, bool announce) {
         viewmodel::ConfigExtension extension;
         memcpy(&extension, extra, extraGot);   // v3: 32 байта, хвост — дефолты
         if (extension.magic == 0x31574d56u &&
-            (extension.version == 3 || extension.version == 4 || extension.version == 5) &&
+            (extension.version == 3 || extension.version == 4 || extension.version == 5 || extension.version == 6) &&
             extension.size == extraGot) {
             g_state.esp_turrets = (extension.flags & 128u) != 0;
             g_state.esp_backpacks = (extension.flags & 256u) != 0;

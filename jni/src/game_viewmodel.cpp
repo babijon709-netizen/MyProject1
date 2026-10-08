@@ -4,6 +4,7 @@
 #include "fast_fire_memory.h"
 #include "fast_loot_memory.h"
 #include "no_recoil_memory.h"
+#include "no_ballistics_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
 #include "farm.h"
@@ -252,6 +253,26 @@ struct HeapMemory {
     bool named(uint64_t object, const char* name, const char* namespaze) {
         return object>=0x10000 && named_klass(memory.ptr(object),name,namespaze);
     }
+    bool describe(uint64_t object, char* name, size_t name_size,
+                  char* namespaze, size_t namespace_size) {
+        if (object < 0x10000 || !name || !namespaze || name_size < 2 || namespace_size < 2)
+            return false;
+        const uint64_t klass = memory.ptr(object);
+        if (klass < 0x10000) return false;
+        const uint64_t name_ptr = memory.ptr(klass + go_active::IL2CPP_CLASS_NAME);
+        const uint64_t namespace_ptr = memory.ptr(klass + go_active::IL2CPP_CLASS_NAMESPACE);
+        auto copy_cstr = [&](uint64_t source, char* out, size_t capacity) {
+            if (source < 0x10000) return false;
+            for (size_t i = 0; i + 1 < capacity; ++i) {
+                if (!memory.read(source + i, out[i])) { out[0] = 0; return false; }
+                if (out[i] == 0) return true;
+            }
+            out[capacity - 1] = 0;
+            return true;
+        };
+        return copy_cstr(name_ptr, name, name_size) &&
+               copy_cstr(namespace_ptr, namespaze, namespace_size);
+    }
     // Calculator names rotate between builds (Ze/FJ/...). Its empty namespace
     // and both typed backlinks are checked by the spread controller before any write.
     bool calculator_class(uint64_t object) {
@@ -287,6 +308,7 @@ weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
 fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
 no_recoil::Controller<HeapMemory> no_recoil_ctl(heap_memory);
+no_ballistics::Controller<HeapMemory> no_ballistics_ctl(heap_memory);
 
 // Причина остановки быстрой стрельбы для лога: расшифровка стадии, которую
 // выставляет fast_fire::Controller (resolve/build_plan/apply в
@@ -355,6 +377,133 @@ void log_no_recoil_transition() {
         LogLine("no recoil: status=%d stage=%d (1-2 local,3-4 identity,5 FPManager,6 not hitscan,7 owner,8 config,9 recoil asset,10-14 write)",
                 (int)status, stage);
     last_stage = stage; last_status = status;
+}
+const char* no_ballistics_kind_name(no_ballistics::Kind kind) {
+    using no_ballistics::Kind;
+    switch (kind) {
+        case Kind::Hitscan: return "hitscan";
+        case Kind::Bow: return "bow";
+        case Kind::Crossbow: return "crossbow";
+        case Kind::RocketLauncher: return "rocket";
+        case Kind::ExplosiveCharge: return "charge";
+        case Kind::Snowball: return "snowball";
+        case Kind::Spear: return "spear";
+        case Kind::Melee: return "melee/tool";
+        default: return "unknown";
+    }
+}
+const char* no_ballistics_status_name(viewmodel::Status status) {
+    switch (status) {
+        case viewmodel::Status::Off: return "off";
+        case viewmodel::Status::Waiting: return "waiting";
+        case viewmodel::Status::Active: return "active";
+        case viewmodel::Status::Failed: return "failed";
+        case viewmodel::Status::ADS: return "ads";
+        default: return "unknown";
+    }
+}
+const char* no_ballistics_stop_reason(viewmodel::Status status, int stage) {
+    if (status == viewmodel::Status::Off) return "disabled or game unbound";
+    switch (stage) {
+        case 1: case 2: return "no local player";
+        case 3: case 4: return "network identity missing or not local";
+        case 5: return "FPManager missing or dead";
+        case 6: return "unknown weapon type";
+        case 7: return "weapon backlink to player mismatch";
+        case 8: return "weapon config not found";
+        case 9: return "ballistic profile not found";
+        case 10: return "projectile prefab field unreadable";
+        case 11: return "ShaftedProjectile prefab not found";
+        case 12: return "no ballistic targets on active weapon";
+        case 13: case 15: return "ballistic values unreadable or out of range";
+        case 14: return "weapon context changed mid-write";
+        case 16: case 17: return "zero write not confirmed by readback";
+        case 18: return "original values could not be restored";
+        default: return "waiting for bind or player";
+    }
+}
+void log_no_ballistics_transition() {
+    using Clock = std::chrono::steady_clock;
+    static int last_stage = -1, last_error_stage = -1;
+    static viewmodel::Status last_status = viewmodel::Status::Off;
+    static uint64_t last_context = ~uint64_t{0}, last_writes = ~uint64_t{0};
+    static uint64_t last_restores = ~uint64_t{0}, last_error_address = ~uint64_t{0};
+    static Clock::time_point last_emit{};
+
+    const int stage = no_ballistics_ctl.stage();
+    const viewmodel::Status status = no_ballistics_ctl.status;
+    const no_ballistics::DebugInfo d = no_ballistics_ctl.debug_info();
+    const auto now = Clock::now();
+    const bool transition = stage != last_stage || status != last_status ||
+                            d.context_generation != last_context;
+    const bool error_changed = d.error_stage != last_error_stage ||
+        (d.error_stage && d.error_address != last_error_address);
+    const bool restore_changed = d.restore_generation != last_restores;
+    const bool writes_pending = d.write_generation != last_writes;
+    const bool write_due = writes_pending && now - last_emit >= std::chrono::seconds(5);
+    const bool error_due = error_changed &&
+        (transition || now - last_emit >= std::chrono::seconds(1));
+    const bool heartbeat = status == viewmodel::Status::Active &&
+        now - last_emit >= std::chrono::seconds(30);
+    if (!transition && !restore_changed && !write_due && !error_due && !heartbeat) return;
+
+    const char* reason = status == viewmodel::Status::Active
+        ? "ok" : no_ballistics_stop_reason(status, stage);
+    const char* game = go_active::selected_version == go_active::GameVersion::Beta
+        ? "beta" : "release";
+    char weapon_name[72]{}, weapon_ns[96]{};
+    char config_name[72]{}, config_ns[96]{};
+    char profile_name[72]{}, profile_ns[96]{};
+    char projectile_name[72]{}, projectile_ns[96]{};
+    auto describe = [&](uint64_t object, char* name, size_t name_size,
+                        char* namespaze, size_t namespace_size) {
+        if (heap_memory.describe(object, name, name_size, namespaze, namespace_size)) return;
+        std::snprintf(name, name_size, "%s", object ? "unreadable" : "-");
+        std::snprintf(namespaze, namespace_size, "%s", object ? "unreadable" : "-");
+    };
+    describe(d.probe_weapon, weapon_name, sizeof(weapon_name), weapon_ns, sizeof(weapon_ns));
+    describe(d.probe_config, config_name, sizeof(config_name), config_ns, sizeof(config_ns));
+    describe(d.probe_profile, profile_name, sizeof(profile_name), profile_ns, sizeof(profile_ns));
+    describe(d.probe_projectile, projectile_name, sizeof(projectile_name), projectile_ns, sizeof(projectile_ns));
+    LogLine("no ballistics: game=%s status=%s(%d) stage=%d reason=%s kind=%s probe_kind=%s "
+            "weapon=0x%llx config=0x%llx profile=0x%llx prefab=0x%llx "
+            "types[weapon=%s.%s config=%s.%s profile=%s.%s prefab=%s.%s] "
+            "probe[player=0x%llx fp=0x%llx weapon=0x%llx config=0x%llx profile=0x%llx prefab=0x%llx]",
+            game, no_ballistics_status_name(status), (int)status, stage, reason,
+            no_ballistics_kind_name(d.kind), no_ballistics_kind_name(d.probe_kind),
+            (unsigned long long)d.weapon, (unsigned long long)d.config,
+            (unsigned long long)d.profile, (unsigned long long)d.projectile,
+            weapon_name, weapon_ns, config_name, config_ns,
+            profile_name, profile_ns, projectile_name, projectile_ns,
+            (unsigned long long)d.probe_player, (unsigned long long)d.probe_fp,
+            (unsigned long long)d.probe_weapon, (unsigned long long)d.probe_config,
+            (unsigned long long)d.probe_profile, (unsigned long long)d.probe_projectile);
+    LogLine("no ballistics: fields target=%02x read=%02x zero=%02x wrote=%02x saved=%02x "
+            "restore_try=%02x restored=%02x skipped=%02x saved_values=[%.5g,%.5g,%.5g;%.5g,%.5g,%.5g] "
+            "last=0x%llx %.5g->%.5g generations=context:%llu write:%llu restore:%llu "
+            "(bits0-2=profile gravity/air/underwater, bits3-5=prefab gravity/air/underwater)",
+            (unsigned)d.target_mask, (unsigned)d.read_mask, (unsigned)d.zero_mask,
+            (unsigned)d.patched_mask, (unsigned)d.saved_mask,
+            (unsigned)d.restore_attempted_mask, (unsigned)d.restored_mask,
+            (unsigned)d.restore_skipped_mask,
+            (double)d.original_values[0], (double)d.original_values[1], (double)d.original_values[2],
+            (double)d.original_values[3], (double)d.original_values[4], (double)d.original_values[5],
+            (unsigned long long)d.last_address, (double)d.last_before, (double)d.last_after,
+            (unsigned long long)d.context_generation, (unsigned long long)d.write_generation,
+            (unsigned long long)d.restore_generation);
+    if (d.error_stage) {
+        LogLine("no ballistics: error stage=%d reason=%s address=0x%llx value=%.7g",
+                d.error_stage, no_ballistics_stop_reason(viewmodel::Status::Failed, d.error_stage),
+                (unsigned long long)d.error_address, (double)d.error_value);
+    }
+    last_stage = stage;
+    last_status = status;
+    last_context = d.context_generation;
+    last_writes = d.write_generation;
+    last_restores = d.restore_generation;
+    last_error_stage = d.error_stage;
+    last_error_address = d.error_address;
+    last_emit = now;
 }
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
@@ -467,6 +616,9 @@ void esp_viewmodel_reset(bool restore) {
     if (!no_recoil_ctl.reset(restore && g_mem.bound()))
         LogLine("no recoil: originals could not all be restored before disconnect; restart game");
     log_no_recoil_transition();
+    if (!no_ballistics_ctl.reset(restore && g_mem.bound()))
+        LogLine("no ballistics: originals could not all be restored before disconnect; restart game");
+    log_no_ballistics_transition();
     loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
@@ -486,6 +638,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         no_recoil_ctl.reset(false);
         no_recoil_ctl.status = settings.no_recoil_button ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         log_no_recoil_transition();
+        no_ballistics_ctl.reset(false);
+        no_ballistics_ctl.status = settings.no_ballistics ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        log_no_ballistics_transition();
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
@@ -521,6 +676,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         want_no_spread || weapons.has_state() ||
         want_fast_fire || rapid_fire.has_state() ||
         settings.no_recoil_button || no_recoil_ctl.has_state() ||
+        settings.no_ballistics || no_ballistics_ctl.has_state() ||
         g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
@@ -557,6 +713,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             log_fast_fire_transition();
             no_recoil_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_recoil_button);
             log_no_recoil_transition();
+            no_ballistics_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_ballistics);
+            log_no_ballistics_transition();
             return;
         }
         local_source_failed=false;
@@ -566,7 +724,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // overlay rate. Setting/player changes bypass the limiter immediately.
     const unsigned weapon_flags = (want_no_spread ? 1u : 0u) |
                                   (want_fast_fire ? 2u : 0u) |
-                                  (settings.no_recoil_button ? 4u : 0u);
+                                  (settings.no_recoil_button ? 4u : 0u) |
+                                  (settings.no_ballistics ? 8u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -580,6 +739,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         log_fast_fire_transition();
         no_recoil_ctl.tick(epoch, g_il2cpp_base, player, settings.no_recoil_button);
         log_no_recoil_transition();
+        no_ballistics_ctl.tick(epoch, g_il2cpp_base, player, settings.no_ballistics);
+        log_no_ballistics_transition();
     }
     {
         // Log no-spread resolution changes only.
