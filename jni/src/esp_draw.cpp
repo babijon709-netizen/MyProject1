@@ -8,6 +8,7 @@
 #include "game_offsets_active.h" // go_active::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
 #include "logfile.h"
+#include "audio.h"
 #include "esp_box_hold.h"        // состав боксов/маркеров на кадр
 #include "overlay_geometry.h"
 #include <algorithm>
@@ -77,6 +78,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         clock_gettime(CLOCK_MONOTONIC, &ts);
         const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
         const bool transient = esp_box_frame_transient();
+        if (esp_take_hit_sound_event()) PlaySound(SND_HIT);
         const size_t raw_count = next.size();
 
         espboxhold::update(s_hold, next, transient, now, kEspHoldSeconds, s_out);
@@ -128,6 +130,7 @@ static const std::vector<EspMarker>& FrameMarkers() {
 }
 
 void DrawEspOverlay() {
+    esp_set_hit_sound_enabled(g_state.hit_sound && g_esp_attached);
     const OverlayGeometry overlay = MakeOverlayGeometry(
         displayInfo.width, displayInfo.height,
         native_window_screen_x, native_window_screen_y);
@@ -146,9 +149,15 @@ void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes) return;
+    const bool draw_visuals = g_state.esp_box || g_state.esp_chams || g_state.esp_wall ||
+        g_state.esp_tracer || g_state.esp_skeleton || g_state.esp_name || g_state.esp_weapon ||
+        g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup ||
+        g_state.esp_bots || g_state.esp_vehicles || g_state.esp_scrap || g_state.esp_turrets ||
+        g_state.esp_backpacks || g_state.esp_sleepers || g_state.esp_house_boxes;
+    if (!draw_visuals && !g_state.hit_sound) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
+    if (!draw_visuals) return;
     constexpr int BOX_EDGES[][2] = {
         {0,1},{1,2},{2,3},{3,0},
         {4,5},{5,6},{6,7},{7,4},

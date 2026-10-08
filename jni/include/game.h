@@ -176,6 +176,9 @@ std::vector<BotAimEnt> esp_bot_aim_list();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
 // True when the last box frame ended on a transient memory/resolver failure.
 bool        esp_box_frame_transient();
+// Забрать одно событие урона по игроку после локального выстрела.
+bool        esp_take_hit_sound_event();
+void        esp_set_hit_sound_enabled(bool enabled);
 
 // Players near the local player as of the last esp_get_boxes() call, in all
 // directions (360 degrees) — NOT limited to the ones visible on screen.

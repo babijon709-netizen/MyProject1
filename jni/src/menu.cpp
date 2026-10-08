@@ -945,6 +945,11 @@ float TabContent(int tab, float dt, float cW) {
         // ноды убран по просьбе пользователя — рисуются фирменными цветами.
         CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
 
+        SHdr(XS("Звук"));
+        CardBg(Layout::RowH);
+        ToggleRow("##hitsound", XS("Звук попадания"), &g_state.hit_sound,
+                  g_state.a_hit_sound, true, true);
+
         auto& vm = g_state.viewmodel;
         SHdr(XS("Кастомный FOV"));
         CardBg(Layout::RowH + Layout::SliderH);
@@ -1850,6 +1855,7 @@ void RenderMenu() {
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_fast_fire, g_state.fast_fire, dt);
     Tick(g_state.a_fast_reload, g_state.fast_reload, dt);
+    Tick(g_state.a_hit_sound, g_state.hit_sound, dt);
     Tick(g_state.a_fake_lag, g_state.fake_lag, dt);
     Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);
     Tick(g_state.a_fps_120, g_state.viewmodel.fps_limit == 120, dt);

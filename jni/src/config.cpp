@@ -338,7 +338,8 @@ static void ConfigSaveToPath(const std::string& path) {
                           // Инвертировано, как бит 4: старые конфиги держат 0,
                           // то есть ящики в домах видны — как до разделения.
                           (g_state.esp_house_boxes ? 0 : 256) |
-                          (g_state.fakelag_btn_show ? 0 : 1024);
+                          (g_state.fakelag_btn_show ? 0 : 1024) |
+                          (g_state.hit_sound ? 2048 : 0);
         auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
         const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
                                    + ch(cfg::esp::pickup_col.y) * 256
@@ -462,7 +463,7 @@ void ConfigLoad(int idx, bool announce) {
     // Packed scalars. A config written before these existed holds the old ping
     // colour here, so each value is range-checked and falls back to its default.
     {
-        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 2048.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
+        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 4096.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
         g_state.esp_loot   = (flags & 1) != 0;
         g_state.esp_pickup = (flags & 2) != 0;
         g_state.esp_bots     = (flags & 4) != 0;
@@ -473,6 +474,7 @@ void ConfigLoad(int idx, bool announce) {
         g_state.fast_reload = (flags & 128) != 0;
         g_state.esp_house_boxes = (flags & 256) == 0;
         g_state.fakelag_btn_show = (flags & 1024) == 0;
+        g_state.hit_sound = (flags & 2048) != 0;
         g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;

@@ -2,6 +2,7 @@
 #include "aim.h"
 #include "app_state.h"
 #include "player_esp_watchdog.h"
+#include "hit_sound_tracker.h"
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
@@ -7505,7 +7506,23 @@ static int      g_frame_publish_fail_streak = 0;
 // path. The renderer may briefly retain the previous boxes instead of flashing
 // an empty frame. A readable empty player registry is not transient.
 static bool     g_box_frame_transient = true;
+static hitsound::Tracker g_hit_sound_tracker;
+static bool g_hit_sound_event = false;
+static bool g_hit_sound_enabled = false;
+static std::vector<hitsound::HealthSample> g_hit_sound_samples;
 bool esp_box_frame_transient() { return g_box_frame_transient; }
+bool esp_take_hit_sound_event() {
+    const bool event = g_hit_sound_event;
+    g_hit_sound_event = false;
+    return event;
+}
+void esp_set_hit_sound_enabled(bool enabled) {
+    if (g_hit_sound_enabled == enabled) return;
+    g_hit_sound_enabled = enabled;
+    g_hit_sound_tracker.reset();
+    g_hit_sound_event = false;
+    g_hit_sound_samples.clear();
+}
 // Independent from camera/marker publication: successful ore frames must not
 // conceal a dead player list or position pipeline.
 static PlayerEspWatchdog g_player_esp_watchdog;
@@ -8250,6 +8267,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
     g_box_frame_transient = true;
     std::vector<EspBox> result;
+    g_hit_sound_event = false;
+    g_hit_sound_samples.clear();
+    const bool hit_sound_enabled = g_hit_sound_enabled && g_state.hit_sound;
+    const double hit_sound_now = memio::now_seconds();
+    if (hit_sound_enabled) {
+        float shot_time = 0.0f;
+        const bool shot_readable = esp_mem_aim_last_shot(shot_time);
+        g_hit_sound_tracker.observe_shot(shot_readable, shot_time, hit_sound_now);
+    } else {
+        g_hit_sound_tracker.reset();
+    }
     auto transient_return = [&](int tag) {
         watch_boxes(result, (size_t)-1, nullptr, tag);
         return result;
@@ -8342,6 +8370,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         publish_camera_only_frame(sw, sh);
         append_bot_boxes(result); // боты — и без игроков
         g_box_frame_transient = !player_list_ok;
+        if (hit_sound_enabled && !g_box_frame_transient)
+            g_hit_sound_event = g_hit_sound_tracker.observe_health(
+                nullptr, 0, false, memio::now_seconds());
         return transient_return(1);
     }
 
@@ -8801,16 +8832,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         // разрешён (там просто «?»), поэтому берём тот слот,
                         // где лечит правдоподобное здоровье, — и печатаем оба,
                         // чтобы следующая сборка уже знала точно.
-                        const float hp20 = rd<float>(hv + go_active::HEALTH_VALUE);
-                        const float hp18 = rd<float>(hv + go_active::ARP_LATEST_VALUE);
+                        float hp20 = 0.0f, hp18 = 0.0f;
+                        const bool have20 = rd_exact(hv + go_active::HEALTH_VALUE, hp20);
+                        const bool have18 = rd_exact(hv + go_active::ARP_LATEST_VALUE, hp18);
                         auto plausible = [](float v) {
                             return std::isfinite(v) && v >= 0.f && v <= 100000.f;
                         };
                         // Не прочиталось ни там ни там — здоровье НЕИЗВЕСТНО, а
                         // не «ноль». Именно подстановка нуля вместо неудачи и
                         // помечала живых игроков мёртвыми (жалоба 19.09).
-                        if (plausible(hp20))      { box.health = hp20; box.health_slot = 0x20; }
-                        else if (plausible(hp18)) { box.health = hp18; box.health_slot = 0x18; }
+                        if (have20 && plausible(hp20))      { box.health = hp20; box.health_slot = 0x20; }
+                        else if (have18 && plausible(hp18)) { box.health = hp18; box.health_slot = 0x18; }
                         else                      { box.health = -1.f; box.health_slot = 0; }
                         if (box.health > g_hp_max_seen) g_hp_max_seen = box.health;
                         // Срез объекта Health больше не печатаем: слот
@@ -8869,6 +8901,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             box.has_tag = tc.has_tag;
             if (tc.has_tag) memcpy(box.tag, tc.tag, sizeof(box.tag));
         }
+        if (hit_sound_enabled && box.health >= 0.0f)
+            g_hit_sound_samples.push_back({box.id, box.health, box.ally});
         for (size_t corner = 0; corner < 8; ++corner) {
             Vec2 sc{};
             bool projected = transform_camera_mode
@@ -9032,6 +9066,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     append_bot_boxes(result);
     g_box_frame_transient = false;
+    if (hit_sound_enabled)
+        g_hit_sound_event = g_hit_sound_tracker.observe_health(
+            g_hit_sound_samples.data(), g_hit_sound_samples.size(), false,
+            memio::now_seconds());
     watch_boxes(result, local_entity_index, &skip_reason, 0);
 
     return result;
