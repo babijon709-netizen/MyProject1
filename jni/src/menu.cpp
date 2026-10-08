@@ -1099,7 +1099,11 @@ float TabContent(int tab, float dt, float cW) {
             const float avW = ImGui::GetContentRegionAvail().x;
             auto pos = ImGui::GetCursorScreenPos();
             ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
-            if (ImGui::Button(XS("Настроить кнопку"), {avW - inset*2.f, rowH - 8.f})) {
+            // ID из метки совпадал с кнопкой «Настроить кнопку» фрикама —
+            // ImGui кидал нажатие на первую по кадру, вторая не работала.
+            // Видимый текст тот же, уникальность — суффиксом за ##.
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "%s##xrbtn9", XS("Настроить кнопку"));
+            if (ImGui::Button(lbl, {avW - inset*2.f, rowH - 8.f})) {
                 g_calibMode = 9;
                 menu_open = false;
             }
@@ -1148,7 +1152,11 @@ float TabContent(int tab, float dt, float cW) {
             const float avW = ImGui::GetContentRegionAvail().x;
             auto pos = ImGui::GetCursorScreenPos();
             ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
-            if (ImGui::Button(XS("Настроить кнопку"), {avW - inset*2.f, rowH - 8.f})) {
+            // Та же пара-дубликат ID, что у иксрея выше: обе метки «Настроить
+            // кнопку» давали один ImGui ID, поэтому нажатие уходило киксрею.
+            // Видимый текст прежний, ID уникален суффиксом за ##.
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "%s##fcbtn6", XS("Настроить кнопку"));
+            if (ImGui::Button(lbl, {avW - inset*2.f, rowH - 8.f})) {
                 g_calibMode = 6;
                 menu_open = false;
             }
