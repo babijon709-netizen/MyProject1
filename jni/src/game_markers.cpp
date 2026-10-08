@@ -1697,8 +1697,20 @@ std::vector<EspMarker> esp_get_markers() {
             marker_watch_observe(entity, false, "PROJECTION", distance, screen.x, screen.y);
             continue;
         }
-        if (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F ||
-            screen.y < -64.0F || screen.y > g_frame_sh + 64.0F) {
+        // Край экрана держим так же щедро, как боксы (25% большей стороны), и с
+        // гистерезисом: метка, видимая в прошлом кадре, гаснет только когда
+        // уходит ещё на 25% малой стороны дальше. Зона ±64 px мигала — в логе
+        // 11:53:17 бот на одной и той же мировой точке трижды за 0.3 с уходил в
+        // OFFSCREEN и возвращался: камера за кадр сдвигала проекцию на пару
+        // пикселей, а метка сидела точно на границе. Прореживание (22 px) и
+        // лимит 64 метки ниже ограничивают цену широкой зоны.
+        const float edge_enter = std::max(g_frame_sw, g_frame_sh) * 0.25F;
+        const float edge_hold  = edge_enter + std::min(g_frame_sw, g_frame_sh) * 0.25F;
+        auto watch_prev = s_marker_watch.find(marker_watch_key(entity));
+        const bool was_visible = watch_prev != s_marker_watch.end() && watch_prev->second.visible;
+        const float edge = was_visible ? edge_hold : edge_enter;
+        if (screen.x < -edge || screen.x > g_frame_sw + edge ||
+            screen.y < -edge || screen.y > g_frame_sh + edge) {
             marker_watch_observe(entity, false, "OFFSCREEN", distance, screen.x, screen.y);
             continue;
         }

@@ -5431,6 +5431,13 @@ static void prune_player_aux(const std::vector<uint64_t>& players) {
 struct PlayerTrack {
     char uid[40] = {};      // userID, empty when it could not be read
     int  uid_recheck = 0;   // objects are pooled and reused for other players
+    // Последнее кадровое решение «мёртв» для ЭТОГО объекта и когда оно принято.
+    // Труп остаётся в реестре ещё несколько секунд после респауна, и без этого
+    // флага объект-трупа забирал uid себе: свежий объект того же игрока
+    // подавлялся как duplicate-uid, и живой игрок оставался без бокса. В логе
+    // 11:52:50 так пропал игрок на 0.5 с, а в 11:53:32 — игрок на 7.6 м.
+    bool corpse = false;
+    double corpse_at = 0.0;
     Vec3 last{};
     bool has_last = false;
     int  still_frames = 0;  // consecutive frames without movement
@@ -5777,6 +5784,15 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
     track.last = position;
     track.has_last = true;
     return track;
+}
+
+// Объект в прошлом кадре признали мёртвым. Решение живёт один кадр, поэтому
+// staleness ограничиваем секундой: объекты пула меняют владельца, и вчерашний
+// труп не должен распоряжаться uid сегодня.
+static bool player_track_is_corpse(uint64_t player) {
+    auto it = g_player_track.find(player);
+    if (it == g_player_track.end() || !it->second.corpse) return false;
+    return mono_seconds() - it->second.corpse_at < 1.0;
 }
 
 // ---- Временной фильтр позиции ------------------------------------------------
@@ -8658,7 +8674,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (pick && pick != s_transforms[i]) {
                     bool pick_alive = false;
                     for (uint64_t p : s_transforms) if (p == pick) { pick_alive = true; break; }
-                    if (pick_alive) {
+                    // Труп в реестре uid не удерживает: игрок уже респавнился, и
+                    // показывать надо свежий объект. Две копии трупа между собой
+                    // по-прежнему не меняются — выбор не дёргается зря.
+                    const bool pick_corpse = pick_alive && player_track_is_corpse(pick);
+                    const bool candidate_corpse = player_track_is_corpse(s_transforms[i]);
+                    if (pick_alive && !(pick_corpse && !candidate_corpse)) {
                         diagnostic.duplicate_of = pick;
                         mark_skip('S');
                         continue;
@@ -9025,9 +9046,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (box.dead) {
             mark_skip('X');
             if (g_frame_player_count > 0) --g_frame_player_count;
+            // Метка для подавления дубликатов выше: этот объект — труп, uid он
+            // не удерживает, и свежий объект игрока получает бокс.
+            auto corpse_track = g_player_track.find(s_transforms[i]);
+            if (corpse_track != g_player_track.end()) {
+                corpse_track->second.corpse = true;
+                corpse_track->second.corpse_at = mono_seconds();
+            }
             continue;
         }
         result.push_back(box);
+        auto live_track = g_player_track.find(s_transforms[i]);
+        if (live_track != g_player_track.end()) {
+            live_track->second.corpse = false;
+            live_track->second.corpse_at = 0.0;
+        }
     }
 
     append_bot_boxes(result);
