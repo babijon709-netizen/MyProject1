@@ -6,6 +6,7 @@
 #include "app_state.h"
 #include "ui_util.h"
 #include "aim.h"                 // AimSensitivityScale/Gain
+#include "manes_aim_source.h"
 #include "esp_draw.h"            // FrameBoxes
 #include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
@@ -657,7 +658,27 @@ static void UpdateFarmInner(float dt) {
     }
 
     // ---- палец 1: камера ------------------------------------------------------
-    {
+    if (g_state.aim_mode == AIM_MODE_MEMORY) {
+        Touch_Up_N(1);
+        float sens = 0.f, accX = 0.f, accY = 0.f;
+        bool invert = false, gyro = false;
+        const bool ready = esp_mem_aim_look_params(sens, invert, gyro) &&
+                           esp_mem_aim_read_angles(accX, accY);
+        if (ready) {
+            const float dead = (phase == 3) ? 0.18f : 0.30f;
+            const float gain = manes_aim_source::frame_gain(0.30f, dt);
+            const float maxStep = 150.f * dt;
+            float yaw = (fabsf(steerYaw) > dead) ? steerYaw * gain : 0.f;
+            float pitch = (fabsf(steerPitch) > dead) ? steerPitch * gain : 0.f;
+            yaw = fmaxf(-maxStep, fminf(maxStep, yaw));
+            pitch = fmaxf(-maxStep, fminf(maxStep, pitch));
+            if (yaw != 0.f || pitch != 0.f) {
+                const float writeX = WrapDeg180(accX - pitch);
+                const float writeY = WrapDeg180(accY + yaw);
+                esp_mem_aim_write_angles(writeX, writeY);
+            }
+        }
+    } else {
         const float wantYawPx = steerYaw * invGain;
         float wantPitchPx = 0.f;
         if (fabsf(steerPitch) > pitchDead) wantPitchPx = -steerPitch * fabsf(invGain);
