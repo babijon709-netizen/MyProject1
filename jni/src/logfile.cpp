@@ -120,14 +120,6 @@ void crash_handler(int signal_number, siginfo_t* info, void* context) {
     _exit(128 + signal_number);
 }
 
-void crash_note(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    std::vsnprintf(s_crash_note, sizeof(s_crash_note), format, args);
-    va_end(args);
-    s_crash_note_valid.store(true, std::memory_order_release);
-}
-
 void install_crash_handlers() {
     stack_t stack{};
     stack.ss_sp = g_crash_stack;
@@ -185,6 +177,16 @@ void writer_loop() {
 }
 
 } // namespace
+
+// Вне анонимного пространства: crash_note зовут game/game_markers/hud, и с
+// внутренней связываемостью линковка падала бы на undefined reference.
+void crash_note(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(s_crash_note, sizeof(s_crash_note), format, args);
+    va_end(args);
+    s_crash_note_valid.store(true, std::memory_order_release);
+}
 
 void LogOpen() {
     std::lock_guard<std::mutex> lock(g_log_mutex);
