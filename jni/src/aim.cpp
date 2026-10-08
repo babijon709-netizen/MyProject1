@@ -1399,8 +1399,9 @@ static void AimLogTick(float dt) {
 // MouseLook полный шум одного снимка рига. Мёртвая зона меньше одного пикселя
 // на обычном FOV; за ней шаг плавно ограничен скоростью. Поэтому лок остаётся
 // на кости, а микроколебания анимации/чтения не превращаются в дёрганье камеры.
-static constexpr float kMemDeadbandDeg  = 0.035f;
-static constexpr float kMemMaxSpeedDeg  = 72.0f;
+static constexpr float kMemDeadbandDeg  = 0.060f;
+static constexpr float kMemMaxSpeedDeg  = 55.0f;
+static constexpr float kMemErrorFilterHz = 12.0f;
 // ACK по накопителю: расхождение с нашей записью, в пределах которого игра
 // приняла значение. Это только диагностика отклика в меню.
 static constexpr float kMemAckEps = 0.10f;
@@ -1435,6 +1436,8 @@ static void UpdateAimMemory(float dt) {
     // Последняя запись в накопитель (в тех же завёрнутых координатах, что
     // вернёт чтение): по совпадению видно, приняла ли игра запись.
     static float s_lastWriteX = 0.f, s_lastWriteY = 0.f;
+    static float s_filteredYaw = 0.f, s_filteredPitch = 0.f;
+    static bool  s_haveFilteredError = false;
     static bool  s_haveLastWrite = false;
     float sw = 0.f, sh = 0.f;
     int why = 0;
@@ -1443,6 +1446,7 @@ static void UpdateAimMemory(float dt) {
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        s_haveFilteredError = false;
         return;
     }
     s_memDiag.inactive = 0;
@@ -1480,6 +1484,7 @@ static void UpdateAimMemory(float dt) {
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        s_haveFilteredError = false;
         return;
     }
     s_memDiag.no_target = 0;
@@ -1487,6 +1492,17 @@ static void UpdateAimMemory(float dt) {
         // Другая цель: подтверждение прошлой записи и дрейф по прежней кости
         // к ней не относятся.
         s_haveLastWrite = false;
+        s_haveFilteredError = false;
+    }
+
+    const float filterAlpha = 1.0f - expf(-kMemErrorFilterHz * fmaxf(dt, 0.001f));
+    if (!s_haveFilteredError) {
+        s_filteredYaw = best.yaw;
+        s_filteredPitch = best.pitch;
+        s_haveFilteredError = true;
+    } else {
+        s_filteredYaw += WrapDeg180(best.yaw - s_filteredYaw) * filterAlpha;
+        s_filteredPitch += (best.pitch - s_filteredPitch) * filterAlpha;
     }
 
     // ---- ACK по накопителю --------------------------------------------------
@@ -1522,8 +1538,8 @@ static void UpdateAimMemory(float dt) {
     }
 
     // ---- плавный жёсткий лок --------------------------------------------------
-    const float offYaw   = mem_axis_step(best.yaw, dt);
-    const float offPitch = mem_axis_step(best.pitch, dt);
+    const float offYaw   = mem_axis_step(s_filteredYaw, dt);
+    const float offPitch = mem_axis_step(s_filteredPitch, dt);
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         ++s_memDiag.on_target;
