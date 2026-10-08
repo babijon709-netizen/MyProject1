@@ -1,4 +1,5 @@
 #include "config.h"
+#include <cmath>
 #include "str.h"
 #include "app_state.h"
 #include "cfg.h"
@@ -431,6 +432,7 @@ void ConfigLoad(int idx, bool announce) {
             g_state.esp_sleepers = (extension.flags & 512u) != 0;
             if (extension.version >= 4)
                 g_state.aim_lead_ms = viewmodel::decode_aim_lead_ms(extra, extraGot);
+            g_state.aim_predict = std::round(g_state.aim_lead_ms / kAimPredictStepMs);
         }
     }
     g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};

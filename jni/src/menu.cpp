@@ -245,12 +245,14 @@ float TabContent(int tab, float dt, float cW) {
         CardBg(Layout::SliderH * 3);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", false, false, g_state.sl_gun_str, dt);
-        // Упреждение: аим ведёт не по текущему положению кости, а по точке,
-        // куда цель уйдёт за N мс (скорость цели × время). 0 — вести ровно по
-        // кости (дефолт: упреждение исторически выключено — на резкой смене
-        // направления оно раскачивало прицел). Подбирается под свой пинг.
-        SliderRow("##aldd", XS("Упреждение"), &g_state.aim_lead_ms,
-                  0.f, 150.f, XS("%.0f мс"), true, false, g_state.sl_aim_lead, dt);
+        // Предикт: аим ведёт не по текущему положению кости, а по точке,
+        // куда цель уйдёт за N мс (скорость цели × время). Слайдер 0..10 с
+        // шагом 1 — как «Скорость»; 0 — вести ровно по кости (дефолт). Шаг
+        // 15 мс, уровень 10 = 150 мс. Подбирается под свой пинг.
+        SliderRow("##aldd", XS("Предикт"), &g_state.aim_predict,
+                  0.f, 10.f, "%.0f", true, false, g_state.sl_aim_lead, dt);
+        g_state.aim_predict = std::round(g_state.aim_predict);
+        g_state.aim_lead_ms = g_state.aim_predict * kAimPredictStepMs;
 
         // ---- Тач-зона аима -------------------------------------------------
         // Где именно лежит палец, которым аимбот водит камеру. Выбирается

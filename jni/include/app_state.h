@@ -6,6 +6,9 @@
 #include "imgui.h"
 #include "viewmodel.h"
 
+// Шаг слайдера «Предикт» в миллисекундах (уровень 10 = 150 мс).
+constexpr float kAimPredictStepMs = 15.f;
+
 struct InputState {
     bool touchConsumed = false;
 };
@@ -54,6 +57,8 @@ struct AppState {
     // цели (0 = вести ровно по кости, как сейчас). 50 мс ≈ прежняя
     // константа 0.05 с. Живёт в конфиге (расширение v4).
     float aim_lead_ms = 0.f;
+    // Предикт: уровень слайдера 0..10, в aim_lead_ms уходит как уровень × 15 мс.
+    float aim_predict = 0.f;
     // Автофарм: главный выключатель + какие ресурсы добывать.
     bool  farm_on = false;
     bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
