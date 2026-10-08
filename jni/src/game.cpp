@@ -58,6 +58,7 @@ void esp_set_mem_backend(int backend) {
 }
 
 bool esp_mem_backend_kernel() { return g_mem_backend != ESP_MEM_EXTERNAL; }
+int  esp_get_mem_backend() { return g_mem_backend; }
 
 // Последняя ошибка транспорта (errno открытия/чтения): для тоста «почему
 // привязка не идёт» — в кернеле это ответ драйвера, в экстернале /proc.

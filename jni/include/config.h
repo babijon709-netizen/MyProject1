@@ -1,6 +1,6 @@
 #pragma once
-// Конфиги (файлы .cfg в каталоге benzware), язык, раскладка кнопок и тач-зон
-// (.layout), inotify-наблюдение каталога. Каталог — CfgDir().
+// Конфиги (файлы .cfg в каталоге benzware): всё состояние UI и режим чтения
+// живут внутри конфига, inotify-наблюдение каталога. Каталог — CfgDir().
 
 #include <string>
 
@@ -24,9 +24,9 @@ void ConfigUpdate(int idx);
 void ConfigLoad(int idx, bool announce = true);
 void ConfigLoadLast();
 void ConfigDelete(int idx);
+// Восстановление из самого свежего конфига (при старте, до загрузки конфига).
 void RestoreLang();
 void RestoreAccent();
-void RememberLang();
-void RememberAccent();
-void RememberLayout();
 void RestoreLayout();
+// Режим чтения, сохранённый в конфиге; -1 если конфигов нет.
+int  CfgSavedMemBackend();

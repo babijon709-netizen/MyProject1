@@ -310,7 +310,6 @@ float TabContent(int tab, float dt, float cW) {
                     const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
                     if (tapped) {
                         g_state.aim_tx = g_state.aim_ty = -1.f;
-                        RememberLayout();
                         ShowToast(XS("Точка сброшена"));
                         PlaySound(SND_CLICK);
                         g_input.touchConsumed = true;
@@ -722,7 +721,6 @@ float TabContent(int tab, float dt, float cW) {
                 ImGui::InvisibleButton(lid, {halfW, rowH});
                 if (WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed && !sel) {
                     lang::set(li == 0 ? lang::LANG_RU : lang::LANG_EN);
-                    RememberLang();
                     // Тост — уже на выбранном языке: он и показывает, что
                     // переключение сработало в этом же кадре.
                     char _b[160];
@@ -840,7 +838,6 @@ float TabContent(int tab, float dt, float cW) {
                 const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
                 if (tapped) {
                     g_state.hud_cnt_x = g_state.hud_cnt_y = -1.f;
-                    RememberLayout();
                     ShowToast(XS("Положение сброшено"));
                     PlaySound(SND_CLICK);
                     g_input.touchConsumed = true;
@@ -1110,16 +1107,12 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##fc2", XS("Кнопка на экране"), &g_state.freecam_btn_show, g_state.a_freecam_btn_show);
         SliderRow("##fc1", XS("Скорость"), &g_state.freecam_speed,
                   1.f, 60.f, XS("%.0f м/с"), false, false, g_state.sl_freecam, dt);
-        const float oldLookRadius = g_state.freecam_look_radius;
         SliderRow("##fclr", XS("Радиус зоны обзора"), &g_state.freecam_look_radius,
                   0.10f, 0.48f, XS("%.2f"), false, false, g_state.sl_freecam_look_radius, dt);
-        if (oldLookRadius != g_state.freecam_look_radius) RememberLayout();
         // Размер джойстика фрикама: 100% = прежние 130 px. Тянутся и основание,
         // и ручка, и мёртвая зона (долей радиуса) — меняется только масштаб.
-        const float oldJoySize = g_state.freecam_joy_size;
         SliderRow("##fcjs", XS("Размер джойстика"), &g_state.freecam_joy_size,
                   60.f, 200.f, XS("%.0f%%"), false, false, g_state.sl_freecam_joy_size, dt);
-        if (oldJoySize != g_state.freecam_joy_size) RememberLayout();
         {
             // Кнопка настройки положения джойстика фрикама
             const float rowH = Layout::RowH, inset = Layout::Inset;
@@ -1754,22 +1747,6 @@ static void SyncAccentToTheme() {
     } else {
         g_accent = kAccentCols[idx]; g_accentOn = true;
     }
-    const double now = ImGui::GetTime();
-    static double s_accChangedAt = -1e9;
-    static int    s_accSavedIdx = -999;
-    static ImVec4 s_accSavedRgb = {-1.f, -1.f, -1.f, -1.f};
-    const ImVec4& rgb = g_state.ui_accent_rgb;
-    const bool dirty = idx != s_accSavedIdx || rgb.x != s_accSavedRgb.x ||
-                       rgb.y != s_accSavedRgb.y || rgb.z != s_accSavedRgb.z;
-    if (!dirty) { s_accChangedAt = now; return; }
-    if (s_accSavedIdx == -999) {
-        // Первый кадр после запуска: перенимаем без записи.
-        s_accSavedIdx = idx; s_accSavedRgb = rgb; s_accChangedAt = now; return;
-    }
-    if (now - s_accChangedAt >= 0.5) {
-        RememberAccent();
-        s_accSavedIdx = idx; s_accSavedRgb = rgb;
-    }
 }
 
 // RAII-скобка на кадр появления: подменяет прямоугольник окна анимированным,
@@ -2079,7 +2056,6 @@ void RenderMenu() {
                     ShowToast(XS("Точка пальца сохранена"));
                 }
                 PlaySound(SND_CLICK);
-                RememberLayout();
                 g_calibMode = 0;
                 menu_open = true;
                 // Вернуться туда, откуда калибровку запускали: зоны автофарма —

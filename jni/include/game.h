@@ -123,6 +123,7 @@ enum EspMemBackend {
     ESP_MEM_RT_HOOK  = 3,   // syscall ioctl hookdd/gynhdd — «RT-Hook»
 };
 void          esp_set_mem_backend(int backend);
+int           esp_get_mem_backend();
 // Какой режим активен: true для любого ядерного транспорта (FT/RT-Dev/RT-Hook).
 bool          esp_mem_backend_kernel();
 // Последняя ошибка транспорта (errno): для тоста «почему привязка не идёт».

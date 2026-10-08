@@ -2,7 +2,7 @@
 // metadata_dump.h — CLI-команда dump: рантайм-дамп global-metadata.dat из
 // памяти ЗАПУЩЕННОЙ игры, из Termux:
 //
-//     su -c /data/local/tmp/xvcen dump                  // режим из .mode
+//     su -c /data/local/tmp/xvcen dump                  // режим из конфига
 //     su -c /data/local/tmp/xvcen dump external         // режим аргументом
 //     su -c /data/local/tmp/xvcen dump rt-dev 12345     // режим + конкретный pid
 //
@@ -54,7 +54,7 @@
 // чтения идут g_mem.read_quiet мимо кадрового кэша, своего /proc/<pid>/mem
 // команда не открывает никогда. Из /proc берутся лишь карта (maps) и
 // cmdline — то же, что делает поток привязки. Транспорт назначается ОДИН
-// раз (аргумент или сохранённый .mode), никаких фоллбэков и переключений
+// раз (аргумент или сохранённый в конфиге режим), никаких фоллбэков и переключений
 // (§2): не заработал — команда честно печатает errno и подсказывает
 // перезапустить с другим режимом ЯВНЫМ аргументом.
 //
@@ -1022,24 +1022,10 @@ static bool dump_blob(const Blob& b, const char* path, Log* log) {
 
 // ---- выбор режима -----------------------------------------------------------
 
-// Сохранённый выбор пользователя (.mode рядом с .lang/.accent) — тот же
-// формат, что пишет RememberMode в mode_select.h.
+// Режим, сохранённый в самом свежем конфиге (трейлер конфига, см. config.cpp).
 static int saved_backend() {
-    FILE* f = fopen((std::string(CfgDir()) + "/.mode").c_str(), "rb");
-    if (!f) return ESP_MEM_EXTERNAL;
-    char buf[32] = {};
-    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    std::string s(buf, n);
-    while (!s.empty() &&
-           (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
-        s.pop_back();
-    if (s == "kernel") return ESP_MEM_FT;
-    // «rt» — формат кратко существовавшей версии с одним RT-Dev. Оставляем
-    // его только как совместимость и трактуем как rt-dev, не как RT-Hook.
-    if (s == "rt" || s == "rt-dev") return ESP_MEM_RT_DEV;
-    if (s == "rt-hook") return ESP_MEM_RT_HOOK;
-    return ESP_MEM_EXTERNAL;
+    const int m = CfgSavedMemBackend();
+    return m < 0 ? ESP_MEM_EXTERNAL : m;
 }
 
 static const char* backend_name(int backend) {
@@ -1077,7 +1063,7 @@ static int Run(int argc, char* argv[]) {
         else if (!strcmp(mode_arg, "ft") || !strcmp(mode_arg, "kernel"))
             backend = ESP_MEM_FT;
         else if (!strcmp(mode_arg, "rt-dev") || !strcmp(mode_arg, "rt"))
-            backend = ESP_MEM_RT_DEV;  // «rt» — compatibility alias для старого .mode
+            backend = ESP_MEM_RT_DEV;  // «rt» — compatibility alias
         else if (!strcmp(mode_arg, "rt-hook"))
             backend = ESP_MEM_RT_HOOK;
         if (backend < 0) {
@@ -1101,7 +1087,7 @@ static int Run(int argc, char* argv[]) {
     if (geteuid() != 0)
         log.say("!! нужен root: su -c <путь>/xvcen dump");
     log.say("режим    : %s%s", backend_name(backend),
-            mode_arg ? " (аргументом)" : " (из .mode)");
+            mode_arg ? " (аргументом)" : " (из конфига)");
     log.say("каталог  : %s", dump_dir.c_str());
 
     // Единственное назначение транспорта за жизнь этого процесса (§2):

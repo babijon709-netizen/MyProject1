@@ -8,7 +8,7 @@
 // тапу, повторный тап по кнопке драйвера перепроверяет драйвер (прошить
 // .sh можно и после запуска).
 //
-// Выбор сохраняется в .mode рядом с .lang/.accent (каталог конфигов), но
+// Выбор уходит в конфиг при сохранении (трейлер, см. config.cpp), но
 // экран всё равно показывается на каждом запуске — драйвер живёт до
 // перезагрузки, и «нашёл/не нашёл» нужно видеть каждый раз.
 //
@@ -31,7 +31,7 @@
 #include "kernel_io.h"               // kernel_transport, driver_available
 #include "game.h"                    // esp_set_mem_backend
 #include "game_offsets_active.h"     // runtime Release/Beta profile
-#include "config.h"                  // CfgDir(), RestoreLang(), RestoreAccent()
+#include "config.h"                  // RestoreLang(), RestoreAccent()
 #include "theme.h"                   // C::/R::, ApplyTheme
 #include "hud.h"                     // VisibleScreen
 #include "audio.h"                   // PlaySound
@@ -46,25 +46,6 @@ enum Mode {
     MODE_RT_DEV   = 2,   // /dev/[A-GNY]{1,6} RT-Dev — «RT-Dev»
     MODE_RT_HOOK  = 3,   // syscall ioctl hookdd/gynhdd — «RT-Hook»
 };
-
-// ---- сохранение выбора (.mode, по образцу .lang/.accent в config.cpp) -----
-
-static std::string ModePath() {
-    return std::string(CfgDir()) + XS(".mode");
-}
-
-// No .mode sidecar: the transport choice is per-launch only.
-static void RememberMode(Mode) {}
-
-// Между версиями «rt» на короткое время означал только RT-Dev. Экран выбора
-// показывается всегда, но мигрируем запись сразу, чтобы CLI dump прочитал
-// однозначное имя даже до следующего выбора пользователем.
-static void MigrateLegacyRtMode() {
-    std::ifstream in(ModePath());
-    std::string value;
-    if (!in || !std::getline(in, value) || value != "rt") return;
-    RememberMode(MODE_RT_DEV);
-}
 
 // ---- кнопка режима (только текст, без подписи) -----------------------------
 //
@@ -185,7 +166,6 @@ static bool RunModeSelect() {
     RestoreLang();
     RestoreAccent();
     ApplyTheme();
-    MigrateLegacyRtMode();
 
     bool drv = false;          // FT-драйвер отвечает на пробу семейства
     int  fam = -1;             // номер семейства сокета FT-драйвера
@@ -354,7 +334,6 @@ static bool RunModeSelect() {
                      : (picked == MODE_RT_DEV)  ? MODE_RT_DEV
                      : (picked == MODE_RT_HOOK) ? MODE_RT_HOOK
                                                 : MODE_EXTERNAL;
-    if (picked >= 0) RememberMode(mode);
     // Ошибка от нажатия на другую карточку могла появиться перед успешным
     // выбором RT-Hook/RT-Dev/FT. Не переносим этот устаревший тост в игру.
     if (picked >= 0 && mode != MODE_EXTERNAL) ClearToast();

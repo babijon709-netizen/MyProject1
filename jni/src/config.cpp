@@ -7,6 +7,7 @@
 #include "hud.h"
 #include "audio.h"
 #include "lang.h"
+#include "game.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <sys/inotify.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <utime.h>
 #include <unistd.h>
 #include <vector>
 
@@ -42,106 +44,6 @@ int         g_cfgLoadedIdx = -1;
 
 static std::string CfgPath(const char* name) {
     return std::string(kCfgDir) + name + XS(".cfg");
-}
-
-static std::string CfgLastPath() {
-    return std::string(kCfgDir) + XS(".last");
-}
-
-// Only the config file itself is written to the config dir; no .last sidecar.
-// ConfigLoadLast() falls back to the most recently modified config.
-static void RememberLastConfigName(const char*) {}
-
-
-// Язык интерфейса лежит рядом с конфигами отдельным файлом (.lang): выбор
-// нужен и без конфига, иначе он терялся бы при каждом запуске. Конфиг тоже
-// несёт язык — при загрузке конфиг побеждает и переписывает этот файл.
-static std::string CfgLangPath() {
-    return std::string(kCfgDir) + ".lang";
-}
-
-// Language is stored in the config blob (ui_lang_en); no .lang sidecar.
-void RememberLang() {}
-
-void RestoreLang() {
-    std::ifstream f(CfgLangPath());
-    if (!f) return;
-    std::string v;
-    std::getline(f, v);
-    if (!v.empty() && v[0] == 'e') lang::set(lang::LANG_EN);
-}
-
-// Акцент интерфейса — рядом с конфигами отдельным файлом (.accent), как язык:
-// стиль GUI глобален, а не часть профиля. Формат: индекс пресета (0..8,
-// 8 = свой цвет) и его RGB — пишутся всегда парой, читаются с клампом.
-static std::string CfgAccentPath() {
-    return std::string(kCfgDir) + ".accent";
-}
-
-// No .accent sidecar: accent is not persisted outside the config file.
-void RememberAccent() {}
-
-void RestoreAccent() {
-    std::ifstream f(CfgAccentPath());
-    if (!f) return;
-    int idx = 0; float r = 0.545f, g = 0.486f, b = 1.0f;
-    if (!(f >> idx >> r >> g >> b)) return;
-    if (idx < 0 || idx > 8) idx = 0;
-    auto cl = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };
-    g_state.ui_accent_idx = idx;
-    g_state.ui_accent_rgb = {cl(r), cl(g), cl(b), 1.0f};
-}
-
-// Раскладка кнопок и тач-зон — рядом с конфигами отдельным файлом (.layout),
-// как язык и акцент: позиции в долях экрана привязаны к устройству, а не к
-// профилю, и переживают переключение конфигов. В бинарный блоб их не положить
-// (раскладка версии 4 заморожена), а калибровочный тап пишет сразу в g_state —
-// не в момент сохранения конфига. Поэтому каждая запись/сброс тут же вызывает
-// RememberLayout(), а старт — RestoreLayout(). Первые 12 чисел сохраняют
-// прежний формат (шесть пар позиций); следом добавлены центр круглой зоны
-// обзора фрикама с её радиусом и размер джойстика фрикама (в процентах).
-// Старые .layout читаются без миграции: недостающие числа — дефолты.
-// -1 = позиция не задана. Точка аима заодно дублируется
-// в блобе (слоты aim_touch_x/y): при загрузке конфиг побеждает и переписывает
-// этот файл — как язык.
-static std::string CfgLayoutPath() {
-    return std::string(kCfgDir) + ".layout";
-}
-
-// No .layout sidecar: button/touch layout is not persisted outside the config.
-void RememberLayout() {}
-
-void RestoreLayout() {
-    std::ifstream f(CfgLayoutPath());
-    if (!f) return;
-    float v[12];
-    for (int i = 0; i < 12; i++)
-        if (!(f >> v[i])) return;
-    auto cl = [](float x) { return (x > 0.f && x < 1.f) ? x : -1.f; };
-    g_state.farm_joy_x = cl(v[0]);  g_state.farm_joy_y = cl(v[1]);
-    g_state.farm_fire_x = cl(v[2]); g_state.farm_fire_y = cl(v[3]);
-    g_state.freecam_joy_x = cl(v[4]); g_state.freecam_joy_y = cl(v[5]);
-    g_state.hud_cnt_x = cl(v[6]);   g_state.hud_cnt_y = cl(v[7]);
-    g_state.freecam_btn_x = cl(v[8]); g_state.freecam_btn_y = cl(v[9]);
-    g_state.aim_tx = cl(v[10]);     g_state.aim_ty = cl(v[11]);
-    float look_x = -1.f, look_y = -1.f, look_radius = 0.28f;
-    if (f >> look_x >> look_y >> look_radius) {
-        g_state.freecam_look_x = cl(look_x);
-        g_state.freecam_look_y = cl(look_y);
-        g_state.freecam_look_radius = (look_radius >= 0.10f && look_radius <= 0.48f)
-            ? look_radius : 0.28f;
-    }
-    // Размер джойстика фрикама — последнее число; в старых .layout его нет,
-    // тогда остаётся дефолт (100%).
-    float joy_size = 100.f;
-    if (f >> joy_size)
-        g_state.freecam_joy_size = (joy_size >= 60.f && joy_size <= 200.f)
-            ? joy_size : 100.f;
-    float fl_x = -1.f, fl_y = -1.f;
-    if (f >> fl_x >> fl_y) {
-        g_state.fakelag_btn_x = cl(fl_x);
-        g_state.fakelag_btn_y = cl(fl_y);
-    }
 }
 
 static void XorBuf(uint8_t* buf, size_t sz) {
@@ -255,6 +157,147 @@ struct CfgBlob {
     float esp_box_rounding;
 };
 
+// UI state that used to live in sidecar files (.lang/.accent/.layout/.mode)
+// is appended after ConfigExtension as a trailer. CfgBlob and the extension
+// keep their layouts; readers that stop at the extension ignore the trailer.
+struct CfgUiTrailer {
+    uint32_t magic;          // "CUI1"
+    uint32_t version;        // 1
+    uint32_t accent_idx;     // 0..8, see app_state.h
+    float    accent_rgb[3];
+    uint32_t mem_backend;    // EspMemBackend chosen on the mode screen
+    float    layout[18];     // -1 = not set
+};
+static constexpr uint32_t kCfgUiMagic = 0x31495543u;
+
+static void LayoutToArray(float* v) {
+    v[0]  = g_state.farm_joy_x;     v[1]  = g_state.farm_joy_y;
+    v[2]  = g_state.farm_fire_x;    v[3]  = g_state.farm_fire_y;
+    v[4]  = g_state.freecam_joy_x;  v[5]  = g_state.freecam_joy_y;
+    v[6]  = g_state.hud_cnt_x;      v[7]  = g_state.hud_cnt_y;
+    v[8]  = g_state.freecam_btn_x;  v[9]  = g_state.freecam_btn_y;
+    v[10] = g_state.aim_tx;         v[11] = g_state.aim_ty;
+    v[12] = g_state.freecam_look_x; v[13] = g_state.freecam_look_y;
+    v[14] = g_state.freecam_look_radius;
+    v[15] = g_state.freecam_joy_size;
+    v[16] = g_state.fakelag_btn_x;  v[17] = g_state.fakelag_btn_y;
+}
+
+static void LayoutFromArray(const float* v) {
+    auto cl = [](float x) { return (x > 0.f && x < 1.f) ? x : -1.f; };
+    g_state.farm_joy_x = cl(v[0]);   g_state.farm_joy_y = cl(v[1]);
+    g_state.farm_fire_x = cl(v[2]);  g_state.farm_fire_y = cl(v[3]);
+    g_state.freecam_joy_x = cl(v[4]); g_state.freecam_joy_y = cl(v[5]);
+    g_state.hud_cnt_x = cl(v[6]);    g_state.hud_cnt_y = cl(v[7]);
+    g_state.freecam_btn_x = cl(v[8]); g_state.freecam_btn_y = cl(v[9]);
+    g_state.aim_tx = cl(v[10]);      g_state.aim_ty = cl(v[11]);
+    g_state.freecam_look_x = cl(v[12]);
+    g_state.freecam_look_y = cl(v[13]);
+    g_state.freecam_look_radius = (v[14] >= 0.10f && v[14] <= 0.48f) ? v[14] : 0.28f;
+    g_state.freecam_joy_size = (v[15] >= 60.f && v[15] <= 200.f) ? v[15] : 100.f;
+    g_state.fakelag_btn_x = cl(v[16]); g_state.fakelag_btn_y = cl(v[17]);
+}
+
+static void WriteUiTrailer(std::ostream& f) {
+    CfgUiTrailer t{};
+    t.magic = kCfgUiMagic;
+    t.version = 1;
+    const int idx = g_state.ui_accent_idx;
+    t.accent_idx = (uint32_t)((idx >= 0 && idx <= 8) ? idx : 0);
+    t.accent_rgb[0] = g_state.ui_accent_rgb.x;
+    t.accent_rgb[1] = g_state.ui_accent_rgb.y;
+    t.accent_rgb[2] = g_state.ui_accent_rgb.z;
+    t.mem_backend = (uint32_t)esp_get_mem_backend();
+    LayoutToArray(t.layout);
+    uint8_t buf[sizeof(t)];
+    memcpy(buf, &t, sizeof(t));
+    XorBuf(buf, sizeof(buf));
+    f.write((char*)buf, sizeof(buf));
+}
+
+static bool ReadUiTrailer(std::istream& f, CfgUiTrailer& t) {
+    uint8_t buf[sizeof(t)];
+    f.read((char*)buf, sizeof(buf));
+    if ((size_t)f.gcount() != sizeof(buf)) return false;
+    XorBuf(buf, sizeof(buf));
+    memcpy(&t, buf, sizeof(t));
+    return t.magic == kCfgUiMagic && t.version == 1;
+}
+
+// Newest .cfg by mtime, same rule as the ConfigLoadLast() fallback.
+static std::string NewestCfgPath() {
+    std::vector<std::string> names;
+    if (DIR* d = opendir(kCfgDir)) {
+        while (struct dirent* e = readdir(d)) {
+            std::string fn = e->d_name;
+            if (fn.size() > 4 && fn.substr(fn.size() - 4) == XS(".cfg"))
+                names.push_back(fn);
+        }
+        closedir(d);
+    }
+    std::sort(names.begin(), names.end());
+    std::string best;
+    time_t best_mtime = 0;
+    for (auto& fn : names) {
+        const std::string p = std::string(kCfgDir) + fn;
+        struct stat st{};
+        if (stat(p.c_str(), &st) != 0) continue;
+        if (best.empty() || st.st_mtime >= best_mtime) {
+            best_mtime = st.st_mtime;
+            best = p;
+        }
+    }
+    return best;
+}
+
+static bool ReadNewestBlob(CfgBlob& s) {
+    const std::string p = NewestCfgPath();
+    if (p.empty()) return false;
+    std::ifstream f(p, std::ios::binary);
+    uint8_t buf[sizeof(s)];
+    f.read((char*)buf, sizeof(buf));
+    if ((size_t)f.gcount() != sizeof(buf)) return false;
+    XorBuf(buf, sizeof(buf));
+    memcpy(&s, buf, sizeof(s));
+    return s.magic == 0x58564345U && s.version == 4;
+}
+
+static bool ReadNewestUi(CfgUiTrailer& t) {
+    const std::string p = NewestCfgPath();
+    if (p.empty()) return false;
+    std::ifstream f(p, std::ios::binary);
+    f.seekg(sizeof(CfgBlob) + sizeof(viewmodel::ConfigExtension));
+    return f && ReadUiTrailer(f, t);
+}
+
+// Startup restore: state comes from the newest config, nothing else on disk.
+void RestoreLang() {
+    CfgBlob s;
+    if (ReadNewestBlob(s)) lang::set(s.ui_lang_en ? lang::LANG_EN : lang::LANG_RU);
+}
+
+void RestoreAccent() {
+    CfgUiTrailer t;
+    if (!ReadNewestUi(t)) return;
+    int idx = (int)t.accent_idx;
+    if (idx < 0 || idx > 8) idx = 0;
+    auto cl = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };
+    g_state.ui_accent_idx = idx;
+    g_state.ui_accent_rgb = {cl(t.accent_rgb[0]), cl(t.accent_rgb[1]), cl(t.accent_rgb[2]), 1.0f};
+}
+
+void RestoreLayout() {
+    CfgUiTrailer t;
+    if (ReadNewestUi(t)) LayoutFromArray(t.layout);
+}
+
+// Transport chosen on the mode screen in the session that wrote the newest config.
+int CfgSavedMemBackend() {
+    CfgUiTrailer t;
+    if (!ReadNewestUi(t) || t.mem_backend > 3) return -1;
+    return (int)t.mem_backend;
+}
+
 static void ConfigSaveToPath(const std::string& path) {
     CfgBlob s;
     s.magic   = 0x58564345U;
@@ -336,6 +379,7 @@ static void ConfigSaveToPath(const std::string& path) {
         memcpy(extra, &extension, sizeof(extra));
         XorBuf(extra, sizeof(extra));
         f.write((char*)extra, sizeof(extra));
+        WriteUiTrailer(f);
         f.close();
     }
 }
@@ -351,7 +395,6 @@ void ConfigSave() {
     } while (access(cfgpath.c_str(), F_OK) == 0);
     ConfigSaveToPath(cfgpath);
     CfgScanDir();
-    RememberLastConfigName(baseName);
     ShowToast(XS("Конфиг создан"));
     PlaySound(SND_SUCCESS);
 }
@@ -378,11 +421,15 @@ void ConfigLoad(int idx, bool announce) {
     uint8_t extra[sizeof(viewmodel::ConfigExtension)]{};
     f.read((char*)extra, sizeof(extra));
     size_t extraGot = (size_t)f.gcount();
+    CfgUiTrailer ui{};
+    const bool hasUi = ReadUiTrailer(f, ui);
     f.close();
     if (got != sizeof(buf)) { if (announce) ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
     memcpy(&s, buf, sizeof(s));
     if (s.magic != 0x58564345U || s.version != 4) { if (announce) ShowToast(XS("Старый конфиг — пересохрани")); return; }
+    // Загруженный конфиг становится самым свежим: startup восстанавливает по mtime.
+    utime(path.c_str(), nullptr);
 
     XorBuf(extra, extraGot);
     g_state.viewmodel = viewmodel::decode(extra, extraGot);
@@ -468,15 +515,23 @@ void ConfigLoad(int idx, bool announce) {
     // Язык интерфейса живёт в бывшем слоте ui_fps (счётчик FPS убран навсегда).
     // Старые конфиги держат там false — это и есть русский по умолчанию.
     lang::set(s.ui_lang_en ? lang::LANG_EN : lang::LANG_RU);
-    RememberLang();
     // ui_show_sep из конфига игнорируется: рамки карточек всегда включены.
     g_state.ui_fps      = false;
     g_state.ui_show_sep = true;
+    // Акцент и раскладка из трейлера (старые конфиги без него не трогают текущие).
+    // Идёт до точки аима: её значение из блоба побеждает.
+    if (hasUi) {
+        int idx = (int)ui.accent_idx;
+        if (idx < 0 || idx > 8) idx = 0;
+        auto cl = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };
+        g_state.ui_accent_idx = idx;
+        g_state.ui_accent_rgb = {cl(ui.accent_rgb[0]), cl(ui.accent_rgb[1]), cl(ui.accent_rgb[2]), 1.0f};
+        LayoutFromArray(ui.layout);
+    }
     // Точка пальца аима. В конфигах, где этого поля ещё не было, лежат значения
     // прежних настроек ESP (2.0 и 0.0) — они вне 0..1 и читаются как «не задана».
     g_state.aim_tx = (s.aim_touch_x > 0.f && s.aim_touch_x < 1.f) ? s.aim_touch_x : -1.f;
     g_state.aim_ty = (s.aim_touch_y > 0.f && s.aim_touch_y < 1.f) ? s.aim_touch_y : -1.f;
-    RememberLayout();
     cfg::esp::box_col          = s.esp_box_col;
     cfg::esp::box_col_invis    = s.esp_box_col_invis;
     cfg::esp::name_col         = s.esp_name_col;
@@ -495,7 +550,6 @@ void ConfigLoad(int idx, bool announce) {
     snprintf(g_loadedConfigName, sizeof(g_loadedConfigName), "%s", g_configs[idx].name);
     g_cfgLoadedIdx = idx;
     for (int i = 0; i < kMaxConfigs; i++) g_cfgLoadAnim[i] = 0.f;
-    RememberLastConfigName(g_configs[idx].name);
     if (announce) {
         ShowToast(XS("Конфиг загружен"));
         PlaySound(SND_SUCCESS);
@@ -503,21 +557,6 @@ void ConfigLoad(int idx, bool announce) {
 }
 
 void ConfigLoadLast() {
-    std::ifstream f(CfgLastPath());
-    std::string name;
-    if (f) {
-        std::getline(f, name);
-        while (!name.empty() && (name.back() == '\n' || name.back() == '\r' || name.back() == ' '))
-            name.pop_back();
-    }
-    if (!name.empty()) {
-        for (int i = 0; i < g_configCount; i++) {
-            if (strcmp(g_configs[i].name, name.c_str()) == 0) {
-                ConfigLoad(i, false);
-                return;
-            }
-        }
-    }
     time_t best_mtime = 0;
     int best = -1;
     for (int i = 0; i < g_configCount; i++) {
