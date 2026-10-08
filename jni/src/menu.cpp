@@ -1787,6 +1787,10 @@ struct WinRectAnim {
 };
 
 void RenderMenu() {
+    // Метка до всего остального: пока в CRASH висит «menu: popover» (последняя
+    // метка прошлого кадра), падение в голове функции — SyncAccentToTheme,
+    // CfgWatchTick (inotify + опендир конфигов) или блок Tick.
+    crash_note("menu: head");
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
@@ -1874,15 +1878,23 @@ void RenderMenu() {
     // Худ отдельной стадией: пилюля счётчика зовёт FrameBoxes и скан ботов
     // (esp_nearby_bot_count), и падение в них в логе выглядело как stage=menu.
     LogStage(kStageHud);
+    // Лог 15:35:17: SIGABRT на render-потоке, stage=menu, note=- — игра была
+    // не привязана, поэтому ни одной заметки не возникло, и внутри меню
+    // локализовать негде. Метки идут каждый кадр и перекрывают друг друга:
+    // в CRASH видна последняя, т.е. секция, в которой мы упали.
+    crash_note("menu: hud pill");
     DrawWatermark(dt);
+    crash_note("menu: toast");
     DrawToast(dt);
     LogStage(kStageMenu);
+    crash_note("menu: body");
 
     // ---- Режим калибровки зон вводом с экрана ------------------------------
     // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):
     // зону джойстика/огня автофарма, точку, из которой аимбот водит палец,
     // центр джойстика фрикама (4) или счётчика игроков (5).
     if (g_calibMode != 0) {
+        crash_note("menu: calib mode %d", (int)g_calibMode);
         float dw = 0.f, dh = 0.f;
         VisibleScreen(dw, dh);
         if (dw < 100.f || dh < 100.f) { g_calibMode = 0; return; }
@@ -2249,6 +2261,7 @@ void RenderMenu() {
                         | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground
                         | ImGuiWindowFlags_NoMove      | ImGuiWindowFlags_NoNav;
 
+    crash_note("menu: window");
     ImGui::Begin("##menu", nullptr, wf);
     {
         auto  bgP  = g_win.pos;
@@ -2686,7 +2699,9 @@ void RenderMenu() {
         rdl->AddCircleFilled({cx + r * cosf(a1), cy + r * sinf(a1)}, capR, col, 24);
     }
 
+    crash_note("menu: sheet");
     DrawSheet(dt, wp, WW, WH);
+    crash_note("menu: popover");
     DrawPopover(dt, wp, WW, WH);
     ImGui::End();
     if (g_menuFadeIn < 1.f) {
