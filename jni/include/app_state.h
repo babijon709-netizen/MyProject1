@@ -72,6 +72,10 @@ struct AppState {
     // Иксрей: визуально срезает мир вокруг игрока (0 = выкл), метры.
     bool  xray_on = false;
     float xray_range = 5.f;
+    // Экранная кнопка Иксрей (квадрат с XR): доли экрана = её ЦЕНТР,
+    // -1 = дефолт справа чуть выше фрикама. Ставится тапом в «Разное → Иксрей».
+    float xray_btn_x = -1.f, xray_btn_y = -1.f;
+    bool  xray_btn_show = true;
     // Фрикам: камера отделяется от тела и летает сквозь стены — обзор базы
     // перед рейдом. Скорость в м/с; пока включён, аим молчит (см. AimBegin).
     bool  freecam_on = false;
@@ -131,6 +135,7 @@ struct AppState {
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
     float a_xray_on = 0;
+    float a_xray_btn_show = 0;
     float a_freecam_on = 0;
     float a_freecam_btn_show = 0;
     float a_fakelag_btn_show = 0;

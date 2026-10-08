@@ -166,7 +166,7 @@ struct CfgUiTrailer {
     uint32_t accent_idx;     // 0..8, see app_state.h
     float    accent_rgb[3];
     uint32_t mem_backend;    // EspMemBackend chosen on the mode screen
-    float    layout[18];     // -1 = not set
+    float    layout[20];     // -1 = not set
 };
 static constexpr uint32_t kCfgUiMagic = 0x31495543u;
 
@@ -181,6 +181,7 @@ static void LayoutToArray(float* v) {
     v[14] = g_state.freecam_look_radius;
     v[15] = g_state.freecam_joy_size;
     v[16] = g_state.fakelag_btn_x;  v[17] = g_state.fakelag_btn_y;
+    v[18] = g_state.xray_btn_x;     v[19] = g_state.xray_btn_y;
 }
 
 static void LayoutFromArray(const float* v) {
@@ -196,6 +197,7 @@ static void LayoutFromArray(const float* v) {
     g_state.freecam_look_radius = (v[14] >= 0.10f && v[14] <= 0.48f) ? v[14] : 0.28f;
     g_state.freecam_joy_size = (v[15] >= 60.f && v[15] <= 200.f) ? v[15] : 100.f;
     g_state.fakelag_btn_x = cl(v[16]); g_state.fakelag_btn_y = cl(v[17]);
+    g_state.xray_btn_x = cl(v[18]);    g_state.xray_btn_y = cl(v[19]);
 }
 
 static void WriteUiTrailer(std::ostream& f) {
@@ -216,11 +218,15 @@ static void WriteUiTrailer(std::ostream& f) {
 }
 
 static bool ReadUiTrailer(std::istream& f, CfgUiTrailer& t) {
-    uint8_t buf[sizeof(t)];
+    memset(&t, 0, sizeof(t));
+    for (int i = 0; i < 20; ++i) t.layout[i] = -1.f;
+    uint8_t buf[sizeof(CfgUiTrailer)];
     f.read((char*)buf, sizeof(buf));
-    if ((size_t)f.gcount() != sizeof(buf)) return false;
-    XorBuf(buf, sizeof(buf));
-    memcpy(&t, buf, sizeof(t));
+    size_t got = (size_t)f.gcount();
+    constexpr size_t kLegacySize = sizeof(CfgUiTrailer) - 2 * sizeof(float);
+    if (got != sizeof(buf) && got != kLegacySize) return false;
+    XorBuf(buf, got);
+    memcpy(&t, buf, got);
     return t.magic == kCfgUiMagic && t.version == 1;
 }
 
@@ -353,7 +359,8 @@ static void ConfigSaveToPath(const std::string& path) {
                           // Инвертировано, как бит 4: старые конфиги держат 0,
                           // то есть ящики в домах видны — как до разделения.
                           (g_state.esp_house_boxes ? 0 : 256) |
-                          (g_state.fakelag_btn_show ? 0 : 1024);
+                          (g_state.fakelag_btn_show ? 0 : 1024) |
+                          (g_state.xray_btn_show ? 0 : 2048);
         auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
         const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
                                    + ch(cfg::esp::pickup_col.y) * 256
@@ -482,7 +489,7 @@ void ConfigLoad(int idx, bool announce) {
     // Packed scalars. A config written before these existed holds the old ping
     // colour here, so each value is range-checked and falls back to its default.
     {
-        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 2048.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
+        const int flags = (s.esp_extra.x >= 0.f && s.esp_extra.x < 4096.f) ? (int)(s.esp_extra.x + 0.5f) : 0;
         g_state.esp_loot   = (flags & 1) != 0;
         g_state.esp_pickup = (flags & 2) != 0;
         g_state.esp_bots     = (flags & 4) != 0;
@@ -493,6 +500,7 @@ void ConfigLoad(int idx, bool announce) {
         g_state.fast_reload = (flags & 128) != 0;
         g_state.esp_house_boxes = (flags & 256) == 0;
         g_state.fakelag_btn_show = (flags & 1024) == 0;
+        g_state.xray_btn_show = (flags & 2048) == 0;
         g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;

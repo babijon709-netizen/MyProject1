@@ -1001,13 +1001,11 @@ float TabContent(int tab, float dt, float cW) {
         // Диагностические строки («не применено» / «ожидание») убраны по
         // просьбе пользователя: применение видно в игре, подробности — в журнале.
         SHdr(XS("Темп оружия"));
-        CardBg(Layout::RowH * 2.f);
+        CardBg(Layout::RowH);
         const bool oldFastFire = g_state.fast_fire;
         ToggleRow("##fastfire", XS("Быстрая стрельба"), &g_state.fast_fire,
-                  g_state.a_fast_fire, false, true);
+                  g_state.a_fast_fire, true, true);
         if (oldFastFire != g_state.fast_fire) esp_viewmodel_tick(vm);
-        ToggleRow("##fastreload", XS("Быстрая перезарядка"), &g_state.fast_reload,
-                  g_state.a_fast_reload, true, false);
 
         SHdr(XS("Сеть"));
         CardBg(Layout::RowH * 2 + Layout::SliderH);
@@ -1090,10 +1088,21 @@ float TabContent(int tab, float dt, float cW) {
         // Иксрей: рендер отсекает всё ближе выбранной дистанции — стены и
         // текстуры вокруг игрока пропадают, видно что за ними.
         SHdr(XS("Иксрей"));
-        CardBg(Layout::RowH + Layout::SliderH);
+        CardBg(Layout::RowH * 2 + Layout::SliderH);
         ToggleRow("##xr0", XS("Иксрей"), &g_state.xray_on, g_state.a_xray_on, false, true);
+        ToggleRow("##xrbtn", XS("Кнопка на экране"), &g_state.xray_btn_show, g_state.a_xray_btn_show);
         SliderRow("##xr1", XS("Дальность"), &g_state.xray_range,
                   1.f, 50.f, XS("%.0f м"), true, false, g_state.sl_xray, dt);
+        {
+            const float rowH = Layout::RowH, inset = Layout::Inset;
+            const float avW = ImGui::GetContentRegionAvail().x;
+            auto pos = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos({pos.x + inset, pos.y});
+            if (ImGui::Button(XS("Настроить кнопку"), {avW - inset*2.f, rowH - 8.f})) {
+                g_calibMode = 9;
+                menu_open = false;
+            }
+        }
 
         // Фрикам: камера отделяется от тела и летает сквозь стены — обзор
         // базы перед рейдом. Пока он включён, аим молчит: точка прицела
@@ -1820,6 +1829,7 @@ void RenderMenu() {
     Tick(g_state.a_fps_144, g_state.viewmodel.fps_limit == 144, dt);
     Tick(g_state.a_fps_rst, g_state.viewmodel.fps_limit == 0,   dt);
     Tick(g_state.a_xray_on,     g_state.xray_on,     dt);
+    Tick(g_state.a_xray_btn_show, g_state.xray_btn_show, dt);
     Tick(g_state.a_freecam_on,  g_state.freecam_on,  dt);
     Tick(g_state.a_freecam_btn_show, g_state.freecam_btn_show, dt);
     Tick(g_state.a_fakelag_btn_show, g_state.fakelag_btn_show, dt);
@@ -1874,6 +1884,7 @@ void RenderMenu() {
             : (g_calibMode == 6) ? XS("Тапни куда поставить кнопку фрикама")
             : (g_calibMode == 7) ? XS("Тапни куда поставить зону обзора")
             : (g_calibMode == 8) ? XS("Тапни куда поставить кнопку FakeLag")
+            : (g_calibMode == 9) ? XS("Тапни куда поставить кнопку Иксрей")
                                  : XS("Тапни по точке, где аим водит палец");
         const char* sub = XS("Тап записывает зону. Меню откроется само.");
         float tfs = ImGui::GetFontSize() * 1.5f;
@@ -1917,6 +1928,10 @@ void RenderMenu() {
             if (g_calibMode == 8) {
                 if (g_state.fakelag_btn_x >= 0.f) { zx = g_state.fakelag_btn_x * dw; zy = g_state.fakelag_btn_y * dh; }
                 else { zx = kFlBtnDefX * dw; zy = kFlBtnDefY * dh; }
+            }
+            if (g_calibMode == 9) {
+                if (g_state.xray_btn_x >= 0.f) { zx = g_state.xray_btn_x * dw; zy = g_state.xray_btn_y * dh; }
+                else { zx = kXrBtnDefX * dw; zy = kXrBtnDefY * dh; }
             }
             if (zx >= 0.f) {
                 if (g_calibMode == 7) {
@@ -1990,6 +2005,22 @@ void RenderMenu() {
                 fg->AddRect({px, py}, {px + kFlBtnSide, py + kFlBtnSide}, C::UA(C::Acc(), 0.9f), kFlBtnRadius, 0, 2.5f);
             }
         }
+        // Режим 9 — превью кнопки Иксрей
+        if (g_calibMode == 9 && io.MouseDown[0]) {
+            float fx = io.MousePos.x / dw, fy = io.MousePos.y / dh;
+            const bool snapX = fabsf(fx - 0.5f) < 0.04f;
+            const bool snapY = fabsf(fy - 0.5f) < 0.04f;
+            if (snapX) fx = 0.5f;
+            if (snapY) fy = 0.5f;
+            if (snapX) fg->AddLine({dw * 0.5f, 0.f}, {dw * 0.5f, dh}, C::UA(C::Acc(), 0.55f), 2.f);
+            if (snapY) fg->AddLine({0.f, dh * 0.5f}, {dw, dh * 0.5f}, C::UA(C::Acc(), 0.55f), 2.f);
+            if (dw > kXrBtnSide + 16.f && dh > kXrBtnSide + 16.f) {
+                float px = ImClamp(fx * dw - kXrBtnSide * 0.5f, 8.f, dw - kXrBtnSide - 8.f);
+                float py = ImClamp(fy * dh - kXrBtnSide * 0.5f, 8.f, dh - kXrBtnSide - 8.f);
+                fg->AddRectFilled({px, py}, {px + kXrBtnSide, py + kXrBtnSide}, C::UA(C::Card(), 0.85f), kXrBtnRadius);
+                fg->AddRect({px, py}, {px + kXrBtnSide, py + kXrBtnSide}, C::UA(C::Acc(), 0.9f), kXrBtnRadius, 0, 2.5f);
+            }
+        }
 
         // Тап (отпускание пальца) — записываем зону в долях видимого экрана.
         // Фрикам тоже здесь: его геометрия считается от VisibleScreen, как и
@@ -2003,6 +2034,7 @@ void RenderMenu() {
                 const bool fcj  = (g_calibMode == 4);
                 const bool fcl  = (g_calibMode == 7);
                 const bool flb  = (g_calibMode == 8);
+                const bool xrb  = (g_calibMode == 9);
                 if (g_calibMode == 1) {
                     g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
                     ShowToast(XS("Зона джойстика сохранена"));
@@ -2032,6 +2064,11 @@ void RenderMenu() {
                     if (fabsf(ry - 0.5f) < 0.04f) ry = 0.5f;
                     g_state.fakelag_btn_x = rx; g_state.fakelag_btn_y = ry;
                     ShowToast(XS("Кнопка FakeLag сохранена"));
+                } else if (xrb) {
+                    if (fabsf(rx - 0.5f) < 0.04f) rx = 0.5f;
+                    if (fabsf(ry - 0.5f) < 0.04f) ry = 0.5f;
+                    g_state.xray_btn_x = rx; g_state.xray_btn_y = ry;
+                    ShowToast(XS("Кнопка Иксрей сохранена"));
                 } else {
                     g_state.aim_tx = rx; g_state.aim_ty = ry;
                     ShowToast(XS("Точка пальца сохранена"));
@@ -2044,7 +2081,7 @@ void RenderMenu() {
                 // на вкладку «Опции», джойстик и кнопка фрикама — в «Разное».
                 if (farm)            PopoverOpen(XS("Автофарм"), 5);
                 else if (hud)        g_state.cur_tab = 5;
-                else if (fcb || fcj || fcl || flb) g_state.cur_tab = 3;
+                else if (fcb || fcj || fcl || flb || xrb) g_state.cur_tab = 3;
                 else                 g_state.cur_tab = 1;
                 g_input.touchConsumed = true; // этот тап уже отработал
             }
