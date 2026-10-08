@@ -11,6 +11,7 @@
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // выбранный Release/Beta профиль
 #include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
+#include "skeleton_frame_hold.h"  // короткий world-space hold для рваных чтений костей
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -1523,12 +1524,14 @@ static void fc_slot_add(uint64_t m, uint64_t n, int32_t i, float d) {
 }
 
 static bool resolve_camera_arrays(uint64_t& matrices, uint64_t& indices, int32_t& index,
-                                  Vec3& cam_pos, float& err_m) {
+                                  Vec3& cam_pos, float& err_m,
+                                  uint64_t native_camera = 0) {
     matrices = indices = 0; index = -1; err_m = -1.f;
-    if (!g_native_camera) return false;
-    const Mat4 view = rd_m4(g_native_camera + CAMERA_VIEW_MATRIX);
+    if (!native_camera) native_camera = g_native_camera;
+    if (!native_camera) return false;
+    const Mat4 view = rd_m4(native_camera + CAMERA_VIEW_MATRIX);
     if (!camera_position_from_view(view, cam_pos) || !vec3_is_finite(cam_pos)) return false;
-    const uint64_t gameobject = rd_ptr(g_native_camera + CAMERA_NATIVE_TRANSFORM);
+    const uint64_t gameobject = rd_ptr(native_camera + CAMERA_NATIVE_TRANSFORM);
     const uint64_t transform = transform_from_gameobject(gameobject);
     if (!transform) return false;
     // TransformAccess: данные +0x38, индекс +0x40 — подтверждено кодом самого
@@ -3922,21 +3925,34 @@ bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out, bool 
 // искать её заново каждый кадр — это четыре чтения и разбор иерархии на каждом
 // кадре оверлея.
 static uint64_t s_cam_arr_m = 0, s_cam_arr_n = 0;
+static uint64_t s_cam_arr_camera = 0;
 static int32_t  s_cam_arr_idx = -1;
 static bool     s_cam_arr_valid = false;
-static double   s_cam_arr_at = -1e9;
+static int      s_cam_arr_mismatch_streak = 0;
 
-// Поза камеры, сверенная с матрицей вида. Адреса массивов могут устареть при
-// перестройке иерархии, поэтому при расхождении они перечитываются по тем же
-// фиксированным release-смещениям. Во фрикаме сверку отключаем: там камера
-// намеренно не совпадает с положением, которое только что оставила игра.
-static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref, bool verify) {
+static void reset_camera_pose_cache() {
+    s_cam_arr_m = s_cam_arr_n = 0;
+    s_cam_arr_camera = 0;
+    s_cam_arr_idx = -1;
+    s_cam_arr_valid = false;
+    s_cam_arr_mismatch_streak = 0;
+}
+
+// The transform-array cache belongs to one native Camera. A respawn can swap
+// the Camera object while leaving the old arrays readable, which projects the
+// entire player roster from the previous scene.
+static bool camera_pose_checked(uint64_t native_camera, Vec3& position, Vec4& rotation,
+                                const Vec3& ref, bool verify) {
+    if (s_cam_arr_camera != native_camera) {
+        reset_camera_pose_cache();
+        s_cam_arr_camera = native_camera;
+    }
     if (!s_cam_arr_valid) {
         Vec3 cp{};
         float err = -1.f;
-        if (!resolve_camera_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, cp, err)) return false;
+        if (!resolve_camera_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, cp, err,
+                                   native_camera)) return false;
         s_cam_arr_valid = true;
-        s_cam_arr_at = memio::now_seconds();
     }
     Vec3 p{};
     Vec4 r{};
@@ -3948,12 +3964,17 @@ static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref,
     if (verify) {
         const float dx = p.x - ref.x, dy = p.y - ref.y, dz = p.z - ref.z;
         const float d2 = dx * dx + dy * dy + dz * dz;
-        // Два метра: камера успевает сдвинуться между двумя чтениями, а
-        // подмена массивов даёт десятки метров.
+        // The cached native view can lag the active transform during a camera
+        // swap. Keep the transform sample for the unchecked recovery below;
+        // retry discovery only after a short sustained mismatch.
         if (d2 > 2.0F * 2.0F) {
-            s_cam_arr_valid = false;
+            if (++s_cam_arr_mismatch_streak >= 4) {
+                s_cam_arr_valid = false;
+                s_cam_arr_mismatch_streak = 0;
+            }
             return false;
         }
+        s_cam_arr_mismatch_streak = 0;
     }
     position = p;
     rotation = r;
@@ -3971,7 +3992,7 @@ static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref,
 //   1. worldToCamera у Unity — чистый поворот + перенос, без масштаба: строки
 //      поворота обязаны быть ортонормальными. Смесь двух кадров, прочитанная
 //      на половине записи, таким свойством не обладает.
-//   2. Камера не прыгает на 30+ м и не разворачивается на 60+ градусов за кадр.
+//   2. Камера не прыгает на 8+ м и не разворачивается на 60+ градусов за кадр.
 //      Настоящий телепорт/респаун держится в памяти — серия из 4 одинаковых
 //      скачков подтвердит его и пропустит, а одиночный мусор отбрасывается, и
 //      кадр дорисовывается прошлой принятой матрицей.
@@ -3984,6 +4005,10 @@ struct FrameViewGuard {
     int  rot_streak = 0;
 };
 static FrameViewGuard s_fv_guard;
+// The renderer uses this to retain the last complete player roster while the
+// view guard is falling back to a known-good camera frame.
+static bool g_camera_frame_degraded = false;
+static constexpr float kFrameViewMaxStepMeters = 8.0F;
 
 // Ортонормальность поворота: camera_basis_from_view нормирует оси, дальше они
 // обязаны быть попарно ортогональными. 0.45 (~63°) — запас против почти
@@ -4012,13 +4037,22 @@ static bool frame_view_accepted(const Mat4& view) {
         return true;
     }
     const float dx = pos.x - s_fv_guard.pos.x, dy = pos.y - s_fv_guard.pos.y, dz = pos.z - s_fv_guard.pos.z;
-    const bool pos_jump = dx * dx + dy * dy + dz * dz > 30.0F * 30.0F;
+    const bool pos_jump = dx * dx + dy * dy + dz * dz >
+                          kFrameViewMaxStepMeters * kFrameViewMaxStepMeters;
     const float dot = fwd.x * s_fv_guard.fwd.x + fwd.y * s_fv_guard.fwd.y + fwd.z * s_fv_guard.fwd.z;
     const bool rot_jump = dot < 0.5F;  // ~60° за кадр
-    if (pos_jump && s_fv_guard.pos_streak < 3) { ++s_fv_guard.pos_streak; return false; }
-    if (pos_jump) s_fv_guard.pos_streak = 0;
-    if (rot_jump && s_fv_guard.rot_streak < 3) { ++s_fv_guard.rot_streak; return false; }
-    if (rot_jump) s_fv_guard.rot_streak = 0;
+    if (pos_jump) {
+        if (s_fv_guard.pos_streak < 3) { ++s_fv_guard.pos_streak; return false; }
+        s_fv_guard.pos_streak = 0;
+    } else {
+        s_fv_guard.pos_streak = 0;
+    }
+    if (rot_jump) {
+        if (s_fv_guard.rot_streak < 3) { ++s_fv_guard.rot_streak; return false; }
+        s_fv_guard.rot_streak = 0;
+    } else {
+        s_fv_guard.rot_streak = 0;
+    }
     s_fv_guard.view = view; s_fv_guard.pos = pos; s_fv_guard.fwd = fwd;
     return true;
 }
@@ -4030,43 +4064,30 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     static Mat4 s_last_proj{};
     static bool s_last_ok = false;
 
-    // Матрица вида из кеша камеры (+0x70) — эталон: по ней игра и рисует кадр.
-    // Живая поза берётся только если она с этим эталоном согласна.
+    // Cached native view is a cheap reference for the live transform. During a
+    // camera replacement it can lag behind, so disagreement falls back to the
+    // guarded live transform rather than blanking the player pipeline.
     const Mat4 cached_view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
     Vec3 ref_pos{};
     const bool have_ref = matrix_is_finite(cached_view) && camera_position_from_view(cached_view, ref_pos) &&
                           vec3_is_finite(ref_pos);
 
     bool have_live_view = false;
-    uint64_t native_transform = camera_transform_of(native_cam);
-    if (native_transform && have_ref) {
+    bool live_pose_unverified = false;
+    const uint64_t native_transform = camera_transform_of(native_cam);
+    if (native_transform) {
         Vec3 cam_pos{};
         Vec4 cam_rot{};
-        bool pose_ok = camera_pose_checked(cam_pos, cam_rot, ref_pos, !g_freecam_on);
-        bool fin_ok = pose_ok && vec3_is_finite(cam_pos);
-        bool quat_ok = fin_ok && normalize_quaternion(cam_rot);
-        // Teleport rejection: a read that lands mid-update inside the game
-        // can return a garbage-but-finite pose. One such frame throws every
-        // box/marker across the screen (the flicker artifacts). A camera
-        // cannot move 30 m in one frame — reject the sample and reuse the
-        // last view; a REAL teleport (respawn) sticks, so after a few
-        // consecutive "jumps" the new position is accepted.
-        static Vec3 s_last_cam_pos{};
-        static bool s_last_cam_pos_ok = false;
-        static int  s_pose_jump_streak = 0;
-        if (quat_ok && s_last_cam_pos_ok && s_last_ok) {
-            float jx = cam_pos.x - s_last_cam_pos.x;
-            float jy = cam_pos.y - s_last_cam_pos.y;
-            float jz = cam_pos.z - s_last_cam_pos.z;
-            float j2 = jx * jx + jy * jy + jz * jz;
-            if (j2 > 30.0F * 30.0F && s_pose_jump_streak < 4) {
-                ++s_pose_jump_streak;
-                quat_ok = false; // fall through to the cached view below
-            } else {
-                s_pose_jump_streak = 0;
-            }
+        bool pose_ok = have_ref && camera_pose_checked(native_cam, cam_pos, cam_rot,
+                                                        ref_pos, !g_freecam_on);
+        if (!pose_ok) {
+            // Do not let a stale Camera.m_WorldToCameraMatrix veto the live
+            // transform after a respawn/camera replacement. The frame guard
+            // below still rejects one-off transform garbage.
+            pose_ok = camera_pose_checked(native_cam, cam_pos, cam_rot, ref_pos, false);
+            live_pose_unverified = pose_ok;
         }
-        if (quat_ok) {
+        if (pose_ok && vec3_is_finite(cam_pos) && normalize_quaternion(cam_rot)) {
             view = mat_world_to_camera(cam_pos, cam_rot);
             have_live_view = matrix_is_finite(view);
             if (have_live_view) {
@@ -4075,11 +4096,10 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
                 g_cam_up = rotate_vector(cam_rot, {0.0F, 1.0F, 0.0F});
                 g_cam_forward = rotate_vector(cam_rot, {0.0F, 0.0F, 1.0F});
                 g_cam_pose_valid = true;
-                s_last_cam_pos = cam_pos;
-                s_last_cam_pos_ok = true;
             }
         }
     }
+    if (live_pose_unverified) g_camera_frame_degraded = true;
     if (!have_live_view) {
         if (have_ref) {
             view = cached_view;          // эталон: ровно то, чем рисует игра
@@ -4088,6 +4108,7 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
         } else {
             return false;
         }
+        g_camera_frame_degraded = true;
         g_cam_pose_derived = true;
     } else {
         g_cam_pose_derived = false;
@@ -4099,6 +4120,7 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     if (!view_basis_sane(view) || !frame_view_accepted(view)) {
         if (!s_fv_guard.ok) return false;
         view = s_fv_guard.view;
+        g_camera_frame_degraded = true;
         g_cam_pose_derived = true;
     }
     // Поза и базис — из финальной матрицы вида, единственной, по которой
@@ -6409,11 +6431,10 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         bone_group[bone] = group;
         if (index > group_max[group]) group_max[group] = index;
     }
-    // Liveness: the hips transform no longer resolves => model despawned.
-    if (group_count == 0 || bone_index[BONE_HIPS] < 0) {
-        if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
-        return false;
-    }
+    // A hierarchy can be unavailable while Unity reparents the rig. Keep
+    // projecting the last world-space bones for the short hold window below;
+    // only a sustained absence invalidates the cached rig.
+    const bool hierarchy_live = group_count > 0 && bone_index[BONE_HIPS] >= 0;
 
     // Bulk read the TRS + parent-index arrays of every hierarchy in use.
     static std::vector<Matrix34> local_matrices[kMaxGroups];
@@ -6437,6 +6458,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
 
     int projected = 0;
+    int fresh_world = 0;
     int remote_fallbacks = 0;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
         Vec3 world{};
@@ -6460,15 +6482,16 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
             }
             if (walked == 1) {
                 have_world = true;
+                ++fresh_world;
                 skeleton.bone_world[bone] = world;
-                skeleton.bone_world_age[bone] = 1;
+                skeletonframehold::refresh(skeleton.bone_world_age[bone]);
             }
         }
-        // Transient read glitch (game mid-update): briefly reuse the last known
-        // world position instead of letting the bone flicker off.
-        if (!have_world && skeleton.bone_world_age[bone] >= 1 && skeleton.bone_world_age[bone] <= 8) {
+        // Unity can expose the old hierarchy for several frames while it
+        // reparents a live rig. Reproject the last world point, rather than
+        // dropping the skeleton in the middle of that hand-off.
+        if (!have_world && skeletonframehold::reuse(skeleton.bone_world_age[bone])) {
             world = skeleton.bone_world[bone];
-            ++skeleton.bone_world_age[bone];
             have_world = true;
         }
         if (!have_world) continue;
@@ -6491,7 +6514,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     {
         auto bone_world_ok = [&](int bone, Vec3& out) -> bool {
             if (!box.bone_valid[bone]) return false;
-            if (skeleton.bone_world_age[bone] < 1 || skeleton.bone_world_age[bone] > 9) return false;
+            if (!skeletonframehold::usable(skeleton.bone_world_age[bone])) return false;
             out = skeleton.bone_world[bone];
             return vec3_is_finite(out);
         };
@@ -6542,10 +6565,21 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
 
     if (projected < 4) {
-        if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
+        if (++skeleton.fail_streak > skeletonframehold::kRebuildAfterFailures) {
+            skeleton = CachedSkeleton{};
+            skeleton.retry_cooldown = 30;
+        }
         return false;
     }
-    skeleton.fail_streak = 0;
+    if (!hierarchy_live || fresh_world == 0) {
+        if (++skeleton.fail_streak > skeletonframehold::kRebuildAfterFailures) {
+            skeleton = CachedSkeleton{};
+            skeleton.retry_cooldown = 30;
+            return false;
+        }
+    } else {
+        skeleton.fail_streak = 0;
+    }
     box.has_skeleton = true;
     // Габариты скелета в метрах. Нужны для признака смерти: труп ЛЕЖИТ, его
     // кости вытянуты по горизонтали и почти не имеют высоты. Читать здоровье
@@ -6557,7 +6591,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         int n = 0;
         for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
             if (!box.bone_valid[bone]) continue;
-            if (skeleton.bone_world_age[bone] < 1 || skeleton.bone_world_age[bone] > 9) continue;
+            if (!skeletonframehold::usable(skeleton.bone_world_age[bone])) continue;
             const Vec3 w = skeleton.bone_world[bone];
             if (!vec3_is_finite(w)) continue;
             if (w.y < minY) minY = w.y;
@@ -7560,6 +7594,7 @@ static void reset_world_caches() {
     // Камерный страж нового мира ничему не следит: прошлая планета тётушка
     // задержала бы новую камеру на 3 кадра подтверждения «телепорта».
     s_fv_guard = {};
+    reset_camera_pose_cache();
 }
 
 void esp_reset() {
@@ -7602,6 +7637,9 @@ void esp_reset() {
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
     g_go_name_offset_valid = false; g_go_name_retry_at = 0.0;
     g_frame_vp_valid = false; g_frame_local_valid = false;
+    g_camera_frame_degraded = false;
+    s_fv_guard = {};
+    reset_camera_pose_cache();
     reset_marker_caches();
 }
 
@@ -8249,6 +8287,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
     g_box_frame_transient = true;
+    g_camera_frame_degraded = false;
     std::vector<EspBox> result;
     auto transient_return = [&](int tag) {
         watch_boxes(result, (size_t)-1, nullptr, tag);
@@ -8341,7 +8380,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         note_player_pipeline_health(player_list_ok);
         publish_camera_only_frame(sw, sh);
         append_bot_boxes(result); // боты — и без игроков
-        g_box_frame_transient = !player_list_ok;
+        g_box_frame_transient = !player_list_ok || g_camera_frame_degraded;
         return transient_return(1);
     }
 
@@ -8884,7 +8923,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // vehicle — drawing both is the two-position flicker.
             auto sk = g_skeletons.find(s_transforms[i]);
             if (sk != g_skeletons.end() && box.has_skeleton &&
-                sk->second.bone_world_age[BONE_HIPS] >= 1) {
+                skeletonframehold::usable(sk->second.bone_world_age[BONE_HIPS])) {
                 float hx = sk->second.bone_world[BONE_HIPS].x - feet.x;
                 float hz = sk->second.bone_world[BONE_HIPS].z - feet.z;
                 if (hx * hx + hz * hz > 3.0F * 3.0F) {
@@ -9031,7 +9070,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     append_bot_boxes(result);
-    g_box_frame_transient = false;
+    g_box_frame_transient = g_camera_frame_degraded;
     watch_boxes(result, local_entity_index, &skip_reason, 0);
 
     return result;
