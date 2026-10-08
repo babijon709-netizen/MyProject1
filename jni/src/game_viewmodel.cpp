@@ -310,6 +310,27 @@ fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
 no_recoil::Controller<HeapMemory> no_recoil_ctl(heap_memory);
 no_ballistics::Controller<HeapMemory> no_ballistics_ctl(heap_memory);
 
+// Имя Il2CppClass для диагностики быстрого подбора: какой класс элементов
+// плеер-лупа попался вместо DelayPromise. Чтение метаданных местами не
+// стабильно (см. named_klass) — тогда отдаём hex указателя.
+void fast_loot_klass_name(uint64_t klass, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = 0;
+    uint64_t np = memory.ptr(klass + go_active::IL2CPP_CLASS_NAME);
+    char raw[24] = {};
+    if (np >= 0x10000 && g_mem.read_quiet(np, raw, sizeof(raw))) {
+        raw[sizeof(raw) - 1] = 0;
+        size_t w = 0;
+        for (size_t i = 0; raw[i] && w + 1 < cap; ++i) {
+            const unsigned char c = (unsigned char)raw[i];
+            if (c >= 0x20 && c < 0x7F) out[w++] = (char)c;  // фильтр от мусора
+        }
+        out[w] = 0;
+        if (out[0]) return;
+    }
+    snprintf(out, cap, "0x%llx", (unsigned long long)klass);
+}
+
 // Причина остановки быстрой стрельбы для лога: расшифровка стадии, которую
 // выставляет fast_fire::Controller (resolve/build_plan/apply в
 // fast_fire_memory.h). Стадия 0 + не-Active — ожидание привязки/игрока.
@@ -654,6 +675,25 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         // зависит от цепочки игрока, поэтому тикается до её резолва.
         static fast_loot::State loot_last_state = fast_loot::State::Off;
         static bool loot_announced = false;
+        static bool loot_last_on = false;
+        static fast_loot::Clock::time_point loot_last_report{};
+        static fast_loot::Clock::time_point loot_last_zero_at{};
+        static int  loot_burst_count = 0;
+        static bool loot_burst_open = false;
+        static fast_loot::Diag loot_prev_diag{};
+
+        // Включение фичи обнуляет диагностику: жалоба «не сработало» читается
+        // по чистым счётчикам одной сессии, без хвостов прошлых игр.
+        if (settings.fast_loot && !loot_last_on) {
+            loot_speed.diag_reset();
+            loot_prev_diag = {};
+            loot_last_report = fast_loot::Clock::now();
+            loot_last_zero_at = {};
+            loot_burst_count = 0; loot_burst_open = false;
+            LogLine("fast loot: включён, диагностика сброшена (%s)", go_active::VersionName());
+        }
+        loot_last_on = settings.fast_loot;
+
         const int loot_zeroed = loot_speed.tick(g_il2cpp_base, settings.fast_loot);
         if (loot_speed.state() != loot_last_state) {
             loot_last_state = loot_speed.state();
@@ -663,6 +703,66 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         if (loot_zeroed > 0 && !loot_announced) {
             loot_announced = true;
             LogLine("fast loot: first zeroing — %d delay(s) of 0.35f completed early", loot_zeroed);
+        }
+
+        const auto loot_now = fast_loot::Clock::now();
+        // Серия сбора: открывается первым обнулением, закрывается полусекундой
+        // тишины — факт «собрал ли вообще» виден по логу напрямую.
+        if (loot_zeroed > 0) {
+            loot_burst_open = true;
+            loot_burst_count += loot_zeroed;
+            loot_last_zero_at = loot_now;
+        } else if (loot_burst_open &&
+                   loot_now - loot_last_zero_at > std::chrono::milliseconds(500)) {
+            loot_burst_open = false;
+            LogLine("fast loot: серия сбора закончена, обнулено задержек: %d", loot_burst_count);
+            loot_burst_count = 0;
+        }
+
+        // «Не работает»: когда модуль резолвнут, но попаданий нет — раз в 10 с
+        // краткая сводка того, КАЖДАЯ точка обхода что нашла. Без аномалий
+        // лог не растёт вообще.
+        if (settings.fast_loot && loot_speed.state() == fast_loot::State::Active &&
+            !loot_burst_open && loot_now - loot_last_report >= std::chrono::seconds(10)) {
+            const fast_loot::Diag& d = loot_speed.diag();
+            const bool loop_empty = d.items_seen == loot_prev_diag.items_seen;
+            const bool anomaly = d.abort_mask != 0 || d.cadence_misses > 0 ||
+                                 d.write_fails > 0 || d.elapsed_rejects > 0 ||
+                                 (d.items_seen > 0 && d.klass_hits == 0) || loop_empty;
+            if (anomaly) {
+                loot_last_report = loot_now;
+                char spans[80] = {};
+                for (int i = 0; i < 4 && d.seen_timespan_hits[i] > 0; ++i) {
+                    const size_t l = strlen(spans);
+                    snprintf(spans + l, sizeof(spans) - l, "%s%.2fx%d",
+                             i ? ", " : "", (double)d.seen_timespans[i], d.seen_timespan_hits[i]);
+                }
+                char others[100] = {};
+                bool others_ok = false;
+                if (d.klass_hits == 0) {
+                    for (int i = 0; i < 3 && d.other_klass[i]; ++i) {
+                        char nm[28]; fast_loot_klass_name(d.other_klass[i], nm, sizeof(nm));
+                        const size_t l = strlen(others);
+                        snprintf(others + l, sizeof(others) - l, "%s%s", i ? ", " : "", nm);
+                        others_ok = true;
+                    }
+                }
+                LogLine("fast loot: нет попаданий 10с — проходов +%d, элементов +%d, класс-хитов +%d; "
+                        "обрывы=0x%x (1 runners,2 длина,4 массив,8 шапка,16 capacity,32 элементы), "
+                        "класс-не-читается +%d, каденция-другая %d (%s), elapsed-отказ +%d, "
+                        "запись-отказ %d, статика-потеряна %d%s%s%s",
+                        d.sweeps - loot_prev_diag.sweeps,
+                        d.items_seen - loot_prev_diag.items_seen,
+                        d.klass_hits - loot_prev_diag.klass_hits,
+                        d.abort_mask,
+                        d.klass_read_fails - loot_prev_diag.klass_read_fails,
+                        d.cadence_misses, spans[0] ? spans : "-",
+                        d.elapsed_rejects - loot_prev_diag.elapsed_rejects,
+                        d.write_fails, d.static_lost,
+                        others_ok ? ", в лупе вижу: " : "", others_ok ? others : "",
+                        loop_empty ? ", луп пуст (нет активных промисов)" : "");
+                loot_prev_diag = d;
+            }
         }
         if (!settings.fast_loot) loot_announced = false;
     }
