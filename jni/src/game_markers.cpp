@@ -1552,7 +1552,12 @@ static void marker_watch_observe(const MarkerEntity& entity, bool visible,
     sample.world = entity.position;
     sample.x = screen_x; sample.y = screen_y; sample.distance = distance;
     sample.kind = entity.kind; sample.visible = visible; sample.frame = s_marker_watch_frame;
-    if (!visible && reason && reason[0] == 'P') ++s_marker_watch_position_invalid;
+        // Ровно «POSITION»: PROJECTION — это провал w2s, а не битая позиция,
+        // и в общий счётчик bad-position он не идёт. Иначе строка диагностики
+        // врала: в логе 16:05 bad-position доходил до 486 за секунду, хотя
+        // событий POSITION не было ни одного — все они были PROJECTION.
+        if (!visible && reason && std::strcmp(reason, "POSITION") == 0)
+            ++s_marker_watch_position_invalid;
 }
 
 static void marker_watch_finish(int visible_count) {

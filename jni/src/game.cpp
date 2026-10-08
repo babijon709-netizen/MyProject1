@@ -2808,6 +2808,10 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
         if (!player) continue;
         Vec3 position = rd_v3(player + offset);
         if (!vec3_is_finite(position)) continue;
+        // Сэмпл вида (x, 0, 0) — не живая позиция, а неинициализированный
+        // пул. Раньше такой сэмпл шёл в valid/non_zero, и смещение могло быть
+        // принято на мусоре.
+        if (position_near_world_origin(position)) continue;
         float magnitude = fabsf(position.x) + fabsf(position.y) + fabsf(position.z);
         if (magnitude < 0.01F) continue;
         ++valid; ++non_zero;
@@ -5508,10 +5512,11 @@ static bool player_rendered_position(uint64_t player, Vec3& out) {
     uint64_t native = resolve_player_native_transform(player);
     if (!native) return false;
     if (g_skeleton_layout_valid && read_transform_hierarchy_layout(native, g_skeleton_layout, out)
-        && vec3_is_finite(out) && position_looks_like_world_space(out))
+        && vec3_is_finite(out) && position_looks_like_world_space(out)
+        && !position_near_world_origin(out))
         return true;
     return read_transform_hierarchy_position(native, out) && vec3_is_finite(out)
-        && position_looks_like_world_space(out);
+        && position_looks_like_world_space(out) && !position_near_world_origin(out);
 }
 
 // Seated body: characterModel is parented to the seat even when worldCameraRoot
@@ -5520,10 +5525,11 @@ static bool player_model_position(uint64_t player, Vec3& out) {
     uint64_t root = skeleton_model_root(player);
     if (!root) return false;
     if (g_skeleton_layout_valid && read_transform_hierarchy_layout(root, g_skeleton_layout, out)
-        && vec3_is_finite(out) && position_looks_like_world_space(out))
+        && vec3_is_finite(out) && position_looks_like_world_space(out)
+        && !position_near_world_origin(out))
         return true;
     return read_transform_hierarchy_position(root, out) && vec3_is_finite(out)
-        && position_looks_like_world_space(out);
+        && position_looks_like_world_space(out) && !position_near_world_origin(out);
 }
 
 // worldCameraRoot sits at eye level, the box is built from the feet.
@@ -7336,6 +7342,9 @@ static bool player_kcc_position(const PlayerAux& aux, Vec3& out) {
     if (!vec3_is_finite(p)) return false;
     float magnitude = fabsf(p.x) + fabsf(p.y) + fabsf(p.z);
     if (magnitude < 0.01F || magnitude > 100000.0F) return false;
+    // Тот же пуловой мусор, что и в поле позиции: свежий CharacterController
+    // отдаёт (x, 0, 0), и бокс молча уезжает под карту.
+    if (position_near_world_origin(p)) return false;
     out = p;
     return true;
 }
@@ -8548,7 +8557,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         unsigned short read_flags = PositionDirectTried;
         const bool direct_read_ok = read_entity_position(player, candidate);
         if (direct_read_ok) read_flags |= PositionDirectReadOk;
-        bool read_ok = direct_read_ok && position_looks_like_world_space(candidate);
+        // Пуловой мусор свежего PlayerManager отдаёт в поле позиции вектор
+        // (x, 0.0, 0.0): world-space-гейт его пропускает, и бокс уходит под
+        // карту. В логе 16:05 — pos=(10.9 0.0 0.0), reason=bottom, «ПРОПАЛ»,
+        // возврат через 155 кадров (2.6 c). Сентинель position_near_world_origin
+        // был написан ровно под это, но подключён только в player_saved_position,
+        // а конвейер боксов принимал такую точку как живую.
+        bool read_ok = direct_read_ok && position_looks_like_world_space(candidate) &&
+                       !position_near_world_origin(candidate);
         if (read_ok) {
             read_flags |= PositionDirectValid;
             source = 'D';
@@ -8571,7 +8587,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 if (model_read_ok) {
                     read_flags |= PositionModelReadOk;
                     candidate.y += g_use_direct_player_position ? -0.90F : 0.90F;
-                    read_ok = position_looks_like_world_space(candidate);
+                    read_ok = position_looks_like_world_space(candidate) &&
+                              !position_near_world_origin(candidate);
                     if (read_ok) {
                         read_flags |= PositionModelValid;
                         source = 'M';
