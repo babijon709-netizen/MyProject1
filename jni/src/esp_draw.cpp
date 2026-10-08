@@ -54,7 +54,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
                                 g_state.esp_vehicles, g_state.esp_bots,
                                 g_state.esp_scrap, g_state.esp_turrets,
                                 g_state.esp_backpacks, g_state.esp_sleepers,
-                                g_state.esp_house_boxes);
+                                g_state.esp_house_boxes, g_state.esp_cupboards);
         // Аим по ботам — тем же условием, что кости для аима: работает и
         // когда маркеры ботов выключены.
         esp_set_bot_aim_enabled(g_state.esp_bots || g_state.aim_touch ||
@@ -458,6 +458,7 @@ void DrawEspOverlay() {
                        : marker.kind == ESP_MARKER_TURRET   ? cfg::esp::turret_col
                        : marker.kind == ESP_MARKER_BACKPACK ? cfg::esp::backpack_col
                        : marker.kind == ESP_MARKER_SLEEPER  ? cfg::esp::sleeper_col
+                       : marker.kind == ESP_MARKER_CUPBOARD ? cfg::esp::cupboard_col
                        : marker.kind == ESP_MARKER_HOUSE    ? cfg::esp::loot_col
                                                            : cfg::esp::animal_col);
             EspPill(marker.x, marker.y, marker.name, col, kMarkerScale);

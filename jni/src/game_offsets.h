@@ -491,6 +491,33 @@ inline constexpr std::uint64_t DICT_ENTRY_VALUE  = 0x10;
 inline constexpr std::uint64_t NETID_NET_ID     = 0x58; // uint netId
 inline constexpr std::uint64_t NETID_BEHAVIOURS = 0x80; // NetworkBehaviour[]
 
+// ---- Шкафы (Oxide.Cupboard) ------------------------------------------------
+// Класс НЕ обфусцирован ни в релизе 11946, ни в бете 11943: имя "Cupboard"
+// (неймспейс Oxide; неймс обфускатор в имени Il2CppClass не входит). Он же
+// базовый для TutorialCupboard (шкаф учебного острова — отдельным классом,
+// помечается в подписи). Base: Ryf/mao : Mirror.NetworkBehaviour, значит шкаф
+// заспавнен у клиента как все маркерные сущности и берётся тем же реестром.
+// Раскладка полей идентична в обоих дампах (посмотрено позиционно):
+//   inventory 0xA8, isLootable 0xB0, m_Capacity 0xB4, panelName 0xB8,
+//   m_Piece(BuildingPiece) 0xC8, m_LootBag 0xD0, authorizedPlayers 0xD8,
+//   upkeep-per-player dict 0xE0, protectedTime 0xE8, costItem* 0xEC..0xF8,
+//   isPlusSubscribed 0xFC, clanPerkMultiplier 0x100, luxuryTaxEnabled 0x104,
+//   luxuryBlocks 0x108, luxuryTax 0x10C..0x114.
+inline constexpr std::uint64_t CUPBOARD_IS_LOOTABLE        = 0xB0;  // bool
+inline constexpr std::uint64_t CUPBOARD_AUTHORIZED_PLAYERS = 0xD8;  // List<string>
+inline constexpr std::uint64_t CUPBOARD_PROTECTED_TIME     = 0xE8;  // float (SyncVar), сек
+inline constexpr std::uint64_t CUPBOARD_LUXURY_BLOCKS      = 0x108; // int (SyncVar)
+// Реестр ВСЕХ шкафов мира (не только сетевой дальности) существует в клиенте:
+// статик-геттер возвращает синглтон env-менеджера, Mf<Cupboard> лежит в нём
+// по +0x10; Mf<T>: dict 0x10 / dict 0x18 / Nq<T> 0x20; Nq<T>: count 0x10 (int),
+// items(массив) 0x18. Читалкой ESP этот путь НЕ используется (достаточно
+// NetworkClient.spawned) — адреса оставлены как breadcrumbs для будущей
+// статической перечислительной схемы:
+//   релиз 11946: Cupboard.sWB() (= get_JGX)   RVA 0x67D7634 -> ldr x0,[x0,#0x10]
+//   бета  11943: Cupboard.Xbp() (= get_SeP)   RVA 0x6860EB0 -> ldr x0,[x0,#0x10]
+// Обе функции структурно идентичны: service-locator по metadata handle,
+// epilogue `ldr x0, [x0, #0x10]; ret`.
+
 // ---- Постройки: ХП дверей/стен (Oxide.PieceVitals : GenericVitals : pmp) ----
 // pmp.Entity (0x68) -> pmK; pmK.Health (0x98) -> AsyncReactiveProperty<float>,
 // текущее значение в latestValue (0x18). Максимум — GenericVitals.m_MaxHealth.

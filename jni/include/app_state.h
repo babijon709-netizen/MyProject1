@@ -42,6 +42,8 @@ struct AppState {
     // вкл — как было до разделения.
     bool  esp_house_boxes = true;
     bool  esp_turrets = false, esp_backpacks = false, esp_sleepers = false;
+    // Шкафы (Tool Cupboard): метка с числом авторизованных и остатком защиты.
+    bool  esp_cupboards = false;
     ViewmodelSettings viewmodel;
     bool fast_fire = false, fast_reload = false;
     bool fake_lag = false;
@@ -130,7 +132,7 @@ struct AppState {
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
     float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0, a_esp_house_boxes = 0;
-    float a_esp_turrets = 0, a_esp_backpacks = 0, a_esp_sleepers = 0;
+    float a_esp_turrets = 0, a_esp_backpacks = 0, a_esp_sleepers = 0, a_esp_cupboards = 0;
     float a_always_day = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;

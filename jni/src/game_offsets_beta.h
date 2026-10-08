@@ -224,6 +224,11 @@ inline constexpr std::uint64_t DICT_ENTRY_STRIDE = game_offsets::DICT_ENTRY_STRI
 inline constexpr std::uint64_t DICT_ENTRY_VALUE = game_offsets::DICT_ENTRY_VALUE;
 inline constexpr std::uint64_t NETID_NET_ID = game_offsets::NETID_NET_ID;
 inline constexpr std::uint64_t NETID_BEHAVIOURS = game_offsets::NETID_BEHAVIOURS;
+// Oxide.Cupboard: раскладка идентична релизу (сверено по betadump061026 позиционно).
+inline constexpr std::uint64_t CUPBOARD_IS_LOOTABLE = game_offsets::CUPBOARD_IS_LOOTABLE;
+inline constexpr std::uint64_t CUPBOARD_AUTHORIZED_PLAYERS = game_offsets::CUPBOARD_AUTHORIZED_PLAYERS;
+inline constexpr std::uint64_t CUPBOARD_PROTECTED_TIME = game_offsets::CUPBOARD_PROTECTED_TIME;
+inline constexpr std::uint64_t CUPBOARD_LUXURY_BLOCKS = game_offsets::CUPBOARD_LUXURY_BLOCKS;
 inline constexpr std::uint64_t PMP_ENTITY = game_offsets::PMP_ENTITY;
 inline constexpr std::uint64_t PMK_HEALTH = game_offsets::PMK_HEALTH;
 inline constexpr std::uint64_t ARP_LATEST_VALUE = game_offsets::ARP_LATEST_VALUE;

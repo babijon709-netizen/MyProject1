@@ -430,8 +430,9 @@ float TabContent(int tab, float dt, float cW) {
                 {"##vtu", XS("Турели"),   &g_state.esp_turrets,      &g_state.a_esp_turrets,      &cfg::esp::turret_col},
                 {"##vbp", XS("Рюкзаки"),  &g_state.esp_backpacks,    &g_state.a_esp_backpacks,    &cfg::esp::backpack_col},
                 {"##vsl", XS("Спящие"),   &g_state.esp_sleepers,     &g_state.a_esp_sleepers,     &cfg::esp::sleeper_col},
+                {"##vcb", XS("Шкафы"),    &g_state.esp_cupboards,    &g_state.a_esp_cupboards,    &cfg::esp::cupboard_col},
             };
-            constexpr int NW = 11;
+            constexpr int NW = 12;
             CardBg(rowH * NW);
             for (int i = 0; i < NW; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
@@ -1799,6 +1800,7 @@ void RenderMenu() {
     Tick(g_state.a_esp_turrets, g_state.esp_turrets,       dt);
     Tick(g_state.a_esp_backpacks, g_state.esp_backpacks,   dt);
     Tick(g_state.a_esp_sleepers, g_state.esp_sleepers,     dt);
+    Tick(g_state.a_esp_cupboards, g_state.esp_cupboards,   dt);
     Tick(g_state.a_always_day,  g_state.always_day,         dt);
     Tick(g_state.a_esp_team,   g_state.esp_team,           dt);
     Tick(g_state.a_aim_pr0,    g_state.aim_priority == 0,  dt);

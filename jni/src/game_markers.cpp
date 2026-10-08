@@ -45,6 +45,7 @@ static bool g_markers_turret_enabled = false;
 static bool g_markers_backpack_enabled = false;
 static bool g_markers_sleeper_enabled = false;
 static bool g_markers_house_enabled = false;
+static bool g_markers_cupboard_enabled = false;
 // Аим по ботам: скан и позиции ботов живут, даже когда их маркеры выключены.
 static bool g_bot_aim_enabled = false;
 static float g_marker_max_distance = 150.0F;
@@ -58,7 +59,7 @@ static bool marker_visuals_enabled() {
            g_markers_vehicle_enabled || g_markers_bot_enabled ||
            g_markers_scrap_enabled || g_markers_turret_enabled ||
            g_markers_backpack_enabled || g_markers_sleeper_enabled ||
-           g_markers_house_enabled;
+           g_markers_house_enabled || g_markers_cupboard_enabled;
 }
 // Когда можно начинать следующий проход скана маркеров, в mono_seconds().
 // Раньше здесь был счётчик кадров (180, при пустом списке 30) из расчёта на
@@ -113,10 +114,12 @@ enum class MarkerScanResult { Complete, Pending, Unavailable };
 
 void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
                              bool vehicles, bool bots, bool scrap, bool turrets,
-                             bool backpacks, bool sleepers, bool house) {
+                             bool backpacks, bool sleepers, bool house,
+                             bool cupboards) {
     // Loot, pickups, scrap and house boxes are filtered during the registry walk.
     if (loot != g_markers_loot_enabled || pickups != g_markers_pickup_enabled ||
-        scrap != g_markers_scrap_enabled || house != g_markers_house_enabled) {
+        scrap != g_markers_scrap_enabled || house != g_markers_house_enabled ||
+        cupboards != g_markers_cupboard_enabled) {
         g_marker_next_scan = 0.0;
         marker_scan_abort();   // половина списка собрана по старым фильтрам
     }
@@ -131,6 +134,7 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
     g_markers_backpack_enabled = backpacks;
     g_markers_sleeper_enabled = sleepers;
     g_markers_house_enabled = house;
+    g_markers_cupboard_enabled = cupboards;
     // Машины и боты всегда сканируются и фильтруются при отрисовке.
 }
 
@@ -1073,6 +1077,10 @@ uint8_t marker_class_of(uint64_t klass) {
         else if (name == "AutoTurret" || name == "AutoSnowballTurret" ||
                  name == "AutoTurretShotgun" || name == "SamTurret")                             kind = MARKER_CLASS_TURRET;
         else if (name == "DisconnectedSleeper")                   kind = MARKER_CLASS_SLEEPER;
+        // Шкаф: класс "Cupboard" не обфусцирован в обоих дампах (11946/11943);
+        // TutorialCupboard — его наследник с учебного острова, подпись отличается.
+        else if (name == "Cupboard" || name == "TutorialCupboard")
+                                                                  kind = MARKER_CLASS_CUPBOARD;
         // Smashable scrap barrels: on this build their component class is
         // "LootDestroyable" (log: skip-class 'LootDestroyable' go='Barrel_v2') —
         // not a Mineable and not a LootObject. Any class that says Barrel out
@@ -1086,6 +1094,37 @@ uint8_t marker_class_of(uint64_t klass) {
     }
     if (g_marker_class_kind.size() < 512) g_marker_class_kind[klass] = kind;
     return kind;
+}
+
+// Шкаф (Oxide.Cupboard): подпись «Шкаф ×N · Hч» — число авторизованных игроков
+// и остаток защиты (protectedTime, SyncVar, секунды). Учебный шкаф помечается
+// суффиксом, чтобы не путать с рейдовыми целями. Семантика protectedTime
+// (окно защиты vs время до распада) по дампу не подтверждена — читаем как
+// часы и подавляем неправдоподобное (> 30 суток: значение-похожее-на-штамп
+// или мусор при переинициализации SyncVar).
+static bool cupboard_marker(uint64_t component, char* out, size_t cap) {
+    if (!out || cap == 0) return false;
+    const bool tutorial = object_class_name_is(component, "TutorialCupboard");
+    int auth_count = 0;
+    const uint64_t auth_list = rd_ptr(component + CUPBOARD_AUTHORIZED_PLAYERS);
+    if (valid_obj(auth_list)) {
+        const int32_t n = rd<int32_t>(auth_list + IL2CPP_LIST_SIZE);
+        if (n > 0 && n < 4096) auth_count = n;
+    }
+    int protected_hours = -1;
+    const float protected_sec = rd<float>(component + CUPBOARD_PROTECTED_TIME);
+    if (std::isfinite(protected_sec) && protected_sec > 0.0F) {
+        const int hours = (int)(protected_sec / 3600.0F);
+        if (hours <= 24 * 30) protected_hours = hours;
+    }
+    const char* base = lang::visual(tutorial ? "Шкаф (учеб.)" : "Шкаф");
+    int len = snprintf(out, cap, "%s", base);
+    if (auth_count > 0 && len > 0 && (size_t)len < cap)
+        len += snprintf(out + len, cap - (size_t)len, " \xc3\x97%d", auth_count); // "×N"
+    if (protected_hours >= 0 && len > 0 && (size_t)len < cap)
+        len += snprintf(out + len, cap - (size_t)len, " %d%s", protected_hours,
+                        lang::english() ? "h" : "\xd1\x87"); // "ч"/"h"
+    return out[0] != '\0';
 }
 
 uint64_t resolve_network_client_spawned() {
@@ -1252,6 +1291,16 @@ static MarkerScanResult rebuild_marker_entities() {
             } else if (component_class == MARKER_CLASS_SLEEPER) {
                 look = special_look(ESP_MARKER_SLEEPER, "Спящий");
                 known = true;
+            } else if (component_class == MARKER_CLASS_CUPBOARD) {
+                // Шкаф: класс знаем точно, имена GameObject не нужны. Подпись
+                // динамическая (авторизованные + часы защиты) — как у пикапов:
+                // look.label = nullptr, текст уезжает в entity.text.
+                known = cupboard_marker(component, pickup_text, sizeof(pickup_text));
+                if (known) {
+                    look.kind = ESP_MARKER_CUPBOARD;
+                    look.label = nullptr;
+                    look.has_color = false;
+                }
             }
             // Рюкзаки и спящие: их классы вращаются обфускатором, а списки
             // исключения (skip_object_name в ветке Mineable и kDeployed в
@@ -1792,6 +1841,7 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_BACKPACK && !g_markers_backpack_enabled) continue;
         if (entity.kind == ESP_MARKER_SLEEPER && !g_markers_sleeper_enabled) continue;
         if (entity.kind == ESP_MARKER_HOUSE && !g_markers_house_enabled) continue;
+        if (entity.kind == ESP_MARKER_CUPBOARD && !g_markers_cupboard_enabled) continue;
         if (marker_bot_dead(entity)) continue;
         // Ore nodes never move, so their position is only read on a rescan.
         // Animals and bots DO move — throttled re-reads, see marker_track_position.
@@ -1824,6 +1874,7 @@ std::vector<EspMarker> esp_get_markers() {
                   : (entity.kind == ESP_MARKER_TURRET)   ? 1.3F
                   : (entity.kind == ESP_MARKER_SLEEPER)  ? 0.8F
                   : (entity.kind == ESP_MARKER_BACKPACK) ? 0.5F
+                  : (entity.kind == ESP_MARKER_CUPBOARD) ? 1.0F
                   : (entity.kind == ESP_MARKER_HOUSE)    ? 0.6F : 0.9F;
         if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false) ||
             !std::isfinite(screen.x) || !std::isfinite(screen.y)) {

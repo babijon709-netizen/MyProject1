@@ -95,6 +95,8 @@ enum MarkerClass : uint8_t {
     MARKER_CLASS_VEHICLE = 6,
     MARKER_CLASS_TURRET = 7,
     MARKER_CLASS_SLEEPER = 8,
+    // Oxide.Cupboard (шкаф): имя класса не обфусцировано, опознаётся напрямую.
+    MARKER_CLASS_CUPBOARD = 9,
 };
 
 // Инструмент/статус, общий с автофармой (определено в game_markers.cpp).

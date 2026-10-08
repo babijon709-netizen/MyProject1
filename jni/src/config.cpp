@@ -379,7 +379,8 @@ static void ConfigSaveToPath(const std::string& path) {
         auto extension = viewmodel::encode(g_state.viewmodel);
         extension.flags |= (g_state.esp_turrets ? 128u : 0u) |
                            (g_state.esp_backpacks ? 256u : 0u) |
-                           (g_state.esp_sleepers ? 512u : 0u);
+                           (g_state.esp_sleepers ? 512u : 0u) |
+                           (g_state.esp_cupboards ? 1024u : 0u);
         // v4+: упреждение аима в миллисекундах (0 = выкл).
         extension.aim_lead_ms = g_state.aim_lead_ms;
         uint8_t extra[sizeof(extension)];
@@ -441,6 +442,7 @@ void ConfigLoad(int idx, bool announce) {
     XorBuf(extra, extraGot);
     g_state.viewmodel = viewmodel::decode(extra, extraGot);
     g_state.esp_turrets = g_state.esp_backpacks = g_state.esp_sleepers = false;
+    g_state.esp_cupboards = false;
     // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4–v6 могут
     // вернуть своё значение. Сам прицеп 36 байт с v4; прицеп v3 был 32 —
     // обрабатываем оба размера, иначе старые конфиги потеряли бы турели,
@@ -455,6 +457,7 @@ void ConfigLoad(int idx, bool announce) {
             g_state.esp_turrets = (extension.flags & 128u) != 0;
             g_state.esp_backpacks = (extension.flags & 256u) != 0;
             g_state.esp_sleepers = (extension.flags & 512u) != 0;
+            g_state.esp_cupboards = (extension.flags & 1024u) != 0;
             if (extension.version >= 4)
                 g_state.aim_lead_ms = viewmodel::decode_aim_lead_ms(extra, extraGot);
             g_state.aim_predict = std::round(g_state.aim_lead_ms / kAimPredictStepMs);
