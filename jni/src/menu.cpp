@@ -15,7 +15,6 @@
 #include "esp_draw.h"
 #include "aim.h"
 #include "logfile.h"                 // AimTouchFracX/Y (строки калибровки)
-#include "VidAvatar.h"
 #if __has_include("media/icons.h")
 #  include "media/icons.h"
 #  define ICONS_AVAILABLE
@@ -28,10 +27,16 @@
 
 static GLuint g_tabIcons[kTabCount] = {};
 
-static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
+static GLuint LoadTexFromMemory(const unsigned char* data, int len, bool gray = false) {
     int w, h, ch;
     unsigned char* px = stbi_load_from_memory(data, len, &w, &h, &ch, 4);
     if (!px) return 0;
+    if (gray) {
+        for (int i = 0; i < w * h * 4; i += 4) {
+            const int l = (px[i] * 77 + px[i + 1] * 150 + px[i + 2] * 29) >> 8;
+            px[i] = px[i + 1] = px[i + 2] = (unsigned char)l;
+        }
+    }
     GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -46,15 +51,16 @@ static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
 
 void LoadTabIcons() {
 #ifdef ICONS_AVAILABLE
-    g_tabIcons[0] = LoadTexFromMemory(main_tab_png, (int)main_tab_png_len);
-    g_tabIcons[1] = LoadTexFromMemory(aimbot_png,   (int)aimbot_png_len);
-    g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len);
+    // Иконки вкладок — чёрно-белые (оттенки серого), цвет задаёт тема.
+    g_tabIcons[0] = LoadTexFromMemory(main_tab_png, (int)main_tab_png_len, true);
+    g_tabIcons[1] = LoadTexFromMemory(aimbot_png,   (int)aimbot_png_len,   true);
+    g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len,  true);
     // Tab order: 3=Разное, 4=Конфиги, 5=Опции. У «Разное» своя векторная
     // иконка (рисуется кодом), поэтому текстура ему не нужна — иначе она
     // дублировала бы иконку «Конфиги» (misc_png).
     g_tabIcons[3] = 0;
-    g_tabIcons[4] = LoadTexFromMemory(misc_png,     (int)misc_png_len);
-    g_tabIcons[5] = LoadTexFromMemory(settings_png, (int)settings_png_len);
+    g_tabIcons[4] = LoadTexFromMemory(misc_png,     (int)misc_png_len,     true);
+    g_tabIcons[5] = LoadTexFromMemory(settings_png, (int)settings_png_len, true);
 #endif
 }
 
@@ -1216,11 +1222,11 @@ static float RailTabsW() {
     return kRailPadL + kRailIcon + kRailGap + worst + kRailPadR;
 }
 
-// Кружок-аватарка и «светофор» в левом верхнем углу меню.
+// «Светофор» в левом верхнем углу меню и метрики левой панели.
 //
-// Кружок (радиус 87.75 — диаметр 175.5) живёт в панели вкладок, и панель
-// считается от него: отступ + диаметр + отступ. Над кружком, в самом углу
-// окна, стоят три кнопки как в macOS (красная — закрыть меню, жёлтая —
+// Кружок-аватарка убран: место под него (отступ + диаметр + отступ) пока
+// оставлено за панелью, чтобы ширина не менялась. Столбец вкладок стоит сразу
+// под светофором. В самом углу окна стоят три кнопки как в macOS (красная — закрыть меню, жёлтая —
 // свернуть в минимальный размер, зелёная — развернуть на весь экран и обратно).
 static const float kAvatarR    = 87.75f; // радиус кружка (диаметр 175.5)
 static const float kAvatarPad  = 20.f;   // отступ по бокам внутри панели
@@ -1248,7 +1254,7 @@ static void TrafficLightMetrics(float railW, float& d, float& gap) {
     }
 }
 
-// Ширина панели вкладок: по кружку (при радиусе 58.5 — 157 px), но не меньше,
+// Ширина панели вкладок: по прежнему кружку (175.5 px), но не меньше,
 // чем нужно светофору. На узком экране (меню сжимается под ширину дисплея)
 // панель не отдаём больше 45% окна: тогда кружок и светофор уменьшаются.
 static float AvatarRailW(float winW) {
@@ -1258,23 +1264,6 @@ static float AvatarRailW(float winW) {
     return ImMin(ImMax(ImMax(forAvatar, forLights), forTabs), ImMax(120.f, winW * 0.45f));
 }
 
-// Радиус кружка под фактическую ширину панели.
-static float AvatarR(float railW) {
-    return ImMin(kAvatarR, ImMax(24.f, railW * 0.5f - kAvatarPad));
-}
-
-// Центр кружка в координатах окна меню: по центру панели вкладок, то есть ровно
-// над иконками вкладок.
-static float AvatarCx(float winX, float R) { return winX + kAvatarPad + R; }
-// Кружок стоит под светофором.
-static float AvatarCy(float winY, float R) {
-    return winY + kTLPad + kTLD + kAvatarPadT + R;
-}
-
-// Низ кружка в координатах окна меню — от него начинается столбец вкладок.
-static float AvatarBottom(float winY, float R) {
-    return winY + kTLPad + kTLD + kAvatarPadT + R * 2.f;
-}
 
 // --- Светофор ===============================================================
 // Кружки: 0 — красная, 1 — жёлтая, 2 — зелёная. Это ДЕКОР (просьба игрока:
@@ -2353,7 +2342,7 @@ void RenderMenu() {
             // совпадала с иконкой «Конфиги» из общего атласа.
             float gx0 = icoX, gy0 = icoY;
             float cell = icoW * 0.44f, gap2 = icoW - cell * 2.f;
-            ImU32 gcol = C::UA(C::Acc(), active ? 1.f : 0.55f);
+            ImU32 gcol = C::UA(C::Txt(), active ? 1.f : 0.55f);
             float rr = cell * 0.3f;
             fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
             fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + icoW, gy0 + cell}, gcol, rr);
@@ -2364,7 +2353,7 @@ void RenderMenu() {
             ImVec2 iMin = {icoX, icoY};
             ImVec2 iMax = {icoX + icoW, icoY + icoH};
             fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
-                {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 165), 9.f);
+                {0,0}, {1,1}, C::UA(C::Txt(), active ? 1.f : 0.65f), 9.f);
         } else {
             // Заглушка: скруглённый квадрат с первой буквой вкладки.
             ImVec2 iMin = {icoX, icoY};
@@ -2406,25 +2395,20 @@ void RenderMenu() {
         ldl->AddLine({lpPos.x + railW, lpPos.y + 12.f}, {lpPos.x + railW, lpPos.y + WH - 12.f},
                      C::UA(C::Sep(), 0.8f), 1.f);
 
-        // Светофор как в macOS — в самом углу окна, кружок с видео под ним.
+        // Светофор как в macOS — в самом углу окна.
         TrafficLight(TrafficLightPos(g_win.pos, true), railW);
-        const float avR = AvatarR(railW);
-        VidAvatar::Draw(ldl, AvatarCx(lpPos.x, avR), AvatarCy(lpPos.y, avR), avR, dt,
-                        C::UA(C::Acc(), 0.9f), C::U(C::LeftBg()));
 
         // Размеры подписи и иконки в этой панели — из ширины панели.
         const RailCell railM = RailMetrics(railW);
 
-        // Столбец вкладок идёт ПОД кружком и не пересекается с ним: сверху
-        // оставляем 12 px от кружка, снизу 6 px до края окна. Если в минимальном
-        // окне (720 px) пяти ячейкам по 108 px места не хватает, высота ячейки
-        // поджимается (кружок 176 px + столбец 514 px = 720) — так столбец
-        // целиком остаётся внутри окна, а последняя вкладка не уезжает за край.
-        const float colTop = AvatarBottom(0.f, avR) + 12.f;
+        // Столбец вкладок прижат к верху панели, сразу под светофором — там,
+        // где раньше был кружок. Если в минимальном окне (720 px) пяти ячейкам
+        // по 108 px места не хватает, высота ячейки поджимается, чтобы последняя
+        // вкладка не уехала за нижний край.
+        const float colTop = kTLPad + kTLD + kAvatarPadT;
         const float avail  = ImMax(64.f * kTabShown, WH - colTop - 6.f);
         const float tabH   = ImMin(Layout::TabHV, avail / (float)kTabShown);
-        const float colH   = tabH * kTabShown;
-        const float startY = ImMax(colTop, (WH - colH) * 0.5f);
+        const float startY = colTop;
 
         for (int s = 0; s < kTabShown; s++) {
             const int i = kTabOrder[s];
@@ -2550,14 +2534,14 @@ void RenderMenu() {
 
     {
         // Шапка: заголовок вкладки по центру.
-        auto titles = [](int k) { return TabTitle(k); };
+        const char* headerText = XS("t.me/benzware");
         auto*  cdl = ImGui::GetWindowDrawList();
         auto   hp  = ImGui::GetWindowPos();
         const float hH = hdrH;
         const float titleFS = ImGui::GetFontSize() * 1.45f;
-        auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, titles(g_state.cur_tab));
+        auto tsz = ImGui::GetFont()->CalcTextSizeA(titleFS, FLT_MAX, 0, headerText);
         cdl->AddText(ImGui::GetFont(), titleFS,
-            {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), titles(g_state.cur_tab));
+            {hp.x + (cW - tsz.x) * 0.5f, hp.y + (hH - tsz.y) * 0.5f}, C::U(C::Txt()), headerText);
         if (!panelLeft) {
             // Светофор — в самом левом верхнем углу окна. Кружка аватарки в
             // этой раскладке нет (просьба игрока: с нижней панелью он мешает).

@@ -191,22 +191,6 @@ void DrawWatermark(float dt) {
     float scrW = 0.f, scrH = 0.f;
     VisibleScreen(scrW, scrH);
 
-    // ---- Некликабельная пилюля с названием чита (слева сверху) ---------
-    // Тапы по ней не обрабатываются вовсе, так что она «прозрачна» для
-    // кликов и ничему не мешает.
-    {
-        const float fs = 38.f, padX = 24.f, padY = 14.f;
-        const char* name = XS("t.me/benzware");
-        auto nSz = fn->CalcTextSizeA(fs, FLT_MAX, 0, name);
-        float bW = padX * 2.f + nSz.x;
-        float bH = padY * 2.f + nSz.y;
-        const float bX = 12.f, bY = 12.f;
-        fg->AddRectFilled({bX, bY}, {bX + bW, bY + bH}, C::UA(C::Card(), 0.8f), bH * 0.5f);
-        fg->AddRect      ({bX, bY}, {bX + bW, bY + bH}, C::UA(acc, 0.5f), bH * 0.5f, 0, 1.5f);
-        fg->AddText(fn, fs, {bX + padX, bY + padY}, C::UA(C::Txt(), 0.95f), name);
-
-    }
-
     // ---- Пилюля-счётчик противников --------------------------------------
     // Дефолт — верх по центру; двигается тапом в Опциях → Худ.
     // Показывает, сколько игроков видит ESP; тап по ней открывает/закрывает
@@ -326,22 +310,15 @@ void DrawWatermark(float dt) {
         fg->AddRect({qX, qY}, {qX + side, qY + side},
                     on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), rad, 0, on ? 3.f : 1.5f);
 
-        // Глаз: миндалина двумя квадратичными кривыми (контрольная точка
-        // тянет кривую на половину высоты — отсюда удвоение), зрачок и блик.
+        // Глаз: контур-миндаль и зрачок, без заливки.
         const float ex = qX + side * 0.5f, ey = qY + side * 0.5f;
         const float aw = side * 0.30f, ah = side * 0.17f;
+        const ImU32 eyeCol = on ? C::U(C::Acc()) : C::UA(C::Txt(), 0.75f);
         fg->PathLineTo({ex - aw, ey});
         fg->PathBezierQuadraticCurveTo({ex, ey - ah * 2.f}, {ex + aw, ey});
-        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 1.6f}, {ex - aw, ey});
-        fg->PathFillConvex(C::UA(C::Txt(), on ? 1.f : 0.55f));
-        fg->PathLineTo({ex - aw, ey});
-        fg->PathBezierQuadraticCurveTo({ex, ey - ah * 2.f}, {ex + aw, ey});
-        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 1.6f}, {ex - aw, ey});
-        fg->PathStroke(C::UA(C::Dim(), 0.9f), ImDrawFlags_Closed, 2.f);
-        const float pr = ah * 0.95f;
-        fg->AddCircleFilled({ex, ey}, pr, IM_COL32(20, 20, 26, 255), 24);
-        fg->AddCircleFilled({ex - pr * 0.3f, ey - pr * 0.3f}, pr * 0.28f,
-                            IM_COL32(235, 235, 240, 255), 12);
+        fg->PathBezierQuadraticCurveTo({ex, ey + ah * 2.f}, {ex - aw, ey});
+        fg->PathStroke(eyeCol, ImDrawFlags_Closed, 2.5f);
+        fg->AddCircleFilled({ex, ey}, ah * 0.55f, eyeCol, 20);
     }
 
     // ---- Кнопка FakeLag: квадрат с надписью FL ---------------------------
@@ -370,32 +347,11 @@ void DrawWatermark(float dt) {
         fg->AddRect({qX, qY}, {qX + side, qY + side},
                     on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), rad, 0, on ? 3.f : 1.5f);
 
-        // Иконка: крупные буквы FL + три полоски-лаг снизу
         const char* label = "FL";
-        const float fs = 44.f;
+        const float fs = 40.f;
         auto lsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, label);
-        float lx = qX + (side - lsz.x) * 0.5f;
-        float ly = qY + (side - lsz.y) * 0.5f - 10.f;
-        ImU32 txtCol = on ? C::U(C::Acc()) : C::UA(C::Txt(), 0.95f);
-        fg->AddText(fn, fs, {lx, ly}, txtCol, label);
-
-        // три полоски лаг-индикатора под текстом
-        const float barW = 10.f, barGap = 6.f, barY = ly + lsz.y + 8.f;
-        float totalW = barW*3 + barGap*2;
-        float bx0 = qX + (side - totalW) * 0.5f;
-        float h1 = 10.f, h2 = 16.f, h3 = 22.f;
-        // при выключенном FakeLag полоски приглушены, при включённом — яркие
-        ImU32 b1 = C::UA(on ? C::Acc() : C::Dim(), on ? 0.95f : 0.45f);
-        ImU32 b2 = C::UA(on ? C::Acc() : C::Dim(), on ? 0.95f : 0.55f);
-        ImU32 b3 = C::UA(on ? C::Acc() : C::Dim(), on ? 0.95f : 0.65f);
-        // мигание средней полоски когда вкл — лёгкий пульс
-        if (on) {
-            float pulse = 0.75f + 0.25f * sinf((float)ImGui::GetTime() * 5.f);
-            b2 = C::UA(C::Acc(), pulse);
-        }
-        fg->AddRectFilled({bx0, barY + h3 - h1}, {bx0 + barW, barY + h3}, b1, 3.f);
-        fg->AddRectFilled({bx0 + barW + barGap, barY + h3 - h2}, {bx0 + barW*2 + barGap, barY + h3}, b2, 3.f);
-        fg->AddRectFilled({bx0 + (barW + barGap)*2, barY}, {bx0 + (barW + barGap)*2 + barW, barY + h3}, b3, 3.f);
+        const ImU32 txtCol = on ? C::U(C::Acc()) : C::UA(C::Txt(), 0.75f);
+        fg->AddText(fn, fs, {qX + (side - lsz.x) * 0.5f, qY + (side - lsz.y) * 0.5f}, txtCol, label);
     }
 }
 
