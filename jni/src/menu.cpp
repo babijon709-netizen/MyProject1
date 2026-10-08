@@ -15,10 +15,7 @@
 #include "esp_draw.h"
 #include "aim.h"
 #include "logfile.h"                 // AimTouchFracX/Y (строки калибровки)
-#if __has_include("media/icons.h")
-#  include "media/icons.h"
-#  define ICONS_AVAILABLE
-#endif
+#include "media/tab_icons.h"
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
 #include "stb_image/stb_image.h"
@@ -27,16 +24,10 @@
 
 static GLuint g_tabIcons[kTabCount] = {};
 
-static GLuint LoadTexFromMemory(const unsigned char* data, int len, bool gray = false) {
+static GLuint LoadTexFromMemory(const unsigned char* data, int len) {
     int w, h, ch;
     unsigned char* px = stbi_load_from_memory(data, len, &w, &h, &ch, 4);
     if (!px) return 0;
-    if (gray) {
-        for (int i = 0; i < w * h * 4; i += 4) {
-            const int l = (px[i] * 77 + px[i + 1] * 150 + px[i + 2] * 29) >> 8;
-            px[i] = px[i + 1] = px[i + 2] = (unsigned char)l;
-        }
-    }
     GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -50,18 +41,13 @@ static GLuint LoadTexFromMemory(const unsigned char* data, int len, bool gray = 
 }
 
 void LoadTabIcons() {
-#ifdef ICONS_AVAILABLE
-    // Иконки вкладок — чёрно-белые (оттенки серого), цвет задаёт тема.
-    g_tabIcons[0] = LoadTexFromMemory(main_tab_png, (int)main_tab_png_len, true);
-    g_tabIcons[1] = LoadTexFromMemory(aimbot_png,   (int)aimbot_png_len,   true);
-    g_tabIcons[2] = LoadTexFromMemory(visuals_png,  (int)visuals_png_len,  true);
-    // Tab order: 3=Разное, 4=Конфиги, 5=Опции. У «Разное» своя векторная
-    // иконка (рисуется кодом), поэтому текстура ему не нужна — иначе она
-    // дублировала бы иконку «Конфиги» (misc_png).
-    g_tabIcons[3] = 0;
-    g_tabIcons[4] = LoadTexFromMemory(misc_png,     (int)misc_png_len,     true);
-    g_tabIcons[5] = LoadTexFromMemory(settings_png, (int)settings_png_len, true);
-#endif
+    // Lucide, чёрный контур с белой обводкой: цвет зашит в пиксели, тинт не нужен.
+    // Индексы: 1 Аим, 2 ESP, 3 Разное, 4 Конфиги, 5 Опции (0 «Меню» не показывается).
+    g_tabIcons[1] = LoadTexFromMemory(tab_aim_png,  (int)tab_aim_png_len);
+    g_tabIcons[2] = LoadTexFromMemory(tab_esp_png,  (int)tab_esp_png_len);
+    g_tabIcons[3] = LoadTexFromMemory(tab_misc_png, (int)tab_misc_png_len);
+    g_tabIcons[4] = LoadTexFromMemory(tab_cfg_png,  (int)tab_cfg_png_len);
+    g_tabIcons[5] = LoadTexFromMemory(tab_opt_png,  (int)tab_opt_png_len);
 }
 
 static float pill_y   = -1.f;
@@ -2337,23 +2323,11 @@ void RenderMenu() {
             lpos = {cellX + cellW * 0.5f - tsz.x * 0.5f, icoY + icoH + 6.f};
         }
 
-        if (i == 3) {
-            // У «Разное» своя векторная иконка (сетка 2x2), чтобы не
-            // совпадала с иконкой «Конфиги» из общего атласа.
-            float gx0 = icoX, gy0 = icoY;
-            float cell = icoW * 0.44f, gap2 = icoW - cell * 2.f;
-            ImU32 gcol = C::UA(C::Txt(), active ? 1.f : 0.55f);
-            float rr = cell * 0.3f;
-            fdl->AddRectFilled({gx0, gy0}, {gx0 + cell, gy0 + cell}, gcol, rr);
-            fdl->AddRectFilled({gx0 + cell + gap2, gy0}, {gx0 + icoW, gy0 + cell}, gcol, rr);
-            fdl->AddRectFilled({gx0, gy0 + cell + gap2}, {gx0 + cell, gy0 + icoW}, gcol, rr);
-            // Четвёртый квадрат — контурный, чтобы иконка читалась как «прочее».
-            fdl->AddRect({gx0 + cell + gap2, gy0 + cell + gap2}, {gx0 + icoW, gy0 + icoW}, gcol, rr, 0, 2.f);
-        } else if (g_tabIcons[i]) {
+        if (g_tabIcons[i]) {
             ImVec2 iMin = {icoX, icoY};
             ImVec2 iMax = {icoX + icoW, icoY + icoH};
             fdl->AddImageRounded((ImTextureID)(intptr_t)g_tabIcons[i], iMin, iMax,
-                {0,0}, {1,1}, C::UA(C::Txt(), active ? 1.f : 0.65f), 9.f);
+                {0,0}, {1,1}, IM_COL32(255, 255, 255, active ? 255 : 150), 9.f);
         } else {
             // Заглушка: скруглённый квадрат с первой буквой вкладки.
             ImVec2 iMin = {icoX, icoY};
