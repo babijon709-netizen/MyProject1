@@ -160,6 +160,8 @@ void        esp_set_marker_max_distance(float metres);// Markers for the current
 // it reuses the camera/projection state that call established.
 std::vector<EspMarker> esp_get_markers();
 bool esp_marker_frame_transient();
+// Authoritative death bypasses transient-frame marker retention.
+bool esp_marker_confirmed_dead(uint64_t id);
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.
 void        esp_set_aim_bones_enabled(bool enabled);
 // Temporarily classify verified remote body HitBoxes as Head through the live

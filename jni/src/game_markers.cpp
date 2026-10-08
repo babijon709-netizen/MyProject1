@@ -1,4 +1,5 @@
 #include "game.h"
+#include "bot_life.h"
 #include "cfg.h"
 #include "game_internal.h"
 #include "game_offsets_active.h"   // оффсеты (go_active)
@@ -143,6 +144,7 @@ void esp_set_marker_max_distance(float metres) {
 struct MarkerEntity {
     uint64_t identity = 0;
     uint64_t id = 0;            // source component pointer, distinct within NetworkIdentity
+    botlife::State life{};
     uint64_t transform = 0;     // native Transform of the GameObject
     Vec3     position{};
     bool     position_valid = false;
@@ -163,6 +165,18 @@ struct MarkerEntity {
     unsigned char color_rgb[3] = {255, 255, 255};
 };
 static std::vector<MarkerEntity> g_marker_entities;
+
+static bool marker_bot_dead(MarkerEntity& entity) {
+    return entity.kind == ESP_MARKER_BOT && entity.life.refresh(
+        [](uint64_t address, uint8_t& value) { return rd_exact(address, value); });
+}
+
+bool esp_marker_confirmed_dead(uint64_t id) {
+    for (MarkerEntity& entity : g_marker_entities)
+        if (entity.id == id) return marker_bot_dead(entity);
+    return false;
+}
+
 // Список, который собирается порциями прямо сейчас: g_marker_entities
 // подменяется им только когда цикл завершён, чтобы маркеры не мигали.
 static std::vector<MarkerEntity> g_marker_scan_pending;
@@ -1177,6 +1191,8 @@ static MarkerScanResult rebuild_marker_entities() {
         if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)behaviour_count * sizeof(uint64_t)))
             continue;
 
+        uint64_t death_handler = 0;
+        bool death_handler_searched = false;
         // Mirror collects behaviours with GetComponentsInChildren, so one
         // identity can carry a whole rock cluster: every Mineable* component
         // becomes its own marker, positioned by its own GameObject.
@@ -1335,6 +1351,29 @@ static MarkerScanResult rebuild_marker_entities() {
             entity.identity = identity;
             entity.id = component;
             entity.kind = look.kind;
+            if (entity.kind == ESP_MARKER_BOT) {
+                // The death handler is a sibling behaviour, not the Mineable
+                // component used to classify the marker. Never read 0xE8 on it.
+                if (!death_handler_searched) {
+                    death_handler_searched = true;
+                    for (int32_t h = 0; h < behaviour_count; ++h) {
+                        if (valid_obj(behaviours[h]) &&
+                            object_class_name_is(behaviours[h], "NPCHumanoidDeathHandler")) {
+                            death_handler = behaviours[h];
+                            break;
+                        }
+                    }
+                }
+                entity.life.handler = death_handler;
+                for (const MarkerEntity& old : g_marker_entities) {
+                    if (old.id == component && old.identity == identity &&
+                        old.life.handler == death_handler) {
+                        entity.life.dead = old.life.dead;
+                        break;
+                    }
+                }
+                marker_bot_dead(entity);
+            }
             entity.label = look.label;
             if (!look.label) memcpy(entity.text, pickup_text, sizeof(entity.text));
             entity.has_color = look.has_color;
@@ -1698,6 +1737,7 @@ std::vector<EspMarker> esp_get_markers() {
         if (entity.kind == ESP_MARKER_BACKPACK && !g_markers_backpack_enabled) continue;
         if (entity.kind == ESP_MARKER_SLEEPER && !g_markers_sleeper_enabled) continue;
         if (entity.kind == ESP_MARKER_HOUSE && !g_markers_house_enabled) continue;
+        if (marker_bot_dead(entity)) continue;
         // Ore nodes never move, so their position is only read on a rescan.
         // Animals and bots DO move — throttled re-reads, see marker_track_position.
         marker_track_position(entity);
@@ -1827,7 +1867,7 @@ void esp_bot_aim_maintain() {
     if (now >= g_marker_next_scan)
         schedule_next_marker_scan(rebuild_marker_entities(), now);
     for (MarkerEntity& entity : g_marker_entities) {
-        if (entity.kind != ESP_MARKER_BOT) continue;
+        if (entity.kind != ESP_MARKER_BOT || marker_bot_dead(entity)) continue;
         marker_track_position(entity);
     }
 }
@@ -1835,8 +1875,8 @@ void esp_bot_aim_maintain() {
 std::vector<BotAimEnt> esp_bot_aim_list() {
     std::vector<BotAimEnt> out;
     if (!g_bot_aim_enabled) return out;
-    for (const MarkerEntity& entity : g_marker_entities) {
-        if (entity.kind != ESP_MARKER_BOT || !entity.position_valid) continue;
+    for (MarkerEntity& entity : g_marker_entities) {
+        if (entity.kind != ESP_MARKER_BOT || marker_bot_dead(entity) || !entity.position_valid) continue;
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
         float dz = entity.position.z - g_frame_local_pos.z;

@@ -14,6 +14,12 @@ struct Entry {
     double last_seen = 0.0;
 };
 
+template <typename Value, typename Predicate>
+inline void erase_if(std::vector<Entry<Value>>& hold, Predicate removed) {
+    hold.erase(std::remove_if(hold.begin(), hold.end(),
+        [&](const Entry<Value>& entry) { return removed(entry.value); }), hold.end());
+}
+
 template <typename Value>
 inline void update(std::vector<Entry<Value>>& hold,
                    const std::vector<Value>& fresh,

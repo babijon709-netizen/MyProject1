@@ -122,6 +122,12 @@ static const std::vector<EspMarker>& FrameMarkers() {
     timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    espboxhold::erase_if(hold, [](const EspMarker& marker) {
+        return marker.kind == ESP_MARKER_BOT && esp_marker_confirmed_dead(marker.id);
+    });
+    next.erase(std::remove_if(next.begin(), next.end(), [](const EspMarker& marker) {
+        return marker.kind == ESP_MARKER_BOT && esp_marker_confirmed_dead(marker.id);
+    }), next.end());
     espboxhold::update(hold, next, esp_marker_frame_transient(),
                        now, kEspHoldSeconds, out);
     return out;
