@@ -17,6 +17,7 @@
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
 
 #include <errno.h>     // errno при отказе записи (сайлент: ось выстрела)
+#include <cstddef>
 #include <string.h>
 #include <strings.h>   // strncasecmp (weapon prefab label cleanup)
 #include <sys/uio.h>
@@ -6631,6 +6632,92 @@ bool esp_local_player_is_aiming() {
     if (g_pid <= 0 || !g_il2cpp_base) return false;
     if (!read_local_aim_state()) return false;
     return g_aim_state.aiming;
+}
+
+namespace {
+struct AimAssistSensorMemory {
+    uint64_t collider;
+    float start_look_time;
+    float last_seen_time;
+    float last_rect_time;
+    float distance_from_camera;
+    float position[3];
+    float direction[3];
+};
+
+// Release writers clear +0xDC per update and set it only after the in-game
+// RaycastHit collider equals the primary sensor collider. m_Collider itself is
+// a 32-bit instance ID, not a managed Collider pointer.
+struct AimAssistVisibilityMemory {
+    uint64_t primary_target;
+    AimAssistSensorMemory primary_sensor;
+    uint64_t secondary_target;
+    AimAssistSensorMemory secondary_sensor;
+    uint8_t padding_to_visible_flag[0x0C];
+    uint8_t current_visible_flag;
+    uint8_t tail_padding[3];
+};
+
+static_assert(sizeof(AimAssistSensorMemory) == 0x30);
+static_assert(offsetof(AimAssistSensorMemory, collider) == game_offsets::AIM_SENSOR_COLLIDER);
+static_assert(offsetof(AimAssistSensorMemory, last_seen_time) == game_offsets::AIM_SENSOR_LAST_SEEN_TIME);
+static_assert(offsetof(AimAssistSensorMemory, last_rect_time) == game_offsets::AIM_SENSOR_LAST_RECT_TIME);
+static_assert(game_offsets::AIMASSIST_PRIMARY_TARGET + offsetof(AimAssistVisibilityMemory, primary_sensor) ==
+              game_offsets::AIMASSIST_PRIMARY_SENSOR);
+static_assert(game_offsets::AIMASSIST_PRIMARY_TARGET + offsetof(AimAssistVisibilityMemory, secondary_target) ==
+              game_offsets::AIMASSIST_SECONDARY_TARGET);
+static_assert(game_offsets::AIMASSIST_PRIMARY_TARGET + offsetof(AimAssistVisibilityMemory, secondary_sensor) ==
+              game_offsets::AIMASSIST_SECONDARY_SENSOR);
+static_assert(game_offsets::AIMASSIST_PRIMARY_TARGET + offsetof(AimAssistVisibilityMemory, current_visible_flag) ==
+              game_offsets::AIMASSIST_CURRENT_VISIBLE_FLAG);
+static_assert(sizeof(AimAssistVisibilityMemory) == 0x80);
+}
+
+int esp_aim_visibility_snapshot(AimVisibilitySample* out, int capacity) {
+    if (!out || capacity <= 0 || g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return 0;
+    for (int i = 0; i < capacity; ++i) out[i] = {};
+    // The AimAssist layout is verified only against the release dump; stay fail-closed on beta.
+    if (go_active::selected_version != go_active::GameVersion::Release) return 0;
+
+    const uint64_t local = resolve_local_player();
+    if (!valid_obj(local)) return 0;
+    const uint64_t local_handler = rd_ptr(local + PLAYER_EVENT_HANDLER);
+    if (!valid_obj(local_handler) ||
+        rd_ptr(local_handler + EVENT_HANDLER_MANAGER_BACKREF) != local)
+        return 0;
+
+    const uint64_t assist = rd_ptr(local + PLAYER_AIM_ASSIST);
+    if (!valid_obj(assist) || rd_ptr(assist + AIMASSIST_PLAYER_BACKREF) != local) return 0;
+
+    AimAssistVisibilityMemory state{};
+    if (!rd_fresh(assist + AIMASSIST_PRIMARY_TARGET, state)) return 0;
+
+    const bool primary_hit = state.current_visible_flag == 1;
+    const uint64_t targets[2] = {
+        memio::untag(state.primary_target), memio::untag(state.secondary_target)
+    };
+    const AimAssistSensorMemory sensors[2] = {state.primary_sensor, state.secondary_sensor};
+
+    int count = 0;
+    for (int slot = 0; slot < 2 && count < capacity; ++slot) {
+        const uint64_t target = targets[slot];
+        const uint64_t collider = memio::untag(sensors[slot].collider);
+        if (!valid_obj(target) || !valid_obj(collider)) continue;
+
+        const uint64_t entity_handler = rd_ptr(target + AIMTARGET_EVENT_HANDLER);
+        if (!valid_obj(entity_handler)) continue;
+        const uint64_t player = rd_ptr(entity_handler + EVENT_HANDLER_MANAGER_BACKREF);
+        if (!valid_obj(player) || rd_ptr(player + PLAYER_EVENT_HANDLER) != entity_handler) continue;
+
+        AimVisibilitySample& sample = out[count++];
+        sample.player_manager = player;
+        sample.collider = collider;
+        sample.last_seen_time = sensors[slot].last_seen_time;
+        sample.last_rect_time = sensors[slot].last_rect_time;
+        sample.slot = slot;
+        sample.direct_raycast_hit = slot == 0 && primary_hit;
+    }
+    return count;
 }
 
 int esp_local_aim_source() {

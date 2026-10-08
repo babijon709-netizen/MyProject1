@@ -90,7 +90,7 @@ float TabContent(int tab, float dt, float cW) {
     if (tab == 1) {
 
         cfg::aim::enabled    = g_state.aim_touch;
-        cfg::aim::vis_check  = g_state.aim_pos;
+        cfg::aim::vis_check  = g_state.aim_vis_check;
         cfg::aim::draw_fov   = g_state.aim_special;
         cfg::aim::scope_only = g_state.aim_scope_only;
         cfg::aim::fov        = g_state.gun_fov;
@@ -99,12 +99,13 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
         SHdr(XS("Аим"));
-        CardBg(Layout::RowH * 3);
+        CardBg(Layout::RowH * 4);
         const bool aimWasOn = g_state.aim_touch;
         ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
         if (aimWasOn != g_state.aim_touch)
             LogLine("аим: %s (режим %d)", g_state.aim_touch ? "включён" : "выключен", g_state.aim_mode);
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
+        ToggleRow("##ta7", XS("Проверка видимости"), &g_state.aim_vis_check, g_state.a_aim_vis_check, false);
         ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true, false, &cfg::aim::fov_col);
 
         // ---- Режим: чем именно аим крутит прицел ---------------------------
@@ -1806,6 +1807,7 @@ void RenderMenu() {
     Tick(g_themeT, g_darkTheme, dt, 6.f);
     Tick(g_state.a_aim_touch,  g_state.aim_touch,          dt);
     Tick(g_state.a_aim_pos,    g_state.aim_pos,            dt);
+    Tick(g_state.a_aim_vis_check, g_state.aim_vis_check,    dt);
     Tick(g_state.a_aim_head,   g_state.aim_bone == 0,      dt);
     Tick(g_state.a_aim_chest,  g_state.aim_bone == 1,      dt);
     Tick(g_state.a_aim_pelvis, g_state.aim_bone == 2,      dt);

@@ -140,6 +140,7 @@ static const LangPair kUiEn[] = {
     {"Приложение будет закрыто.", "The app will close."},
     {"Применено", "Applied"},
     {"Проверить снова", "Check again"},
+    {"Проверка видимости", "Visibility check"},
     {"Проверка из терминала: xvcen --check-driver", "Terminal check: xvcen --check-driver"},
     {"Противники", "Enemies"},
     {"Прошлый запуск: %s", "Last launch: %s"},

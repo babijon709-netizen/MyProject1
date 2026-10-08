@@ -211,6 +211,17 @@ inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 //   FPManager.<LtX>k__BackingField (0xA8) == aim blend 0..1 (secondary hint)
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
+inline constexpr std::uint64_t PLAYER_AIM_ASSIST              = 0x258; // PlayerManager aim-assist backing field in release dump
+inline constexpr std::uint64_t AIMASSIST_PLAYER_BACKREF       = 0x10;
+inline constexpr std::uint64_t AIMASSIST_PRIMARY_TARGET       = 0x60;
+inline constexpr std::uint64_t AIMASSIST_PRIMARY_SENSOR       = 0x68;
+inline constexpr std::uint64_t AIMASSIST_SECONDARY_TARGET     = 0x98;
+inline constexpr std::uint64_t AIMASSIST_SECONDARY_SENSOR     = 0xA0;
+inline constexpr std::uint64_t AIMASSIST_CURRENT_VISIBLE_FLAG = 0xDC;
+inline constexpr std::uint64_t AIMTARGET_EVENT_HANDLER        = 0x20;
+inline constexpr std::uint64_t AIM_SENSOR_COLLIDER            = 0x00;
+inline constexpr std::uint64_t AIM_SENSOR_LAST_SEEN_TIME       = 0x0C;
+inline constexpr std::uint64_t AIM_SENSOR_LAST_RECT_TIME       = 0x10;
 inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x298;  // было 0x290; класс переименован Gum->WxG (поля теперь с читаемыми именами: Run 0x280, Crouch 0x288, Jump 0x290, Aim 0x298 — вставка +0x8 перед Run)
 // Remote-player held-weapon candidates (dump.cs Oxide.PlayerManager). The FP
 // manager (0x90) is a local MonoBehaviour and is often empty for other players,

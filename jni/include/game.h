@@ -408,6 +408,18 @@ bool        esp_read_look_sensitivity(float& out);
 // персонаж пошёл на самом деле. false = поза в этом кадре не прочитана.
 bool        esp_local_eye_position(float& x, float& y, float& z);
 
+struct AimVisibilitySample {
+    uint64_t player_manager = 0;
+    uint64_t collider = 0;
+    float last_seen_time = 0.f;
+    float last_rect_time = 0.f;
+    int slot = -1;
+    bool direct_raycast_hit = false; // primary AimAssist's exact-collider raycast flag
+};
+// Snapshot of the game's two tracked AimAssist sensors. These are engine-owned
+// raycast results, not an arbitrary-target query; an untracked target is unknown.
+int         esp_aim_visibility_snapshot(AimVisibilitySample* out, int capacity);
+
 // ---- Мемори-аим: прицел ведётся записью в память игры ----------------------
 //
 // Тач-аим крутит камеру синтетическим пальцем (uinput). Мемори-аим пишет прямо

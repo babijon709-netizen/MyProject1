@@ -14,6 +14,8 @@
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
+#include "vischeck.hpp"
+#include "aim_visibility.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -62,6 +64,71 @@ struct AimTarget {
     int   death_flag = -1;          // собственный флаг смерти игры
     float skel_up = -1.f, skel_flat = -1.f;
 };
+
+struct AimVisibilityCamera {
+    manes::Vec3 origin{};
+    manes::Vec3 right{};
+    manes::Vec3 up{};
+    manes::Vec3 forward{};
+    float fov_rad = 0.f;
+    bool valid = false;
+};
+
+static bool AimBuildVisibilityCamera(float fov_degrees, AimVisibilityCamera& out) {
+    out = {};
+    float ox = 0.f, oy = 0.f, oz = 0.f;
+    float yaw_degrees = 0.f, pitch_degrees = 0.f;
+    if (!esp_local_eye_position(ox, oy, oz) ||
+        !esp_camera_angles(yaw_degrees, pitch_degrees) ||
+        !std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz) ||
+        !std::isfinite(yaw_degrees) || !std::isfinite(pitch_degrees) ||
+        !std::isfinite(fov_degrees) || fov_degrees <= 1.f || fov_degrees >= 179.f)
+        return false;
+
+    const float deg_to_rad = manes::kPi / 180.f;
+    const float yaw = yaw_degrees * deg_to_rad;
+    const float pitch = pitch_degrees * deg_to_rad;
+    const float sy = std::sin(yaw), cy = std::cos(yaw);
+    const float sp = std::sin(pitch), cp = std::cos(pitch);
+
+    out.origin = {ox, oy, oz};
+    out.right = {cy, 0.f, -sy};
+    out.up = {-sy * sp, cp, -cy * sp};
+    out.forward = {sy * cp, sp, cy * cp};
+    out.fov_rad = fov_degrees * deg_to_rad;
+    out.valid = true;
+    return true;
+}
+
+static bool AimTargetPassesProjectionFilter(const AimTarget& target,
+                                            const AimVisibilityCamera& camera,
+                                            float screen_width, float screen_height) {
+    if (!camera.valid || !target.world_valid ||
+        target.sx < 0.f || target.sx > screen_width ||
+        target.sy < 0.f || target.sy > screen_height)
+        return false;
+
+    const float dx = target.world[0] - camera.origin.x;
+    const float dy = target.world[1] - camera.origin.y;
+    const float dz = target.world[2] - camera.origin.z;
+    const manes::Vec3 camera_space{
+        dx * camera.right.x + dy * camera.right.y + dz * camera.right.z,
+        dx * camera.up.x + dy * camera.up.y + dz * camera.up.z,
+        dx * camera.forward.x + dy * camera.forward.y + dz * camera.forward.z
+    };
+    manes::Vec2 projected{};
+    return manes::is_visible(camera_space, projected, camera.fov_rad, screen_width, 1.f);
+}
+
+static manes::aim_visibility::SensorFreshness s_aim_sensor_freshness[2]{};
+
+static bool AimSensorPassesVisibleCheck(const AimVisibilitySample& sample, double now) {
+    if (sample.slot == 0) return sample.direct_raycast_hit;
+    if (sample.slot != 1) return false;
+    return manes::aim_visibility::sensor_sample_is_current(
+        s_aim_sensor_freshness[sample.slot], sample.player_manager, sample.collider,
+        sample.last_seen_time, sample.last_rect_time, now);
+}
 
 static void AimReleaseFinger(bool& fingerDown) {
     if (fingerDown) {
@@ -282,6 +349,7 @@ static unsigned long s_bones_not_projected = 0; // скелет есть, кос
 static unsigned long s_ally_skipped = 0;        // союзников не берём никогда
 static unsigned long s_offscreen_skipped = 0;   // есть кости, но точка вне экрана
 static unsigned long s_out_of_fov = 0;          // точка дальше круга обзора
+static unsigned long s_visibility_skipped = 0;
 // Сколько всего игроков приходило на выбор цели за период (для лога): без
 // этой цифры «пропущено N» невозможно прочитать — непонятно, много это или
 // все, кого видно.
@@ -373,7 +441,7 @@ static bool aim_camera_flow(float& yawDeg, float& pitchDeg) {
 // why — причина, по которой цель НЕ выбрана (0 когда цель есть). Коды:
 //   1 боксов нет вовсе      2 все союзники      3 все мёртвые
 //   4 нет скелета           5 кости не легли на экран
-//   6 точка вне экрана      7 точка дальше круга обзора
+//   6 точка вне экрана      7 точка дальше круга обзора  8 проверка видимости
 // Без этого кода кадр «аим активен, прицел есть, записей ноль» нечем
 // прочесть: в логе 17:06 таких было 32 из 92, и что именно не пустило
 // цель — отфильтровали трупа, круг обзора или пустой список — не видно.
@@ -383,6 +451,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     const unsigned long was_ally = s_ally_skipped, was_dead = s_dead_skipped;
     const unsigned long was_nosk = s_no_skeleton,  was_noproj = s_bones_not_projected;
     const unsigned long was_off  = s_offscreen_skipped, was_fov = s_out_of_fov;
+    const unsigned long was_visibility = s_visibility_skipped;
     const unsigned long was_seen = s_seen_boxes;
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
 
@@ -397,17 +466,17 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         const double now = (double)clock() / CLOCKS_PER_SEC;
         const unsigned long total = s_no_skeleton + s_bones_not_projected + s_dead_skipped +
                                     s_ally_skipped + s_offscreen_skipped + s_out_of_fov +
-                                    s_bot_noesp_skipped;
+                                    s_visibility_skipped + s_bot_noesp_skipped;
         if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
             s_at = now;
-            LogLine("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
+            LogLine("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu, проверка видимости %lu",
                     s_seen_boxes, s_seen_bots, s_bot_noesp_skipped, s_ally_skipped, s_dead_skipped,
                     s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
-                    s_offscreen_skipped, s_out_of_fov);
+                    s_offscreen_skipped, s_out_of_fov, s_visibility_skipped);
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;
-            s_offscreen_skipped = 0; s_out_of_fov = 0;
+            s_offscreen_skipped = 0; s_out_of_fov = 0; s_visibility_skipped = 0;
         }
     }
 
@@ -417,6 +486,27 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     if (!(camFov > 1.f && camFov < 179.f)) camFov = 60.f;
     // degrees per pixel at the screen centre (vertical axis)
     degPerPx = camFov / sh;
+    AimVisibilityCamera visibilityCamera{};
+    const bool haveVisibilityCamera = !g_state.aim_vis_check ||
+        AimBuildVisibilityCamera(camFov, visibilityCamera);
+    AimVisibilitySample visibilitySamples[2]{};
+    bool visibilitySamplePass[2]{};
+    int visibilitySampleCount = 0;
+    if (g_state.aim_vis_check) {
+        visibilitySampleCount = esp_aim_visibility_snapshot(visibilitySamples, 2);
+        const double visibilityNow = MonoNow();
+        bool presentSlots[2]{};
+        for (int i = 0; i < visibilitySampleCount; ++i) {
+            const int slot = visibilitySamples[i].slot;
+            if (slot >= 0 && slot < 2) presentSlots[slot] = true;
+            visibilitySamplePass[i] = AimSensorPassesVisibleCheck(visibilitySamples[i], visibilityNow);
+        }
+        for (int slot = 0; slot < 2; ++slot)
+            if (!presentSlots[slot]) s_aim_sensor_freshness[slot] = {};
+    } else {
+        s_aim_sensor_freshness[0] = {};
+        s_aim_sensor_freshness[1] = {};
+    }
 
     // Поток камеры этого такта: считаем по всем боксам ДО фильтров цели —
     // камера крутит и союзников, и трупы, и для оценки поворота они годятся.
@@ -504,6 +594,21 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             t.valid = true;
         }
         if (!t.valid) continue;
+        if (g_state.aim_vis_check) {
+            bool hasEngineLos = false;
+            for (int i = 0; i < visibilitySampleCount; ++i) {
+                if (visibilitySamplePass[i] && visibilitySamples[i].player_manager == b.id) {
+                    hasEngineLos = true;
+                    break;
+                }
+            }
+            if (!haveVisibilityCamera ||
+                !AimTargetPassesProjectionFilter(t, visibilityCamera, sw, sh) ||
+                !hasEngineLos) {
+                ++s_visibility_skipped;
+                continue;
+            }
+        }
         t.id = b.id;
         t.health = b.health; t.respawning = b.respawning;
         t.skel_bones = b.skel_bones; t.skel_up = b.skel_up; t.skel_flat = b.skel_flat;
@@ -557,12 +662,12 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                 s_seen_boxes - was_seen, s_ally_skipped - was_ally,
                 s_dead_skipped - was_dead, s_no_skeleton - was_nosk,
                 s_bones_not_projected - was_noproj, s_offscreen_skipped - was_off,
-                s_out_of_fov - was_fov
+                s_out_of_fov - was_fov, s_visibility_skipped - was_visibility
             };
             // «Боксов нет» — только когда на выбор не пришёл НИ ОДИН игрок;
             // иначе причина та, которой отсеяно больше всего.
             int code = 1; unsigned long top = 0;
-            for (int i = 1; i < 7; ++i) if (d[i] > top) { top = d[i]; code = i + 1; }
+            for (int i = 1; i < 8; ++i) if (d[i] > top) { top = d[i]; code = i + 1; }
             if (d[0] > 0 && top == 0) code = 1;
             if (d[0] == 0) code = 1;
             *why = code;

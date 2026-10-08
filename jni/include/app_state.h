@@ -16,7 +16,7 @@ struct AppState {
     struct RadioAnim  { float scale = 1.f, scaleVel = 0.f, ring = 0.f, ringVel = 0.f; };
 
     int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
-    bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
+    bool  aim_touch = false, aim_pos = false, aim_vis_check = false, aim_special = false, aim_scope_only = false;
     int   aim_bone = 1;   // 0 голова, 1 шея, 2 тело (как слоты аима)
     // Чем именно аим крутит прицел: 0 тач (синтетический палец), 1 память
     // (запись ввода взгляда в игру), 2 сайлент (запись оси выстрела).
@@ -104,7 +104,7 @@ struct AppState {
     bool  ui_panel_left = true;
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
-    float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
+    float a_aim_touch = 0, a_aim_pos = 0, a_aim_vis_check = 0, a_aim_spec = 0, a_aim_scope = 0;
     float a_aim_mode0 = 1, a_aim_mode1 = 0, a_aim_mode2 = 0;
     RadioAnim ra_aim_mode0, ra_aim_mode1, ra_aim_mode2;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
