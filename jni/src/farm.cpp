@@ -1,4 +1,5 @@
 #include "farm.h"
+#include "farm_depletion.h"
 #include "cfg.h"
 #include "main.h"
 #include "game.h"
@@ -378,22 +379,20 @@ static void UpdateFarmInner(float dt) {
         if (hadNode) { releaseAll(); s_settle = kSettleTime; }
     }
 
-    // Уже добытый узел уходит в чёрный список на месте, а не обходится кругами:
-    // подборщик вернулся бы к нему, только когда в радиусе ничего нет, а танцы
-    // вокруг пустого пня никому не нужны. С дебаунсом: fraction — сырое чтение,
-    // и один мусорный кадр (значение посреди апдейта, сбой чтения) раньше
-    // бросал наполовину срубленное дерево — считается только устойчивое «пусто».
-    if (tgt.fraction >= 0.f && tgt.fraction < kDepletedFrac) {
-        if (++s_depletedFrames >= kDepletedFrames) {
-            esp_farm_blacklist(tgt.id, 120.f);
-            releaseAll();
-            resetNode();
-            s_settle = kSettleTime;
-            g_farmPhase = 0;
-            return;
-        }
-    } else {
-        s_depletedFrames = 0;
+    // Здоровье — терминальный сигнал: на этом же пороге уже запрещается новый
+    // замах. fractionRemaining остаётся дебаунсным запасным путём, поскольку его
+    // чтение может кратко пересечь порог во время обновления объекта.
+    const bool nodeDying = farm_depletion::health_terminal(tgt.node_health,
+                                                           tgt.node_health_max);
+    const bool fractionDepleted = farm_depletion::fraction_confirmed(
+        tgt.fraction, s_depletedFrames, kDepletedFrac, kDepletedFrames);
+    if (nodeDying || fractionDepleted) {
+        esp_farm_blacklist(tgt.id, 120.f);
+        releaseAll();
+        resetNode();
+        s_settle = kSettleTime;
+        g_farmPhase = 0;
+        return;
     }
 
     // Пауза между целями: пальцы подняты, камера стоит, следующая цель
@@ -739,15 +738,6 @@ static void UpdateFarmInner(float dt) {
             tapDownMs = fminf(fmaxf(periodMs * 0.10f, 40.f), 120.f);
             tapUpMs   = fmaxf(periodMs - tapDownMs, 60.f);
         }
-        // Узел при смерти: новый замах не начинаем. Последний удар мог уже
-        // убить узел — его GameObject вот-вот освободится, и пин крестика
-        // (экстеншен/маркер) начнёт указывать на чужую память (аллокатор
-        // отдаёт адреса тут же, вплоть до объектов постройки). Дебаунс
-        // остатка (kDepletedFrames) сменит цель сам; наша задача — не
-        // отправить замах в мёртвый адрес.
-        const bool nodeDying =
-            (tgt.node_health >= 0.f && tgt.node_health_max > 0.f &&
-             tgt.node_health <= 0.02f * tgt.node_health_max);
         // Можно ли бить по лучу игры:
         //   ray_self — можно: игра сама подтверждает, что линия удара стоит
         //     в САМОМ узле (поддерево трансформов / коллайдер крестика);
@@ -767,7 +757,7 @@ static void UpdateFarmInner(float dt) {
         const bool swingByRay = tgt.ray_self || blindSwing;
         const bool swingBlocked = !swingByRay || tgt.ray_blocked;
         s_tapTimer -= (int)roundf(dt * 1000.f);
-        if (s_tapTimer <= 0 && (!aimSettled || swingBlocked || nodeDying) && !s_tapDown) {
+        if (s_tapTimer <= 0 && (!aimSettled || swingBlocked) && !s_tapDown) {
             s_tapTimer = 0;              // ждём камеру/обход/узел, не теряя такт
         } else if (s_tapTimer <= 0) {
             if (!s_tapDown) {
