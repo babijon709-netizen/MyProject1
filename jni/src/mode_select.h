@@ -53,12 +53,8 @@ static std::string ModePath() {
     return std::string(CfgDir()) + XS(".mode");
 }
 
-static void RememberMode(Mode m) {
-    mkdir(CfgDir(), 0777);
-    std::ofstream f(ModePath(), std::ios::trunc);
-    if (f) f << (m == MODE_KERNEL ? "kernel" : m == MODE_RT_DEV ? "rt-dev"
-                       : m == MODE_RT_HOOK ? "rt-hook" : "external");
-}
+// No .mode sidecar: the transport choice is per-launch only.
+static void RememberMode(Mode) {}
 
 // Между версиями «rt» на короткое время означал только RT-Dev. Экран выбора
 // показывается всегда, но мигрируем запись сразу, чтобы CLI dump прочитал

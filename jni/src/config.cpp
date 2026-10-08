@@ -28,7 +28,7 @@ static constexpr uint8_t kXorKey   = 0xA7;
 
 
 static const char* kCfgDir_() noexcept {
-    static constexpr auto _s = xp::_mk("/storage/emulated/0/benzware/");
+    static constexpr auto _s = xp::_mk("/data/local/benzware/");
     return _s.d();
 }
 #define kCfgDir (kCfgDir_())
@@ -48,16 +48,10 @@ static std::string CfgLastPath() {
     return std::string(kCfgDir) + XS(".last");
 }
 
-static void RememberLastConfigName(const char* name) {
-    if (!name || !name[0]) return;
-    mkdir(kCfgDir, 0777);
-    std::ofstream f(CfgLastPath(), std::ios::trunc);
-    if (f) f << name;
-}
+// Only the config file itself is written to the config dir; no .last sidecar.
+// ConfigLoadLast() falls back to the most recently modified config.
+static void RememberLastConfigName(const char*) {}
 
-static void ForgetLastConfigName() {
-    remove(CfgLastPath().c_str());
-}
 
 // Язык интерфейса лежит рядом с конфигами отдельным файлом (.lang): выбор
 // нужен и без конфига, иначе он терялся бы при каждом запуске. Конфиг тоже
@@ -66,11 +60,8 @@ static std::string CfgLangPath() {
     return std::string(kCfgDir) + ".lang";
 }
 
-void RememberLang() {
-    mkdir(kCfgDir, 0777);
-    std::ofstream f(CfgLangPath(), std::ios::trunc);
-    if (f) f << (lang::english() ? "en" : "ru");
-}
+// Language is stored in the config blob (ui_lang_en); no .lang sidecar.
+void RememberLang() {}
 
 void RestoreLang() {
     std::ifstream f(CfgLangPath());
@@ -87,12 +78,8 @@ static std::string CfgAccentPath() {
     return std::string(kCfgDir) + ".accent";
 }
 
-void RememberAccent() {
-    mkdir(kCfgDir, 0777);
-    std::ofstream f(CfgAccentPath(), std::ios::trunc);
-    if (f) f << g_state.ui_accent_idx << ' ' << g_state.ui_accent_rgb.x << ' '
-             << g_state.ui_accent_rgb.y << ' ' << g_state.ui_accent_rgb.z;
-}
+// No .accent sidecar: accent is not persisted outside the config file.
+void RememberAccent() {}
 
 void RestoreAccent() {
     std::ifstream f(CfgAccentPath());
@@ -121,24 +108,8 @@ static std::string CfgLayoutPath() {
     return std::string(kCfgDir) + ".layout";
 }
 
-void RememberLayout() {
-    mkdir(kCfgDir, 0777);
-    std::ofstream f(CfgLayoutPath(), std::ios::trunc);
-    if (!f) return;
-    char b[420];
-    snprintf(b, sizeof(b), "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f",
-             g_state.farm_joy_x, g_state.farm_joy_y,
-             g_state.farm_fire_x, g_state.farm_fire_y,
-             g_state.freecam_joy_x, g_state.freecam_joy_y,
-             g_state.hud_cnt_x, g_state.hud_cnt_y,
-             g_state.freecam_btn_x, g_state.freecam_btn_y,
-             g_state.aim_tx, g_state.aim_ty,
-             g_state.freecam_look_x, g_state.freecam_look_y,
-             g_state.freecam_look_radius,
-             g_state.freecam_joy_size,
-             g_state.fakelag_btn_x, g_state.fakelag_btn_y);
-    f << b;
-}
+// No .layout sidecar: button/touch layout is not persisted outside the config.
+void RememberLayout() {}
 
 void RestoreLayout() {
     std::ifstream f(CfgLayoutPath());
