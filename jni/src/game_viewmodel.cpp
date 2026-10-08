@@ -11,6 +11,7 @@
 #include "maps_lookup.h"
 #include <chrono>
 #include <cerrno>
+#include <cmath>
 #include <limits>
 #include <cstdio>
 #include <fcntl.h>
@@ -719,50 +720,103 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             loot_burst_count = 0;
         }
 
-        // «Не работает»: когда модуль резолвнут, но попаданий нет — раз в 10 с
-        // краткая сводка того, КАЖДАЯ точка обхода что нашла. Без аномалий
-        // лог не растёт вообще.
+        // «Не работает»: раз в 10 с окно-дельты счётчиков. Фон игры — сотни
+        // чужих DelayPromise на 1.00/2.00/9.70/10.00 с каждые 10 с (видно в
+        // benzware.log) — сам по себе аномалией НЕ является: первые 10 с
+        // активности фиксируют базовую линию около-луковых длительностей, и
+        // дальше репортируются только: структурные обрывы, отказы записи или
+        // elapsed, исчезновение «своих» классов из лупа и НОВЫЕ значения
+        // около-луковой каденции (главный признак переехавшего 0.35).
+        static fast_loot::Clock::time_point loot_active_since{};
+        static float loot_base_spans[4] = {};
+        static bool  loot_baseline = false;
+        if (loot_speed.state() != fast_loot::State::Active) {
+            loot_active_since = {};
+            loot_baseline = false;
+        }
         if (settings.fast_loot && loot_speed.state() == fast_loot::State::Active &&
             !loot_burst_open && loot_now - loot_last_report >= std::chrono::seconds(10)) {
+            loot_last_report = loot_now;
             const fast_loot::Diag& d = loot_speed.diag();
-            const bool loop_empty = d.items_seen == loot_prev_diag.items_seen;
-            const bool anomaly = d.abort_mask != 0 || d.cadence_misses > 0 ||
-                                 d.write_fails > 0 || d.elapsed_rejects > 0 ||
-                                 (d.items_seen > 0 && d.klass_hits == 0) || loop_empty;
-            if (anomaly) {
-                loot_last_report = loot_now;
-                char spans[80] = {};
-                for (int i = 0; i < 4 && d.seen_timespan_hits[i] > 0; ++i) {
-                    const size_t l = strlen(spans);
-                    snprintf(spans + l, sizeof(spans) - l, "%s%.2fx%d",
-                             i ? ", " : "", (double)d.seen_timespans[i], d.seen_timespan_hits[i]);
+            if (!loot_baseline) {
+                if (!loot_active_since.time_since_epoch().count())
+                    loot_active_since = loot_now;
+                else if (loot_now - loot_active_since >= std::chrono::seconds(10)) {
+                    loot_baseline = true;
+                    for (int i = 0; i < 4; ++i) loot_base_spans[i] = d.seen_timespans[i];
                 }
-                char others[100] = {};
-                bool others_ok = false;
-                if (d.klass_hits == 0) {
-                    for (int i = 0; i < 3 && d.other_klass[i]; ++i) {
-                        char nm[28]; fast_loot_klass_name(d.other_klass[i], nm, sizeof(nm));
-                        const size_t l = strlen(others);
-                        snprintf(others + l, sizeof(others) - l, "%s%s", i ? ", " : "", nm);
-                        others_ok = true;
+            }
+            if (loot_baseline) {
+                int new_spans = 0;
+                char spans[96] = {};
+                for (int i = 0; i < 4 && d.seen_timespan_hits[i] > 0; ++i) {
+                    bool known = false;
+                    for (int b = 0; b < 4; ++b)
+                        if (loot_base_spans[b] != 0.f &&
+                            fabsf(loot_base_spans[b] - d.seen_timespans[i]) < 0.0001f) { known = true; break; }
+                    if (!known) {
+                        ++new_spans;
+                        const size_t l = strlen(spans);
+                        snprintf(spans + l, sizeof(spans) - l, "%s%.2fx%d",
+                                 spans[0] ? ", " : "", (double)d.seen_timespans[i],
+                                 d.seen_timespan_hits[i]);
                     }
                 }
-                LogLine("fast loot: нет попаданий 10с — проходов +%d, элементов +%d, класс-хитов +%d; "
-                        "обрывы=0x%x (1 runners,2 длина,4 массив,8 шапка,16 capacity,32 элементы), "
-                        "класс-не-читается +%d, каденция-другая %d (%s), elapsed-отказ +%d, "
-                        "запись-отказ %d, статика-потеряна %d%s%s%s",
-                        d.sweeps - loot_prev_diag.sweeps,
-                        d.items_seen - loot_prev_diag.items_seen,
-                        d.klass_hits - loot_prev_diag.klass_hits,
-                        d.abort_mask,
-                        d.klass_read_fails - loot_prev_diag.klass_read_fails,
-                        d.cadence_misses, spans[0] ? spans : "-",
-                        d.elapsed_rejects - loot_prev_diag.elapsed_rejects,
-                        d.write_fails, d.static_lost,
-                        others_ok ? ", в лупе вижу: " : "", others_ok ? others : "",
-                        loop_empty ? ", луп пуст (нет активных промисов)" : "");
-                loot_prev_diag = d;
+                const int d_sweeps  = d.sweeps - loot_prev_diag.sweeps;
+                const int d_items   = d.items_seen - loot_prev_diag.items_seen;
+                const int d_hits    = d.klass_hits - loot_prev_diag.klass_hits;
+                const int d_aborts  = d.aborts - loot_prev_diag.aborts;
+                const int d_elapsed = d.elapsed_rejects - loot_prev_diag.elapsed_rejects;
+                const int d_writes  = d.write_fails - loot_prev_diag.write_fails;
+                // Около-луковое окно задевает и фон (1.00 с — см. комментарий
+                // near_cadence): из дельты near-промахов вычитаем дельты
+                // слотов базовой линии — остаток это near-значения, которые
+                // пришли после базовой линии и не влезли в 4 слота.
+                int d_near = d.cadence_near - loot_prev_diag.cadence_near;
+                for (int i = 0; i < 4; ++i) {
+                    if (d.seen_timespan_hits[i] <= 0) continue;
+                    bool known = false;
+                    for (int b = 0; b < 4; ++b)
+                        if (loot_base_spans[b] != 0.f &&
+                            fabsf(loot_base_spans[b] - d.seen_timespans[i]) < 0.0001f) { known = true; break; }
+                    if (known) {
+                        const int dh = d.seen_timespan_hits[i] - loot_prev_diag.seen_timespan_hits[i];
+                        d_near -= dh > 0 ? dh : 0;
+                    }
+                }
+                const bool klass_gone = d_items > 0 && d_hits == 0;
+                const bool anomaly = d_aborts > 0 || new_spans > 0 || d_elapsed > 0 ||
+                                     d_writes > 0 || klass_gone || d_near > 0;
+                if (anomaly) {
+                    char others[100] = {};
+                    bool others_ok = false;
+                    if (klass_gone) {
+                        for (int i = 0; i < 3 && d.other_klass[i]; ++i) {
+                            char nm[28]; fast_loot_klass_name(d.other_klass[i], nm, sizeof(nm));
+                            const size_t l = strlen(others);
+                            snprintf(others + l, sizeof(others) - l, "%s%s", i ? ", " : "", nm);
+                            others_ok = true;
+                        }
+                    }
+                    char near_extra[96] = {};
+                    if (d_near > 0 && !new_spans)
+                        snprintf(near_extra, sizeof(near_extra),
+                                 ", около-луковых промахов вне базовой линии +%d (значения в слоты не влезли)",
+                                 d_near);
+                    LogLine("fast loot: аномалия на окне 10с — проходов +%d, элементов +%d, класс-хитов +%d; "
+                            "обрывы +%d (маска 0x%x: 1 runners,2 длина,4 массив,8 шапка,16 capacity,32 элементы), "
+                            "elapsed-отказ +%d, запись-отказ +%d%s%s%s%s%s",
+                            d_sweeps, d_items, d_hits,
+                            d_aborts, d.abort_mask,
+                            d_elapsed, d_writes,
+                            new_spans ? ", новая каденция рядом с лутовой: " : "",
+                            new_spans ? spans : "",
+                            near_extra,
+                            others_ok ? ", класс промисов пропал; в лупе вижу: " : "",
+                            others_ok ? others : "");
+                }
             }
+            loot_prev_diag = d;
         }
         if (!settings.fast_loot) loot_announced = false;
     }

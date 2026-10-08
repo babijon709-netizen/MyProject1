@@ -72,10 +72,12 @@ struct Diag {
     int  items_seen = 0;              // элементов раннеров просмотрено
     int  klass_read_fails = 0;        // класс элемента не прочитался
     int  klass_hits = 0;              // элемент — DelayPromise/IgnoreTimeScalePromise
-    int  cadence_misses = 0;          // класс тот, timespan != 0.35f
+    int  cadence_misses = 0;          // класс тот, timespan != 0.35f (всего)
+    int  cadence_near = 0;            // из них около-луковые (0.05, 1.6]с — см. zero_if_cadence
+    int  aborts = 0;                  // обрывов прохода суммарно (для оконной дельты)
     int  elapsed_rejects = 0;         // отброшено проверкой elapsed
     int  write_fails = 0;             // write_heap отказал (ворота логируют сами)
-    float seen_timespans[4] = {};     // до 4 разных значений timespan у «своих» классов
+    float seen_timespans[4] = {};     // до 4 разных около-луковых timespan у «своих» классов
     int   seen_timespan_hits[4] = {};
     std::uint64_t other_klass[3] = {}; // первые 3 класса элементов НЕ из списка промисов
 };
@@ -170,6 +172,14 @@ private:
         state_ = State::Active;
     }
 
+    // Около-луковое окно каденции. Фон игры (виден в benzware.log: промисы
+    // ровно на 1.00/2.00/9.70/10.00 с тикают постоянно, сотнями за 10 с) —
+    // это посторонние DelayPromise: лечиться как «лутовая пауза» они не
+    // могут и только замусоривают слоты и репорты. Лутовая пауза живёт
+    // ниже секунды; если в новой сборке её изменят, искать надо значение,
+    // которое ПОЯВИЛОСЬ в этом окне позже базовой линии.
+    static bool near_cadence(float v) { return v > 0.05f && v <= 1.60f; }
+
     // Запоминает значение timespan «своего» класса, отличное от каденции:
     // главный признак, что в этом билде пауза «Забрать все» другая.
     void note_timespan(float value) {
@@ -196,9 +206,9 @@ private:
     int zero_if_cadence(uint64_t item, uint64_t timespan_off) {
         float timespan = 0.f, elapsed = 0.f;
         if (!io_.read(item + timespan_off, timespan) || timespan != kCadence) {
-            if (viewmodel::finite(timespan) && timespan > 0.001f && timespan <= 10.f) {
+            if (viewmodel::finite(timespan) && timespan > 0.001f && timespan <= 30.f) {
                 ++diag_.cadence_misses;
-                note_timespan(timespan);
+                if (near_cadence(timespan)) { ++diag_.cadence_near; note_timespan(timespan); }
             }
             return 0;
         }
@@ -229,12 +239,14 @@ private:
             runners < 0x10000) {
             helper_static_ = 0; // статика переехала (перезапуск сцены) — резолв заново
             ++diag_.static_lost;
+            ++diag_.aborts;
             diag_.abort_mask |= 1;
             return 0;
         }
         int32_t runner_count = 0;
         if (!io_.read(runners + go_active::IL2CPP_ARRAY_LENGTH, runner_count) ||
             runner_count <= 0 || runner_count > kMaxRunners) {
+            ++diag_.aborts;
             diag_.abort_mask |= 2;
             return 0;
         }
@@ -242,6 +254,7 @@ private:
         std::uint64_t runner_ptrs[kMaxRunners] = {};
         if (!io_.read_range(runners + go_active::IL2CPP_ARRAY_FIRST_ELEMENT,
                             runner_ptrs, (std::size_t)runner_count * sizeof(std::uint64_t))) {
+            ++diag_.aborts;
             diag_.abort_mask |= 4;
             return 0;
         }
@@ -254,6 +267,7 @@ private:
             if (runner < 0x10000) continue;
             RunnerHead head{};
             if (!io_.read(runner + go_active::LOOPRUNNER_TAIL, head)) {
+                ++diag_.aborts;
                 diag_.abort_mask |= 8; continue;
             }
             if (head.tail <= 0) continue;
@@ -261,6 +275,7 @@ private:
             if (items < 0x10000) continue;
             int32_t capacity = 0;
             if (!io_.read(items + go_active::IL2CPP_ARRAY_LENGTH, capacity) || capacity <= 0) {
+                ++diag_.aborts;
                 diag_.abort_mask |= 16; continue;
             }
             const int32_t count = head.tail < capacity ? head.tail : capacity;
@@ -268,6 +283,7 @@ private:
             // Указатели элементов — одним чтением на весь диапазон.
             if (!io_.read_range(items + go_active::IL2CPP_ARRAY_FIRST_ELEMENT,
                                 items_buf, (std::size_t)limit * sizeof(std::uint64_t))) {
+                ++diag_.aborts;
                 diag_.abort_mask |= 32; continue;
             }
             for (int32_t i = 0; i < limit; ++i) {
@@ -280,11 +296,13 @@ private:
                 }
                 // SCALED-набор полей — у DelayPromise, голый — у
                 // DelayIgnoreTimeScalePromise (см. game_offsets.h).
-                if (klass == klass_scaled_ && klass_scaled_)
+                if (klass == klass_scaled_ && klass_scaled_) {
+                    ++diag_.klass_hits;
                     zeroed += zero_if_cadence(item, go_active::DELAYPROMISE_SCALED_TIMESPAN);
-                else if (klass == klass_unscaled_ && klass_unscaled_)
+                } else if (klass == klass_unscaled_ && klass_unscaled_) {
+                    ++diag_.klass_hits;
                     zeroed += zero_if_cadence(item, go_active::DELAYPROMISE_TIMESPAN);
-                else
+                } else
                     note_other_klass(klass);
             }
         }
