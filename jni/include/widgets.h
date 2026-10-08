@@ -8,7 +8,9 @@
 #include "anim_web.h"
 
 const float WW_MIN = 840.f;
-const float WH_MIN = 720.f;
+// Высота по столбцу вкладок слева: светофор и отступ (12 + 20 + 12 = 44) + 5 вкладок по 108 + 6 снизу.
+// Меньше не ужимаем (иначе tabH поджимается), больше — лишнее место под столбцом.
+const float WH_MIN = 590.f;
 
 struct ScrollState {
     float off      = 0.f;
