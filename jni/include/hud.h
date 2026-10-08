@@ -31,3 +31,9 @@ constexpr float kFlBtnSide = 100.f;
 constexpr float kFlBtnRadius = 26.f;
 constexpr float kFlBtnDefX = 0.90f;
 constexpr float kFlBtnDefY = 0.66f;
+// Экранная кнопка X-Ray: квадрат с надписью XR, дефолт справа чуть выше
+// фрикама чтобы не перекрывать. Калибровка 9 — та же система что у фрикама.
+constexpr float kXrBtnSide = 100.f;
+constexpr float kXrBtnRadius = 26.f;
+constexpr float kXrBtnDefX = 0.90f;
+constexpr float kXrBtnDefY = 0.34f;

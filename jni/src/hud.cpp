@@ -257,16 +257,21 @@ void DrawWatermark(float dt) {
         const float dcy = bY + bH * 0.5f;
         const ImU32 enemyCol = C::U(acc);
         const ImU32 botCol = IM_COL32(190, 120, 255, 255);
-        auto drawPersonIcon = [&](float x, ImU32 col, bool bot) {
-            // Both glyphs use exactly the same 24x24 box. Only the visor
-            // differentiates bots, so neither icon appears visually larger.
+        auto drawEnemyIcon = [&](float x, ImU32 col) {
             const float cx = x + 12.f;
-            fg->AddCircleFilled({cx, dcy - 6.f}, 4.5f, col, 16);
-            fg->AddRectFilled({x + 4.f, dcy - 1.f}, {x + 20.f, dcy + 9.f}, col, 4.f);
-            if (bot) {
-                fg->AddRectFilled({x + 8.f, dcy + 1.f}, {x + 10.f, dcy + 4.f}, bgCol);
-                fg->AddRectFilled({x + 14.f, dcy + 1.f}, {x + 16.f, dcy + 4.f}, bgCol);
-            }
+            fg->AddCircleFilled({cx, dcy - 5.5f}, 4.2f, col, 16);
+            fg->AddRectFilled({cx - 8.5f, dcy + 0.5f}, {cx + 8.5f, dcy + 8.5f}, col, 4.5f, ImDrawFlags_RoundCornersTop);
+        };
+        auto drawBotIcon = [&](float x, ImU32 col) {
+            const float cx = x + 12.f;
+            fg->AddLine({cx, dcy - 7.5f}, {cx, dcy - 10.5f}, col, 1.8f);
+            fg->AddCircleFilled({cx, dcy - 11.f}, 1.2f, col, 10);
+            fg->AddRectFilled({cx - 9.5f, dcy - 3.f}, {cx - 8.f, dcy + 1.f}, col, 0.7f);
+            fg->AddRectFilled({cx + 8.f, dcy - 3.f}, {cx + 9.5f, dcy + 1.f}, col, 0.7f);
+            fg->AddRectFilled({cx - 8.f, dcy - 7.5f}, {cx + 8.f, dcy + 6.5f}, col, 3.5f);
+            fg->AddCircleFilled({cx - 3.5f, dcy - 2.5f}, 1.8f, bgCol, 12);
+            fg->AddCircleFilled({cx + 3.5f, dcy - 2.5f}, 1.8f, bgCol, 12);
+            fg->AddLine({cx - 3.5f, dcy + 2.8f}, {cx + 3.5f, dcy + 2.8f}, bgCol, 1.4f);
         };
         const float tY = bY + (bH - ImMax(eSz.y, bSz.y)) * 0.5f;
         const float enemyX = bX + pad;
@@ -274,8 +279,8 @@ void DrawWatermark(float dt) {
         const float dividerX = enemyNumX + eSz.x + groupGap;
         const float botX = dividerX + dividerW + groupGap;
         const float botNumX = botX + iconW + gap;
-        drawPersonIcon(enemyX, enemyCol, false);
-        drawPersonIcon(botX, botCol, true);
+        drawEnemyIcon(enemyX, enemyCol);
+        drawBotIcon(botX, botCol);
         fg->AddRectFilled({dividerX, bY + 10.f},
                           {dividerX + dividerW, bY + bH - 10.f},
                           C::UA(C::Dim(), 0.55f), 0.5f);
@@ -321,7 +326,7 @@ void DrawWatermark(float dt) {
         fg->AddCircleFilled({ex, ey}, ah * 0.55f, eyeCol, 20);
     }
 
-    // ---- Кнопка FakeLag: квадрат с надписью FL ---------------------------
+    // ---- Кнопка FakeLag: квадрат с иконкой лага сети --------------------
     // Тап включает/выключает FakeLag напрямую. Положение — центр квадрата
     // в долях экрана, дефолт справа ниже фрикама; двигается в «Разное → Сеть
     // → Настроить кнопку FakeLag». Прячется тумблером «Кнопка на экране».
@@ -347,11 +352,78 @@ void DrawWatermark(float dt) {
         fg->AddRect({qX, qY}, {qX + side, qY + side},
                     on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), rad, 0, on ? 3.f : 1.5f);
 
-        const char* label = "FL";
-        const float fs = 40.f;
-        auto lsz = fn->CalcTextSizeA(fs, FLT_MAX, 0, label);
-        const ImU32 txtCol = on ? C::U(C::Acc()) : C::UA(C::Txt(), 0.75f);
-        fg->AddText(fn, fs, {qX + (side - lsz.x) * 0.5f, qY + (side - lsz.y) * 0.5f}, txtCol, label);
+        // Иконка: сигнал сети с перечёркиванием (wifi-slash / packet lag)
+        const float ex = qX + side * 0.5f, ey = qY + side * 0.5f;
+        const ImU32 icoCol = on ? C::U(C::Acc()) : C::UA(C::Txt(), 0.75f);
+        const float rCenterY = ey + 13.f;
+        fg->PathArcTo({ex, rCenterY}, 28.f, -2.356194f, -0.785398f, 20);
+        fg->PathStroke(icoCol, false, 2.5f);
+        fg->PathArcTo({ex, rCenterY}, 16.f, -2.356194f, -0.785398f, 16);
+        fg->PathStroke(icoCol, false, 2.5f);
+        fg->AddCircleFilled({ex, rCenterY}, 3.5f, icoCol, 16);
+        fg->AddLine({ex - 22.f, ey - 18.f}, {ex + 22.f, ey + 18.f}, icoCol, 2.5f);
+    }
+
+    // ---- Кнопка Иксрей: квадрат с иконкой прозрачного 3D-каркаса ---------
+    // Тап включает/выключает Иксрей напрямую. Положение — центр квадрата
+    // в долях экрана, дефолт справа выше фрикама; двигается в «Разное → Иксрей
+    // → Настроить кнопку». Прячется тумблером «Кнопка на экране».
+    if (g_state.xray_btn_show)
+    {
+        const float side = kXrBtnSide, rad = kXrBtnRadius;
+        float cx = (g_state.xray_btn_x >= 0.f ? g_state.xray_btn_x : kXrBtnDefX) * scrW;
+        float cy = (g_state.xray_btn_y >= 0.f ? g_state.xray_btn_y : kXrBtnDefY) * scrH;
+        float qX = cx - side * 0.5f, qY = cy - side * 0.5f;
+        if (scrW > side + 16.f) qX = ImClamp(qX, 8.f, scrW - side - 8.f);
+        if (scrH > side + 16.f) qY = ImClamp(qY, 8.f, scrH - side - 8.f);
+
+        const bool on = g_state.xray_on;
+        if (!menu_open && g_calibMode == 0 && io.MouseClicked[0] &&
+            io.MousePos.x >= qX && io.MousePos.x <= qX + side &&
+            io.MousePos.y >= qY && io.MousePos.y <= qY + side) {
+            g_state.xray_on = !g_state.xray_on;
+            PlaySound(SND_CLICK);
+            ShowToast(g_state.xray_on ? XS("Иксрей включён") : XS("Иксрей выключен"));
+        }
+
+        fg->AddRectFilled({qX, qY}, {qX + side, qY + side}, C::UA(C::Card(), 0.90f), rad);
+        fg->AddRect({qX, qY}, {qX + side, qY + side},
+                    on ? C::UA(C::Acc(), 0.95f) : C::UA(C::Dim(), 0.8f), rad, 0, on ? 3.f : 1.5f);
+
+        // Иконка: изометрический каркасный куб (X-Ray / прозрачный объем)
+        const float ex = qX + side * 0.5f, ey = qY + side * 0.5f;
+        const ImU32 icoCol = on ? C::U(C::Acc()) : C::UA(C::Txt(), 0.75f);
+        const ImU32 dimCol = on ? C::UA(C::Acc(), 0.45f) : C::UA(C::Txt(), 0.35f);
+        const float R = 23.f;
+        const float W = R * 0.866025f;
+        const float H = R * 0.500000f;
+
+        const ImVec2 pTop = {ex, ey - R};
+        const ImVec2 pTR  = {ex + W, ey - H};
+        const ImVec2 pBR  = {ex + W, ey + H};
+        const ImVec2 pBot = {ex, ey + R};
+        const ImVec2 pBL  = {ex - W, ey + H};
+        const ImVec2 pTL  = {ex - W, ey - H};
+        const ImVec2 pC   = {ex, ey};
+
+        // Задние (сквозные) грани куба
+        fg->AddLine(pC, pTop, dimCol, 1.5f);
+        fg->AddLine(pC, pBR,  dimCol, 1.5f);
+        fg->AddLine(pC, pBL,  dimCol, 1.5f);
+
+        // Внешний контур куба
+        fg->PathLineTo(pTop);
+        fg->PathLineTo(pTR);
+        fg->PathLineTo(pBR);
+        fg->PathLineTo(pBot);
+        fg->PathLineTo(pBL);
+        fg->PathLineTo(pTL);
+        fg->PathStroke(icoCol, ImDrawFlags_Closed, 2.5f);
+
+        // Передние грани куба (Y-ребра)
+        fg->AddLine(pC, pBot, icoCol, 2.5f);
+        fg->AddLine(pC, pTR,  icoCol, 2.5f);
+        fg->AddLine(pC, pTL,  icoCol, 2.5f);
     }
 }
 
