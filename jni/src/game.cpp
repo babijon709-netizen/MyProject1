@@ -11,6 +11,8 @@
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // выбранный Release/Beta профиль
 #include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
+#include "mount_latch.h"           // удержание бокса на транспорте (хост-проверяемый)
+#include "body_clip.h"             // отсечение тела по ближней плоскости (хост-проверяемый)
 #include "Vector.h"
 #include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
@@ -5544,20 +5546,8 @@ static constexpr float kCameraRootHeight = 1.60F;
 // vehicleID / the transform also flicker mid-tick. Engage on seat/vehicle OR
 // on lastSaved freeze + a live visual that has left the mount; never snap the
 // box back to that mount mid-ride.
-struct MountLatch {
-    int  unmounted_streak = 0;
-    int  saved_still = 0;
-    bool engaged = false;
-    Vec3 last{};
-    bool last_ok = false;
-    Vec3 prev_saved{};
-    bool have_saved = false;
-    // Счётчики для лога «бокс отстаёт на транспорте»: сколько раз подряд
-    // защита от мерцания удерживала бокс на прежнем месте и сколько кадров
-    // подряд не было ни одного живого отсчёта позиции.
-    int  hold_count = 0;
-    int  miss_streak = 0;
-};
+// Состояние защёлки и само решение об удержании — в mount_latch.h, там же
+// host-тест на сценарий из лога 08.10 23:09:07.
 static std::unordered_map<uint64_t, MountLatch> g_mount_latch;
 
 static bool player_mount_engaged(uint64_t player) {
@@ -5675,6 +5665,7 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
             latch.last_ok = false;
             latch.unmounted_streak = 0;
             latch.hold_count = 0;
+            latch.hold_streak = 0;
             latch.miss_streak = 0;
         }
     }
@@ -5693,39 +5684,25 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
     bool held = false;
     if (have_live) {
         source = live_source;
-        latch.miss_streak = 0;
-        float last_h2 = latch.last_ok ? vec3_horiz2(latch.last, saved) : 0.0F;
-        // Rendered transform snapped back to the frozen boarding point.
-        if (latch.last_ok && live_h2 < 1.25F * 1.25F && last_h2 > 2.5F * 2.5F) {
-            feet = latch.last;
-            held = true;
-        }
-        // Same flicker, but the bad sample did not land exactly on lastSaved.
-        else if (latch.last_ok && last_h2 > 4.0F &&
-            vec3_horiz2(live, latch.last) > 4.0F * 4.0F && live_h2 < last_h2 * 0.25F) {
-            feet = latch.last;
-            held = true;
-        } else {
-            latch.last = live;
-            latch.last_ok = true;
-            feet = live;
-        }
+        held = mountlatch::apply_hold(latch, saved, live, live_h2, latch.saved_still, feet);
     } else {
         ++latch.miss_streak;
         if (latch.last_ok) feet = latch.last;
     }
-    if (held) ++latch.hold_count;
 
     // Отставание бокса от свежего отсчёта: удержание защитой (есть живой
     // отсчёт, но бокс оставлен на прежнем) или нечитаемость источников
     // (живого отсчёта нет вообще — тогда расстояние неизвестно, -1).
+    // «подряд» — сколько кадров защита держит бокс без перерыва: по нему видно,
+    // что удержание перестало быть фильтром одиночного щелчка.
     if (mount_log_allow(player)) {
         float lag_m = -1.0F;
-        if (held) lag_m = sqrtf(vec3_horiz2(latch.last, live));
+        if (held) lag_m = mountlatch::lag_meters(latch, live);
         else if (!have_live) lag_m = -1.0F;
-        LogLine("транспорт: 0x%llx источник=%s камера=%d модель=%d отстал=%.1fм удержаний=%d пропусков=%d заморозка=%d",
+        LogLine("транспорт: 0x%llx источник=%s камера=%d модель=%d отстал=%.1fм удержаний=%d подряд=%d пропусков=%d заморозка=%d",
                 (unsigned long long)player, source, (int)have_cam, (int)have_model,
-                (double)lag_m, latch.hold_count, latch.miss_streak, latch.saved_still);
+                (double)lag_m, latch.hold_count, latch.hold_streak, latch.miss_streak,
+                latch.saved_still);
         latch.hold_count = 0;
     }
 }
@@ -7986,6 +7963,10 @@ struct EspSkipLog {
     float box_half_height = 0.0F;
     float screen_margin = 0.0F;
     unsigned long long read_fails_total = 0;
+    // Биты 1/2 — нижняя/верхняя точка тела была подтянута к ближней плоскости
+    // (см. body_clip.h). Без этого в логе не отличить «обе точки за плоскостью»
+    // от «одну обрезали, бокс нарисован по обрезанной».
+    int body_clipped = 0;
     W2SProjectionTrace bottom_projection{};
     W2SProjectionTrace top_projection{};
 };
@@ -8095,14 +8076,15 @@ static void log_esp_skip(const EspSkipLog& event) {
     format_projection_trace(event.bottom_projection, bottom_projection, sizeof(bottom_projection));
     format_projection_trace(event.top_projection, top_projection, sizeof(top_projection));
 
-    LogLine("ESP-SKIP: id=0x%llx uid=%s reason=%s registry=%zu/%zu pos_src=%s pos=%s pos_reads={%s} dist=%.1f camera_src=%s camera=%s basis_valid=%d right=%s up=%s forward=%s cam_q=%s viewport=%.0fx%.0f read_fails=%llu bottom_world=%s bottom={%s} top_world=%s top={%s} body_h=%.2f duplicate_of=0x%llx box_valid=%d box=(%.1f %.1f %.1f %.1f) margin=%.1f",
+    LogLine("ESP-SKIP: id=0x%llx uid=%s reason=%s registry=%zu/%zu pos_src=%s pos=%s pos_reads={%s} dist=%.1f camera_src=%s camera=%s basis_valid=%d right=%s up=%s forward=%s cam_q=%s viewport=%.0fx%.0f read_fails=%llu bottom_world=%s bottom={%s} top_world=%s top={%s} body_h=%.2f body_clip=%d duplicate_of=0x%llx box_valid=%d box=(%.1f %.1f %.1f %.1f) margin=%.1f",
             (unsigned long long)event.player, uid, reason,
             event.index + 1, event.population, source, position, position_reads, (double)event.distance,
             event.camera_from_transform ? "transform" : "view", camera,
             (int)event.camera_basis_valid, right, up, forward, camera_rotation,
             (double)event.screen_width, (double)event.screen_height,
             event.read_fails_total, bottom_world, bottom_projection, top_world, top_projection,
-            (double)event.body_height, (unsigned long long)event.duplicate_of,
+            (double)event.body_height, event.body_clipped,
+            (unsigned long long)event.duplicate_of,
             (int)event.has_box_bounds, (double)event.box_cx, (double)event.box_cy,
             (double)event.box_half_width, (double)event.box_half_height,
             (double)event.screen_margin);
@@ -8943,6 +8925,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         Vec3 body_bottom = {feet.x, feet.y, feet.z};
         Vec3 body_top = {feet.x, feet.y + body_height, feet.z};
         if (transform_camera_mode || !g_use_direct_player_position) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
+
+        // Ближняя плоскость: в упор верхняя (а при взгляде снизу — нижняя)
+        // точка уходит за неё, и без отсечения весь бокс выбрасывался целиком,
+        // хотя вторая точка была в кадре. Подробнее — в body_clip.h.
+        const Vec4 body_plane = transform_camera_mode
+            ? bodyclip::plane_from_camera(transform_camera_position,
+                                          rotate_vector(transform_camera_rotation, {0.0F, 0.0F, 1.0F}))
+            : bodyclip::plane_from_vp(vp);
+        const bodyclip::Segment body_seg =
+            bodyclip::clip_segment(body_bottom, body_top, body_plane, bodyclip::kNearDepth);
+        if (!body_seg.visible) { mark_skip('B'); continue; }
+        diagnostic.body_clipped = (body_seg.moved_bottom ? 1 : 0) | (body_seg.moved_top ? 2 : 0);
+
         diagnostic.bottom_world = body_bottom;
         diagnostic.top_world = body_top;
         diagnostic.has_bottom_world = true;
@@ -8958,13 +8953,20 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             : w2s_with_trace(vp, body_top, sw, sh, sh2, false, &diagnostic.top_projection);
         if (!top_visible) { mark_skip('T'); continue; }
 
+        const float screen_margin = std::max(sw, sh) * 0.25F;
+        // Подтянутая к плоскости точка улетает на тысячи пикселей за экран
+        // (screen = f(1/near)). Прижимаем только её и только когда её реально
+        // двигали: честную проекцию трогать нельзя, иначе дальний игрок вместо
+        // mark_skip('O') начал бы рисоваться прижатым к кромке.
+        if (body_seg.moved_bottom) sf = bodyclip::clamp_to_margin(sf, sw, sh, screen_margin);
+        if (body_seg.moved_top) sh2 = bodyclip::clamp_to_margin(sh2, sw, sh, screen_margin);
+
         float height = fabsf(sh2.y - sf.y);
         if (!std::isfinite(height) || height <= 0.001F) { mark_skip('H'); continue; }
         float cx = (sf.x + sh2.x) * 0.5F;
         float cy = (sf.y + sh2.y) * 0.5F;
         float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
         float half_h = height * 0.5F;
-        const float screen_margin = std::max(sw, sh) * 0.25F;
         diagnostic.box_cx = cx;
         diagnostic.box_cy = cy;
         diagnostic.box_half_width = half_w;
