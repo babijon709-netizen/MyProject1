@@ -402,9 +402,9 @@ void DrawWatermark(float dt) {
         const ImVec2 pC   = {ex, ey};
 
         // Задние (сквозные) грани куба
-        fg->AddLine(pC, pTR,  dimCol, 1.5f);
-        fg->AddLine(pC, pBot, dimCol, 1.5f);
-        fg->AddLine(pC, pTL,  dimCol, 1.5f);
+        fg->AddLine(pC, pTop, dimCol, 1.5f);
+        fg->AddLine(pC, pBR,  dimCol, 1.5f);
+        fg->AddLine(pC, pBL,  dimCol, 1.5f);
 
         // Внешний контур куба
         fg->PathLineTo(pTop);
@@ -416,9 +416,9 @@ void DrawWatermark(float dt) {
         fg->PathStroke(icoCol, ImDrawFlags_Closed, 2.5f);
 
         // Передние грани куба (Y-ребра)
-        fg->AddLine(pC, pTop, icoCol, 2.5f);
-        fg->AddLine(pC, pBR,  icoCol, 2.5f);
-        fg->AddLine(pC, pBL,  icoCol, 2.5f);
+        fg->AddLine(pC, pBot, icoCol, 2.5f);
+        fg->AddLine(pC, pTR,  icoCol, 2.5f);
+        fg->AddLine(pC, pTL,  icoCol, 2.5f);
     }
 }
 
