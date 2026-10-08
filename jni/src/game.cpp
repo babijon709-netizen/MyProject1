@@ -2837,10 +2837,13 @@ static bool evaluate_player_position_offset(const std::vector<uint64_t>& players
     return true;
 }
 
-// Direct (PlayerManager field) position offsets, most trusted first. The
-// canonical field is lastSavedPosition (0x1D0); lastTickPosition (0x1C8) is
-// equivalent. The rest are legacy guesses kept as a last resort only.
-static const uint64_t k_known_position_offsets[] = {0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC, 0x1E8};
+// Direct (PlayerManager field) position offsets, most trusted first. 0x260 is
+// the field the live client actually uses now: the log at 19:52 confirmed it
+// against kcc (8 of 9 players) while the profile's 0x1F4 read invalid-world
+// for every player. The canonical field is lastSavedPosition (0x1D0);
+// lastTickPosition (0x1C8) is equivalent. The rest are legacy guesses kept as
+// a last resort only.
+static const uint64_t k_known_position_offsets[] = {0x260, 0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC, 0x1E8};
 
 static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& players) {
     bool saved_use_direct = g_use_direct_player_position;
