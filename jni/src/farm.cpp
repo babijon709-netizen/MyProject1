@@ -5,7 +5,7 @@
 #include "Android_touch/TouchHelperA.h"
 #include "app_state.h"
 #include "ui_util.h"
-#include "aim.h"                 // AimSensitivityScale/Gain
+#include "aim.h"                 // g_aimActive, s_fingerDown (владелец камеры)
 #include "esp_draw.h"            // FrameBoxes
 #include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
@@ -161,36 +161,17 @@ constexpr float kBlockedClear  = 1.20f;
 constexpr float kGiveUpDrain   = 12.f;   // бьём, а остаток не падает
 constexpr float kGiveUpBlind   = 25.f;   // то же, но остаток не читается
 
-// град/px, пока коэффициент не выучен, берётся из чувствительности настроек
-// клиента — AimSensitivityGain() (для настройки 2.0 это измеренные по логу
-// 14.09.2026 0.10 град/px по yaw и ~0.06 по pitch; прежнее запасное 0.25
-// завышало коэффициент в 2.5 раза, и доводка тянулась втрое дольше).
-
-// Камера отвечает не в том же кадре. В том же логе поворот приходил через 2
-// кадра (реже 4..6, кадр 8.5 мс), а контроллер за это время успевал дослать ещё
-// 9..11 шагов подряд: шаги складывались, камера перелетала крестик, знак ошибки
-// менялся, палец швырял её обратно — на экране это и есть «прицел дёргается».
-// Отсюда такт с подтверждением (шаг — ответ камеры — следующий шаг): вслепую
-// шаги больше не копятся, и даже неверный коэффициент оборачивается одним
-// перелётом, а не непрерывной раскачкой.
-constexpr float kCamMovedEps   = 0.05f;  // град: настолько камера должна шевельнуться
-constexpr float kLookWaitMax   = 0.10f;  // с: дольше ответа не ждём — ввод потерялся
-// Полоса правдоподобия коэффициента. Измеренные 0.10 лежат в середине (разброс
-// одиночных образцов x2). Полоса нужна не для красоты: шаг пальца считается от
-// 1/gain, и значение вне её означало бы либо рывок в двадцать раз сильнее
-// нужного (0.0083 в логе — 120 px на градус ошибки), либо полное отсутствие
-// реакции (1.97 — палец двигается, камера стоит).
-constexpr float kGainLo        = 0.035f; // град/px
-constexpr float kGainHi        = 0.350f;
-constexpr float kGainMinPx     = 12.f;   // короче свайп — отношение тонет в шуме
-// Такт с подтверждением гарантирует, что шаги НЕ складываются (следующий
-// шаг — только после ответа камеры), поэтому долю остатка и предел шага можно
-// держать крупными: сходимость остаётся монотонной, без раскачки. Отдельного
-// «крестикового» размера шага больше нет — камера всегда ведёт корпус узла.
+// Камера ведётся через накопитель MouseLook (как мемори-аим): пишем абсолютный
+// угол, игра разворачивает камеру в этом же кадре. Следующий шаг шлём только
+// после того, как накопитель вернул записанное (игра приняла), либо истёк таймаут.
+// Так шаги не складываются и камера не перелетает узел.
+constexpr float kLookWaitMax   = 0.10f;  // с: дольше ответа не ждём — запись потеряна
+constexpr float kMemAckEps     = 0.10f;  // град: допуск «накопитель = наша запись»
 constexpr float kAimStepWalk   = 0.45f;  // доля остатка ошибки, закрываемая шагом
-constexpr float kStepWalkFrac  = 0.090f; // доля высоты экрана на один шаг
+constexpr float kMemStepWalk   = 15.0f;  // град: предел одного шага на подходе
+constexpr float kMemStepBody   = 4.0f;   // град: предел шага, когда узел в прицеле
+constexpr float kMemDeadDeg    = 0.05f;  // град: мельче — не шлём
 constexpr float kPitchDeadSpot = 0.50f;  // град: субградусный pitch в упор не доводим
-constexpr float kStepQuantumPx = 1.0f;   // px: шаг мельче кванта цифрователя не доходит
 
 } // namespace
 
@@ -202,21 +183,12 @@ void UpdateFarm(float dt) {
 
 static void UpdateFarmInner(float dt) {
     static bool  s_moveDown = false;  // палец 0: джойстик движения
-    static bool  s_lookDown = false;  // палец 1: камера
+    static bool  s_camTurn = false;   // камера ведётся памятью: идёт доводка
     static bool  s_tapDown  = false;  // палец 2: удары
-    static float s_lookX = 0.f, s_lookY = 0.f;
-    static int   s_lookHold = 0;
+    static float s_memWX = 0.f, s_memWY = 0.f; // последняя запись в накопитель
+    static bool  s_memPend = false;   // запись ждёт подтверждения накопителем
     static int   s_tapTimer = 0;      // мс до следующего переключения пальца 2
-    static float s_gainYaw = 0.f;     // град/px, учим по собственным свайпам
-    static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f;
-    static bool  s_haveLast = false;
-    // Сдвиг пальца, посланный с прошлого ответа камеры (накопленно): игра
-    // проглатывает часть движений при низком FPS и поворачивается на их сумму,
-    // поэтому делить можно только на сумму, а не на последний шаг.
-    static float s_gainPendDx = 0.f, s_gainPendDy = 0.f;
-    static float s_lookWait = 0.f;    // сколько ждём ответа камеры на посланный шаг
-    static float s_gainS1 = 0.f, s_gainS2 = 0.f, s_gainS3 = 0.f; // образцы
-    static int   s_gainN = 0;         // сколько образцов принято
+    static float s_memWait = 0.f;     // сколько ждём подтверждения записи, с
     static unsigned long long s_nodeId = 0;
     // Пин крестика (телепорт крестика в точку удара): включён / на каком
     // узле / сколько ждать до переподключения после сбоя записи.
@@ -249,12 +221,11 @@ static void UpdateFarmInner(float dt) {
 
     auto releaseAll = [&]() {
         if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
-        if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
+        s_camTurn = false; s_memPend = false;
         if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
         esp_farm_cross_pin(FarmTarget{}, false);
         s_pinOn = false; s_pinNode = 0;
-        s_haveLast = false;
-        s_lookHold = 0;
+        s_memWait = 0.f;
     };
     auto resetNode = [&]() {
         esp_farm_cross_pin(FarmTarget{}, false);
@@ -323,7 +294,7 @@ static void UpdateFarmInner(float dt) {
         if (s_nodeId != 0 && s_lostTime < kLostHold) {
             s_lostTime += dt;
             if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; } // вслепую не машем
-            if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
+            s_camTurn = false; s_memPend = false; s_memWait = 0.f;
             return; // палец движения оставляем, где был
         }
         releaseAll();
@@ -370,7 +341,7 @@ static void UpdateFarmInner(float dt) {
         releaseAll();
         g_farmPhase = 0;
         s_walkOffTime = 0.f;
-        s_haveLast = false;
+        s_camTurn = false; s_memPend = false; s_memWait = 0.f;
         return;
     }
 
@@ -390,7 +361,7 @@ static void UpdateFarmInner(float dt) {
         if (s_nodeId != 0 && s_candFrames < kNodeDebounce && s_flickerTime < kFlickerGiveUp) {
             s_flickerTime += dt;
             if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }   // вслепую не машем
-            if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; s_haveLast = false; }
+            s_camTurn = false; s_memPend = false; s_memWait = 0.f;
             return;   // палец движения оставляем, где был
         }
         s_candId = 0; s_candFrames = 0; s_flickerTime = 0.f;
@@ -451,97 +422,16 @@ static void UpdateFarmInner(float dt) {
             fg->AddCircleFilled({tgt.sx, tgt.sy}, 2.5f, mc, 12);
     }
 
-    bool gainFromSensFarm = false;
-    const float gainScale = AimSensitivityScale(gainFromSensFarm);
-    const float gainLo    = kGainLo * gainScale;
-    const float gainHi    = kGainHi * gainScale;
-
-    // ---- коэффициент камеры: такт с подтверждением ---------------------------
-    // Учимся на накопленном сдвиге пальца между двумя ответами камеры, а не на
-    // отношении одного кадра: поза камеры отстаёт от касания на 2 кадра, и
-    // прежнее «dyaw последнего кадра / dx последнего кадра» давало то ноль, то
-    // двойную норму. В логе 14.09 коэффициент из-за этого сбрасывался 571 раз за
-    // 122 с и гулял 0.0083..1.97 град/px — при 0.0083 палец слал 120 px на градус
-    // ошибки (рывок на 8° за кадр), при 1.97 не двигал камеру вовсе. Один и тот
-    // же свайп 81 px измерялся как -2.39°, -13.21° и -17.02°.
-    float camYaw = 0.f, camPitch = 0.f;
-    const bool haveCam = esp_camera_angles(camYaw, camPitch);
-    float camYawDelta = 0.f;
-    bool camMoved = false;
-    if (haveCam && s_haveLast) {
-        camYawDelta = WrapDeg180(camYaw - s_lastCamYaw);
-        camMoved = fabsf(camYawDelta) > kCamMovedEps ||
-                   fabsf(camPitch - s_lastCamPitch) > kCamMovedEps;
-    }
-    if (camMoved) {
-        // Ходьба образец не портит: меряем поворот самой камеры, а джойстик её не
-        // вращает (вращается только поза цели относительно камеры, а она в
-        // отношение не входит). Знак требуем тот же, что у свайпа, — кроме самого
-        // первого образца: отрицательный коэффициент означает инверсию оси в
-        // настройках игры, и поймать её надо сразу. Переворот знака по слабому
-        // отклику не принимаем: так в обучатель попало бы чужое движение камеры
-        // (отдача, палец игрока).
-        const bool sameSign = (camYawDelta * s_gainPendDx > 0.f);
-        const bool strongPull = fabsf(camYawDelta) >= 0.5f;
-        if (fabsf(s_gainPendDx) >= kGainMinPx && std::isfinite(camYawDelta) &&
-            (sameSign || (s_gainYaw == 0.f && strongPull))) {
-            const float measured = camYawDelta / s_gainPendDx;
-            const float m = fabsf(measured);
-            if (m >= gainLo && m <= gainHi) {
-                // Медиана последних трёх образцов: одиночный мусорный кадр больше
-                // не может развернуть палец в двадцать раз сильнее нужного.
-                s_gainS3 = s_gainS2; s_gainS2 = s_gainS1; s_gainS1 = measured;
-                if (s_gainN < 1000) ++s_gainN;
-                float med;
-                if (s_gainN <= 1) {
-                    med = s_gainS1;
-                } else if (s_gainN == 2) {
-                    med = 0.5f * (s_gainS1 + s_gainS2);
-                } else {
-                    float a = s_gainS1, b = s_gainS2, c = s_gainS3;
-                    if (a > b) std::swap(a, b);
-                    if (b > c) std::swap(b, c);
-                    if (a > b) std::swap(a, b);
-                    med = b;
-                }
-                const float prev = s_gainYaw;
-                const float next = (prev == 0.f) ? med : prev * 0.6f + med * 0.4f;
-                s_gainYaw = next;
-            }
-        }
-        // ВАЖНО: pend чистится только при настоящем ответе (см. camResponded
-        // ниже), иначе покачивание камеры при ходьбе «съедало» накопление и
-        // обучатель делил поворот на часть суммы.
-    }
-    // Подтверждение шага по yaw: камера повернулась В ТУ СТОРОНУ, куда давили.
-    // Любое движение (прежнее правило) во время ходьбы ловит собственное
-    // покачивание камеры и «подтверждает» шаг, которого игра не увидела —
-    // тогда шаги складываются и камеру перебрасывает через цель. Если по yaw
-    // ничего не послано (шаг только по pitch) — достаточно любого движения.
-    // Оси с инверсией это замедляет до такта таймаута (10 шагов/с), но не
-    // ломает: таймаут kLookWaitMax сам перепосылает шаг.
-    const bool yawPend = fabsf(s_gainPendDx) >= 1.f;
-    const bool camResponded = camMoved && (!yawPend || camYawDelta * s_gainPendDx > 0.f);
-    if (camResponded) {
-        s_gainPendDx = s_gainPendDy = 0.f;   // ответ получен — копим с нуля
-    }
-    if (haveCam) {
-        s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true;
-    } else {
-        s_haveLast = false;
-        s_gainPendDx = s_gainPendDy = 0.f;   // поза пропала — накопление мусорное
-        s_lookWait = 0.f;
-    }
-    // Полосу правдоподобия держим и на запасном значении: шаг пальца считается от
-    // 1/gain, и вылет за полосу — это либо перелёт через цель, либо «камера не
-    // слушается», то есть ровно то, что игрок видит как дёрганье. Знак сохраняем:
-    // отрицательный коэффициент означает инверсию оси в настройках игры.
-    float gain = (s_gainYaw != 0.f) ? s_gainYaw : (kAimGainAtRef * gainScale);
-    if (!std::isfinite(gain) || gain == 0.f) gain = kAimGainAtRef * gainScale;
-    const float gainMag = fabsf(gain);
-    if (gainMag < gainLo)      gain = (gain < 0.f) ? -gainLo : gainLo;
-    else if (gainMag > gainHi) gain = (gain < 0.f) ? -gainHi : gainHi;
-    const float invGain = 1.f / gain;
+    // ---- камера: накопитель MouseLook, без тача -------------------------------
+    // Знаки те же, что у мемори-аима: yaw +вправо -> накопитель Y, pitch +вверх ->
+    // накопитель X с минусом (вверх — меньше). Накопитель уже в градусах, коэффициента
+    // чувствительности не нужно: абсолютная запись сама задаёт поворот.
+    float accX = 0.f, accY = 0.f;
+    const bool haveAcc = esp_mem_aim_read_angles(accX, accY);
+    // Запись подтверждена, если накопитель вернул ровно то, что мы писали.
+    const bool acked = s_memPend && haveAcc &&
+                       fabsf(WrapDeg180(accY - s_memWY)) < kMemAckEps &&
+                       fabsf(WrapDeg180(accX - s_memWX)) < kMemAckEps;
 
     // ---- фаза ---------------------------------------------------------------
     // Дотянулись ли до точки прицела. По крестику порог заметно ближе, чем по
@@ -610,7 +500,7 @@ static void UpdateFarmInner(float dt) {
     const float pitchErr = fmaxf(fabsf(steerPitch) - pitchDead, 0.f);
     const float errDeg = fmaxf(fabsf(steerYaw), pitchErr);
 
-    // В пределах удара — всегда MINE: камера доводится тем же пальцем, а
+    // В пределах удара — всегда MINE: камера доводится записью в накопитель, а
     // удар идёт в крестик пином (или по лучу, пока шаблон не выучен).
     // Вне пределов — идём. Отдельной
     // фазы поворота больше нет: стик давит прямо в сторону цели относительно
@@ -656,78 +546,38 @@ static void UpdateFarmInner(float dt) {
         }
     }
 
-    // ---- палец 1: камера ------------------------------------------------------
+    // ---- камера: пишем накопитель MouseLook ----------------------------------
     {
-        const float wantYawPx = steerYaw * invGain;
-        float wantPitchPx = 0.f;
-        if (fabsf(steerPitch) > pitchDead) wantPitchPx = -steerPitch * fabsf(invGain);
+        const float maxStep = inReach ? kMemStepBody : kMemStepWalk;
+        const float wantYaw   = steerYaw;
+        const float wantPitch = (fabsf(steerPitch) > pitchDead) ? steerPitch : 0.f;
+        const bool needTurn = haveAcc && (s_camTurn ? (errDeg > stopDeg) : (errDeg > startDeg));
 
-        // Пропорциональный шаг: закрываем часть остатка ошибки (по крестику
-        // больше — там точность важнее скорости). Пределы шага крупнее прежних
-        // (0.045/0.090 высоты экрана): рывок через крестик раньше давало
-        // СЛОЖЕНИЕ шагов вслепую (9..11 подряд до ответа камеры), а такт с
-        // подтверждением шлёт ровно один шаг за ответ — сходимость монотонная.
-        const float maxStep = sh * kStepWalkFrac;
-        const float kAim = kAimStepWalk;
-
-        // Квант ввода: позиция пальца пишется в цифрователь целыми пикселями,
-        // поэтому шаг меньше пикселя до камеры не доходит вовсе. Прежний
-        // контроллер в таком случае держал касание опущенным и слал по 0.8 px за
-        // кадр вечно (в логе стенда — 12 кадров подряд на ошибке 0.5°): палец не
-        // отпускается, крестик дрожит. Ошибка в один квант считается севшей.
-        const bool belowQuantum =
-            fmaxf(fabsf(wantYawPx), fabsf(wantPitchPx)) * kAim < kStepQuantumPx;
-        const bool needTurn = !belowQuantum &&
-                              (s_lookDown ? (errDeg > stopDeg) : (errDeg > startDeg));
-        // Ждём ли ещё ответа камеры на посланный шаг (настоящего ответа —
-        // см. camResponded, а не любого шевеления камеры).
-        const bool awaitingCam = haveCam && !camResponded && s_lookWait < kLookWaitMax &&
-                                 (fabsf(s_gainPendDx) >= 1.f || fabsf(s_gainPendDy) >= 1.f);
         if (!needTurn) {
-            if (s_lookDown) { Touch_Up_N(1); s_lookDown = false; }
-            s_gainPendDx = s_gainPendDy = 0.f;
-            s_lookWait = 0.f;
-        } else if (!s_lookDown) {
-            s_lookX = sw * 0.74f; s_lookY = sh * 0.42f;
-            Touch_Down_N(1, s_lookX, s_lookY);
-            s_lookDown = true;
-            s_lookHold = 0;
-            s_gainPendDx = s_gainPendDy = 0.f;
-            s_lookWait = 0.f;
-        } else if (s_lookHold < 1) {
-            ++s_lookHold;               // даём игре зарегистрировать касание
-            Touch_Down_N(1, s_lookX, s_lookY);
-        } else if (awaitingCam) {
-            // Такт с подтверждением: прошлый сдвиг ещё не отразился в позе камеры,
-            // значит ошибка на экране устаревшая. Держим палец на месте и ждём —
-            // иначе 9..11 шагов подряд складываются и камера перелетает крестик
-            // (в логе 14.09 именно так: ответ через 2 кадра, досыл 9..11 кадров).
-            s_lookWait += dt;
-            Touch_Down_N(1, s_lookX, s_lookY);   // тач остаётся живым, сдвига нет
+            s_camTurn = false; s_memPend = false; s_memWait = 0.f;
         } else {
-            if (s_lookWait >= kLookWaitMax) {
-                s_gainPendDx = s_gainPendDy = 0.f;  // ввод потерялся — шлём заново
-                s_lookWait = 0.f;
-            }
-            float dx = wantYawPx * kAim;
-            if (dx >  maxStep) dx =  maxStep;
-            if (dx < -maxStep) dx = -maxStep;
-            float dy = wantPitchPx * kAim;
-            const float maxStepY = maxStep * 0.5f;
-            if (dy >  maxStepY) dy =  maxStepY;
-            if (dy < -maxStepY) dy = -maxStepY;
-            const float nx = s_lookX + dx, ny = s_lookY + dy;
-            // Край экрана: lift и перенос в центр, а не drag за границу.
-            if (nx < sw * 0.56f || nx > sw * 0.97f || ny < sh * 0.12f || ny > sh * 0.88f) {
-                // Палец дошёл до края: поднимаем и переносим в центр.
-                Touch_Up_N(1); s_lookDown = false; s_haveLast = false;
-                s_gainPendDx = s_gainPendDy = 0.f;
-                s_lookWait = 0.f;
+            s_camTurn = true;
+            if (s_memPend && !acked && s_memWait < kLookWaitMax) {
+                s_memWait += dt;                  // ответа ждём, второй шаг не шлём
             } else {
-                s_lookX = nx; s_lookY = ny;
-                Touch_Down_N(1, s_lookX, s_lookY);
-                s_gainPendDx += dx; s_gainPendDy += dy;
-                s_lookWait = 0.f;
+                float offYaw   = wantYaw   * kAimStepWalk;
+                float offPitch = wantPitch * kAimStepWalk;
+                offYaw   = fminf(fmaxf(offYaw,   -maxStep), maxStep);
+                offPitch = fminf(fmaxf(offPitch, -maxStep), maxStep);
+                if (!std::isfinite(offYaw))   offYaw = 0.f;
+                if (!std::isfinite(offPitch)) offPitch = 0.f;
+                if (fabsf(offYaw) < kMemDeadDeg && fabsf(offPitch) < kMemDeadDeg) {
+                    s_memPend = false; s_memWait = 0.f;
+                } else {
+                    const float writeY = WrapDeg180(accY + offYaw);
+                    const float writeX = WrapDeg180(accX - offPitch);
+                    if (esp_mem_aim_write_angles(writeX, writeY)) {
+                        s_memWX = writeX; s_memWY = writeY;
+                        s_memPend = true; s_memWait = 0.f;
+                    } else {
+                        s_memPend = false; s_memWait = 0.f;
+                    }
+                }
             }
         }
     }
@@ -921,8 +771,7 @@ static void UpdateFarmInner(float dt) {
             s_tapTimer = 0;              // ждём камеру/обход/узел, не теряя такт
         } else if (s_tapTimer <= 0) {
             if (!s_tapDown) {
-                // Кнопка огня: откалиброванная зона, иначе правая половина
-                // экрана подальше от камерного пальца.
+                // Кнопка огня: откалиброванная зона, иначе правая половина экрана.
                 const float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
                 const float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
                 Touch_Down_N(2, fx, fy);
