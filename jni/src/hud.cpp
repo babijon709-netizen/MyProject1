@@ -257,16 +257,21 @@ void DrawWatermark(float dt) {
         const float dcy = bY + bH * 0.5f;
         const ImU32 enemyCol = C::U(acc);
         const ImU32 botCol = IM_COL32(190, 120, 255, 255);
-        auto drawPersonIcon = [&](float x, ImU32 col, bool bot) {
-            // Both glyphs use exactly the same 24x24 box. Only the visor
-            // differentiates bots, so neither icon appears visually larger.
+        auto drawEnemyIcon = [&](float x, ImU32 col) {
             const float cx = x + 12.f;
-            fg->AddCircleFilled({cx, dcy - 6.f}, 4.5f, col, 16);
-            fg->AddRectFilled({x + 4.f, dcy - 1.f}, {x + 20.f, dcy + 9.f}, col, 4.f);
-            if (bot) {
-                fg->AddRectFilled({x + 8.f, dcy + 1.f}, {x + 10.f, dcy + 4.f}, bgCol);
-                fg->AddRectFilled({x + 14.f, dcy + 1.f}, {x + 16.f, dcy + 4.f}, bgCol);
-            }
+            fg->AddCircleFilled({cx, dcy - 5.5f}, 4.2f, col, 16);
+            fg->AddRectFilled({cx - 8.5f, dcy + 0.5f}, {cx + 8.5f, dcy + 8.5f}, col, 4.5f, ImDrawFlags_RoundCornersTop);
+        };
+        auto drawBotIcon = [&](float x, ImU32 col) {
+            const float cx = x + 12.f;
+            fg->AddLine({cx, dcy - 7.5f}, {cx, dcy - 10.5f}, col, 1.8f);
+            fg->AddCircleFilled({cx, dcy - 11.f}, 1.2f, col, 10);
+            fg->AddRectFilled({cx - 9.5f, dcy - 3.f}, {cx - 8.f, dcy + 1.f}, col, 0.7f);
+            fg->AddRectFilled({cx + 8.f, dcy - 3.f}, {cx + 9.5f, dcy + 1.f}, col, 0.7f);
+            fg->AddRectFilled({cx - 8.f, dcy - 7.5f}, {cx + 8.f, dcy + 6.5f}, col, 3.5f);
+            fg->AddCircleFilled({cx - 3.5f, dcy - 2.5f}, 1.8f, bgCol, 12);
+            fg->AddCircleFilled({cx + 3.5f, dcy - 2.5f}, 1.8f, bgCol, 12);
+            fg->AddLine({cx - 3.5f, dcy + 2.8f}, {cx + 3.5f, dcy + 2.8f}, bgCol, 1.4f);
         };
         const float tY = bY + (bH - ImMax(eSz.y, bSz.y)) * 0.5f;
         const float enemyX = bX + pad;
@@ -274,8 +279,8 @@ void DrawWatermark(float dt) {
         const float dividerX = enemyNumX + eSz.x + groupGap;
         const float botX = dividerX + dividerW + groupGap;
         const float botNumX = botX + iconW + gap;
-        drawPersonIcon(enemyX, enemyCol, false);
-        drawPersonIcon(botX, botCol, true);
+        drawEnemyIcon(enemyX, enemyCol);
+        drawBotIcon(botX, botCol);
         fg->AddRectFilled({dividerX, bY + 10.f},
                           {dividerX + dividerW, bY + bH - 10.f},
                           C::UA(C::Dim(), 0.55f), 0.5f);
