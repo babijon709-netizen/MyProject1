@@ -8262,6 +8262,99 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
     }
 }
 
+// ---- Здоровье прямого пути позиции -----------------------------------------
+//
+// Профиль сборки отдаёт смещение поля позиции (PLAYER_POSITION), и пока игра
+// не обновляется, этого достаточно. После обновления поле уезжает — и прямой
+// путь начинает отдавать конечный мусор, который не проходит гейт мировых
+// координат. В логе 11:52-11:54 так было у КАЖДОГО игрока каждый кадр
+// (pos_reads={direct=invalid-world,...}), и ESP всё это время ехал на
+// kcc-фолбэке: снаружи это не видно вообще, поэтому без своей строки
+// устаревший профиль не отличить от здорового конвейера.
+//
+// Цепочка discover/recheck (find_direct_player_position_offset и компания)
+// написана была ровно для этого, но не вызывалась ниоткуда: профильное
+// смещение держалось вечно. Здесь — детект, лог и попытка переключить
+// смещение среди уже известных.
+static int    s_direct_dead_players = 0;   // игроков с прямой попыткой чтения
+static int    s_direct_dead_count   = 0;   // из них — без мировой позиции
+static int    s_direct_dead_frames  = 0;
+static double s_direct_dead_since   = 0.0;
+static double s_direct_dead_log_at  = -1e9;
+
+static void revalidate_dead_direct_position(const std::vector<uint64_t>& players) {
+    uint64_t best_offset = 0;
+    double best_score = 0.0;
+    for (uint64_t offset : k_known_position_offsets) {
+        double score = 0.0;
+        if (!evaluate_player_position_offset(players, offset, score)) continue;
+        const double count = floor(score / 1000000.0);
+        const double best_count = floor(best_score / 1000000.0);
+        // Только разостное подтверждение: одному игроку «правдоподобную»
+        // мировую позицию отдаёт и чужое поле, и на пустом сервере это
+        // выродилось бы в миграцию боксов по мусорному смещению.
+        if (count >= 2.0 && count > best_count) { best_offset = offset; best_score = score; }
+    }
+    if (!best_offset) {
+        LogLine("позиция: прямой путь мёртв — среди %zu известных смещений рабочего нет, остаюсь на фолбэке",
+                sizeof(k_known_position_offsets) / sizeof(k_known_position_offsets[0]));
+        return;
+    }
+    LogLine("позиция: прямой путь мёртв — рабочее смещение 0x%llx (профиль давал 0x%llx), переключил",
+            (unsigned long long)best_offset, (unsigned long long)g_player_position_offset);
+    g_use_direct_player_position = true;
+    g_player_position_offset = best_offset;
+    g_player_position_validated = true;
+    g_matrix_configuration_validated = false;
+    g_body_caches_dirty = true;   // кеши поз/скелетов держат мировые координаты
+    g_direct_position_fail_streak = 0;
+    g_direct_position_fail_since = 0.0;
+}
+
+static void note_direct_position_health(const std::vector<uint64_t>& players,
+                                        const std::vector<char>& sources) {
+    if (!(g_use_direct_player_position && g_player_position_offset != 0 &&
+          s_direct_dead_players > 0 && s_direct_dead_count == s_direct_dead_players)) {
+        s_direct_dead_frames = 0;
+        s_direct_dead_since = 0.0;
+        return;
+    }
+    if (s_direct_dead_since == 0.0) s_direct_dead_since = mono_seconds();
+    ++s_direct_dead_frames;
+    const double now = mono_seconds();
+    const double dead_for = now - s_direct_dead_since;
+    if (dead_for >= 5.0 && now - s_direct_dead_log_at >= 30.0) {
+        s_direct_dead_log_at = now;
+        size_t kcc_n = 0, model_n = 0, cache_n = 0;
+        for (char s : sources) {
+            if (s == 'K') ++kcc_n;
+            else if (s == 'M') ++model_n;
+            else if (s == 'C') ++cache_n;
+        }
+        LogLine("позиция: прямой путь мёртв %.1f с — смещение 0x%llx не дало мировых координат ни у одного из %d игроков; держусь на kcc=%zu model=%zu cache=%zu",
+                dead_for, (unsigned long long)g_player_position_offset,
+                s_direct_dead_players, kcc_n, model_n, cache_n);
+    }
+    // Раз в ~5 c мертвого пути пробуем известные смещения: событие редкое,
+    // а поиск читает позиции всех игроков на каждое смещение.
+    if (s_direct_dead_frames >= 300) {
+        s_direct_dead_frames = 0;
+        revalidate_dead_direct_position(players);
+    }
+}
+
+// Бюджет на строку про трупа, занявшего uid: одно событие на респавн, но на
+// потоке респавнов оно иначе затирает лог.
+static bool duplicate_uid_log_allow() {
+    static double at = -1e9;
+    static int left = 0;
+    const double now = mono_seconds();
+    if (now - at >= 1.0) { at = now; left = 2; }
+    if (left <= 0) return false;
+    --left;
+    return true;
+}
+
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
     g_box_frame_transient = true;
@@ -8432,6 +8525,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     std::vector<unsigned short> position_read_flags(s_transforms.size(), 0);
     std::vector<char> skip_reason(s_transforms.size(), 0); // наблюдатель мерцаний: код пропуска
     size_t live_player_positions = 0;
+    s_direct_dead_players = 0;
+    s_direct_dead_count = 0;
 
     Vec3 camera_position{};
     if (!camera_position_from_view(view, camera_position)) {
@@ -8457,6 +8552,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (read_ok) {
             read_flags |= PositionDirectValid;
             source = 'D';
+        }
+        if (g_use_direct_player_position && g_player_position_offset != 0) {
+            ++s_direct_dead_players;
+            if (direct_read_ok && !read_ok) ++s_direct_dead_count;
         }
         if (!read_ok) {
             const PlayerAux& aux = player_aux(player);
@@ -8508,6 +8607,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             tracked->second.filt.has_drawn = true;
         }
     }
+
+    note_direct_position_health(s_transforms, position_source);
 
     // Local identity only excludes our own PlayerManager. Distance always uses
     // the camera from this exact projection frame, never a stale player field.
@@ -8684,6 +8785,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         mark_skip('S');
                         continue;
                     }
+                    if (pick_corpse && duplicate_uid_log_allow())
+                        LogLine("визуал: uid %s — объект 0x%llx труп, uid не удерживает; показываю свежий 0x%llx",
+                                track_it->second.uid, (unsigned long long)pick,
+                                (unsigned long long)s_transforms[i]);
                 }
                 pick = s_transforms[i];
             }
@@ -8692,6 +8797,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Counted before any screen-space checks: the pill counter must see
         // players behind us too (360 degrees), not only the ones on screen.
         ++g_frame_player_count;
+        crash_note("esp: player 0x%llx", (unsigned long long)s_transforms[i]);
 
         // Crouch-aware body height from the character controller.
         PlayerAux& aux = player_aux(s_transforms[i]);

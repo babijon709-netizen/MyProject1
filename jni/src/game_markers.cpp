@@ -97,6 +97,12 @@ static int32_t g_marker_scan_cursor = -1;    // -1: цикл не начат
 static int32_t g_marker_scan_total  = 0;
 static uint64_t g_marker_scan_identity_class = 0;
 static std::vector<uint8_t> g_marker_scan_buffer;
+// Тайминг цикла рескана. В логе 11:52-11:54 раз в секунду кадр уходил в
+// 70-93 мс, и esp занимал его почти целиком; по этой строке видно, рескан ли
+// это (реестр/порции/мс) или конвейер игроков, — без неё причина рывка
+// неотличима от «устройство подвисло».
+static double s_scan_cycle_at = 0.0;
+static int    s_scan_cycle_chunks = 0;
 // g_marker_scan_pending (список, который собирается сейчас) и marker_scan_abort()
 // объявлены ниже, вместе с MarkerEntity; фильтр категорий меняется раньше по
 // файлу, поэтому здесь только объявление.
@@ -1108,6 +1114,7 @@ bool marker_world_position(uint64_t transform, Vec3& out) {
 }
 
 static MarkerScanResult rebuild_marker_entities() {
+    const double t_chunk = mono_seconds();
     auto unavailable = []() {
         g_marker_scan_unavailable = true;
         marker_scan_abort();
@@ -1118,6 +1125,8 @@ static MarkerScanResult rebuild_marker_entities() {
         // завершения сборки, поэтому маркеры не мигают.
         g_marker_scan_pending.clear();
         g_marker_scan_buffer.clear();
+        s_scan_cycle_at = t_chunk;
+        s_scan_cycle_chunks = 0;
 
         uint64_t dictionary = resolve_network_client_spawned();
         if (!dictionary) return unavailable();
@@ -1174,6 +1183,12 @@ static MarkerScanResult rebuild_marker_entities() {
         for (int32_t b = 0; b < behaviour_count; ++b) {
             uint64_t component = behaviours[b];
             if (!valid_obj(component)) continue;
+            // Заметка для crash_handler: скан — самое дорогое место кадра, и
+            // падение в нём без узла нечем локализовать (лог 11:54:21 ушёл в
+            // stage=menu, а стартовал скан из hud-пилюли).
+            crash_note("marker scan: cursor=%d/%d identity=0x%llx component=0x%llx",
+                       (int)i, (int)count, (unsigned long long)identity,
+                       (unsigned long long)component);
             const uint8_t component_class = marker_class_of(rd_ptr(component));
             // Класс читаем, но семья не опознана: почти всегда это сервисный
             // компонент (аниматоры, менеджеры игрока), который маркером не
@@ -1352,6 +1367,7 @@ static MarkerScanResult rebuild_marker_entities() {
         // Порция израсходована (вышло время), цикл не закончен — продолжим на
         // следующем кадре с этого же узла.
         g_marker_scan_cursor = i;
+        ++s_scan_cycle_chunks;
         return MarkerScanResult::Pending;
     }
     // Конец цикла: словарь пройден либо уперлись в защитный лимит списка.
@@ -1366,6 +1382,10 @@ static MarkerScanResult rebuild_marker_entities() {
               });
     g_marker_entities.swap(g_marker_scan_pending);
     marker_scan_abort();
+    ++s_scan_cycle_chunks;
+    LogLine("маркеры: скан — реестр %d узлов, сущностей %zu, порций %d, цикл %.1f мс, последняя порция %.1f мс",
+            (int)g_marker_scan_total, g_marker_entities.size(), s_scan_cycle_chunks,
+            (mono_seconds() - s_scan_cycle_at) * 1000.0, (mono_seconds() - t_chunk) * 1000.0);
     return MarkerScanResult::Complete;
 }
 
@@ -1470,6 +1490,18 @@ static uint64_t marker_watch_key(const MarkerEntity& entity) {
     return entity.id ? entity.id : entity.identity;
 }
 
+// Бюджет на строки удержания у края: они идут каждый кадр, пока метка стоит
+// на границе, и без бюджета вытеснили бы всё остальное.
+static bool marker_edge_log_allow() {
+    static double at = -1e9;
+    static int left = 0;
+    const double now = mono_seconds();
+    if (now - at >= 1.0) { at = now; left = 2; }
+    if (left <= 0) return false;
+    --left;
+    return true;
+}
+
 static void marker_watch_observe(const MarkerEntity& entity, bool visible,
                                  const char* reason, float distance,
                                  float screen_x, float screen_y) {
@@ -1484,11 +1516,12 @@ static void marker_watch_observe(const MarkerEntity& entity, bool visible,
             if (visible) ++s_marker_watch_returns;
             else ++s_marker_watch_losses;
             if (marker_watch_allow())
-                LogLine("ESP-ДИАГ-МЕТКА: 0x%llx kind=%d name=%s %s, причина=%s, dist=%.1fм world=(%.1f %.1f %.1f)",
+                LogLine("ESP-ДИАГ-МЕТКА: 0x%llx kind=%d name=%s %s, причина=%s, dist=%.1fм world=(%.1f %.1f %.1f) экран=(%.0f %.0f)",
                         (unsigned long long)key, entity.kind, marker_name,
                         visible ? "ВЕРНУЛАСЬ" : "ПРОПАЛА", reason,
                         (double)distance, (double)entity.position.x,
-                        (double)entity.position.y, (double)entity.position.z);
+                        (double)entity.position.y, (double)entity.position.z,
+                        (double)screen_x, (double)screen_y);
         }
         if (visible && old.visible && old.frame + 1 == s_marker_watch_frame) {
             const float wx = entity.position.x - old.world.x;
@@ -1714,6 +1747,15 @@ std::vector<EspMarker> esp_get_markers() {
             marker_watch_observe(entity, false, "OFFSCREEN", distance, screen.x, screen.y);
             continue;
         }
+        // Доказательство работы фикса: метка, которую старая зона ±64 px уже
+        // погасила бы, но гистерезис держит. Без этой строки «исправлено» и
+        // «никогда не срабатывало» в логе выглядят одинаково — тишиной.
+        if (was_visible && (screen.x < -64.0F || screen.x > g_frame_sw + 64.0F ||
+                            screen.y < -64.0F || screen.y > g_frame_sh + 64.0F) &&
+            marker_edge_log_allow())
+            LogLine("метка: 0x%llx у краю экрана (%.0f %.0f) — держу по зоне %.0f px",
+                    (unsigned long long)marker_watch_key(entity),
+                    (double)screen.x, (double)screen.y, (double)edge);
 
         marker_watch_observe(entity, true, "VISIBLE", distance, screen.x, screen.y);
         EspMarker marker;

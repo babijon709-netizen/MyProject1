@@ -432,7 +432,13 @@ void DrawEspOverlay() {
         float rr = 1.f, rg = 1.f, rb = 1.f;
         ImGui::ColorConvertHSVtoRGB(rainbow_hue, 0.85f, 1.0f, rr, rg, rb);
         const ImU32 rainbow_col = IM_COL32((int)(rr * 255.f), (int)(rg * 255.f), (int)(rb * 255.f), 255);
-        for (const EspMarker& marker : FrameMarkers()) {
+        // Маркеры — отдельная стадия: сканирование реестра и позиции сущностей
+        // живут в FrameMarkers, и падение в них при stage=esp неотличимо от
+        // падения в конвейере игроков.
+        LogStage(kStageMarkers);
+        const std::vector<EspMarker>& frame_markers = FrameMarkers();
+        LogStage(kStageEsp);
+        for (const EspMarker& marker : frame_markers) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;
             ImU32 col = marker.rainbow ? rainbow_col

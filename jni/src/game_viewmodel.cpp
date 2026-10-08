@@ -384,13 +384,34 @@ uint64_t find_unity() {
     // первого образа для меню и журнала. Не прочитался — 0, тогда в меню
     // останется просто «ожидание».
     fps_unknown_build_id = 0;
+    // Повтор той же неопознанной сборки — не новость: в логе 11:52-11:54 эта
+    // строка шла 92 раза за две минуты и топила всё остальное. Печатаем смену
+    // build id или числа mapped-образов сразу, одинаковое — раз в 30 c.
+    // mapped отличает «игра обновилась» от «карты памяти не читаются», а
+    // непрочитанный id говорит, что лейаут добавлять ещё рано.
+    static uint64_t last_logged_build = 0;
+    static int last_logged_maps = -1;
+    static Clock::time_point last_logged_at{};
+    if (found) {
+        last_logged_build = 0;   // следующая неопознанная сборка — сразу в лог
+        last_logged_maps = -1;
+    }
     if (!found && count > 0) {
         uint64_t id = 0;
-        if (memory.read(candidates[0] + 0x318, id) && id)
-            fps_unknown_build_id = id;
-        if (fps_unknown_build_id)
-            LogLine("fps: libunity не опознан, build id %016llx (игра обновилась?)",
-                    (unsigned long long)fps_unknown_build_id);
+        const bool id_read = memory.read(candidates[0] + 0x318, id) && id != 0;
+        if (id_read) fps_unknown_build_id = id;
+        const auto now_log = Clock::now();
+        const bool changed = id != last_logged_build || count != last_logged_maps;
+        if (changed || now_log - last_logged_at > std::chrono::seconds(30)) {
+            last_logged_at = now_log;
+            last_logged_build = id;
+            last_logged_maps = count;
+            if (id_read)
+                LogLine("fps: libunity не опознан, build id %016llx, mapped=%d (игра обновилась?)",
+                        (unsigned long long)id, count);
+            else
+                LogLine("fps: libunity не опознан, build id не прочитан (+0x318), mapped=%d", count);
+        }
     }
     return found;
 }

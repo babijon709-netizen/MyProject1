@@ -1871,8 +1871,12 @@ void RenderMenu() {
     bool anyOverlayVisible = g_sheet.visible || g_pop.visible;
     if (!io.MouseDown[0] && !anyOverlayVisible) g_input.touchConsumed = false;
 
+    // Худ отдельной стадией: пилюля счётчика зовёт FrameBoxes и скан ботов
+    // (esp_nearby_bot_count), и падение в них в логе выглядело как stage=menu.
+    LogStage(kStageHud);
     DrawWatermark(dt);
     DrawToast(dt);
+    LogStage(kStageMenu);
 
     // ---- Режим калибровки зон вводом с экрана ------------------------------
     // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):

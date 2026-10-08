@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -44,6 +45,12 @@ std::atomic<long long> g_beat_ns{0};
 std::atomic<bool> g_watchdog_run{false};
 std::thread g_watchdog;
 
+// Заметка для crash_handler. Писатель один — render-поток; читатель —
+// обработчик сигнала, возможно на том же потоке. Мьютекса нет намеренно: в
+// обработчике он мог быть уже взят мёртвым потоком.
+static char s_crash_note[96] = {};
+static std::atomic<bool> s_crash_note_valid{false};
+
 long long monotonic_ns() {
     timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -60,6 +67,8 @@ const char* stage_name(int stage) {
         case kStageAimTouch: return "aim-touch";
         case kStageFarm: return "farm";
         case kStageMenu: return "menu";
+        case kStageHud: return "hud";
+        case kStageMarkers: return "markers";
         case kStageFreecam: return "freecam";
         case kStageFrameEnd: return "frame-end";
         default: return "none";
@@ -88,16 +97,17 @@ void crash_handler(int signal_number, siginfo_t* info, void* context) {
 #elif defined(__x86_64__) && defined(REG_RIP)
     if (context) pc = (uintptr_t)((ucontext_t*)context)->uc_mcontext.gregs[REG_RIP];
 #endif
-    char message[384];
+    char message[512];
     const long long age_ns = monotonic_ns() - g_beat_ns.load(std::memory_order_relaxed);
     const int length = std::snprintf(
         message, sizeof(message),
-        "\nCRASH: signal=%d code=%d fault=0x%llx pc=0x%llx frame=%lu stage=%s(%d) beat-age=%.3fs\n",
+        "\nCRASH: signal=%d code=%d fault=0x%llx pc=0x%llx frame=%lu stage=%s(%d) beat-age=%.3fs note=%s\n",
         signal_number, info ? info->si_code : 0,
         (unsigned long long)(uintptr_t)(info ? info->si_addr : nullptr),
         (unsigned long long)pc, g_frame.load(std::memory_order_relaxed),
         stage_name(g_stage.load(std::memory_order_relaxed)),
-        g_stage.load(std::memory_order_relaxed), (double)age_ns / 1e9);
+        g_stage.load(std::memory_order_relaxed), (double)age_ns / 1e9,
+        s_crash_note_valid.load(std::memory_order_acquire) ? s_crash_note : "-");
     if (g_crash_fd >= 0 && length > 0) {
         write(g_crash_fd, message, (size_t)length);
         fsync(g_crash_fd);
@@ -108,6 +118,14 @@ void crash_handler(int signal_number, siginfo_t* info, void* context) {
     syscall(SYS_tgkill, getpid(), syscall(SYS_gettid), signal_number);
 #endif
     _exit(128 + signal_number);
+}
+
+void crash_note(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(s_crash_note, sizeof(s_crash_note), format, args);
+    va_end(args);
+    s_crash_note_valid.store(true, std::memory_order_release);
 }
 
 void install_crash_handlers() {

@@ -12,6 +12,8 @@ enum LogStageId {
     kStageAimTouch,
     kStageFarm,
     kStageMenu,
+    kStageHud,
+    kStageMarkers,
     kStageFreecam,
     kStageFrameEnd,
     kStageCount
@@ -25,3 +27,10 @@ void LogStage(int stage);
 void LogFrameBeat(unsigned long frame);
 void LogWatchdogStart();
 void LogLine(const char* format, ...) __attribute__((format(printf, 1, 2)));
+
+// Короткая заметка «что именно делаем» для crash_handler: stage отвечает «в
+// какой фазе кадра», note — «на каком объекте». Без неё падение внутри фазы
+// нечем локализовать: в логе 11:54:21 край дал stage=menu(8), а menu — это
+// ещё и hud-пилюля со сканом маркеров, и по стадии не понять, где именно.
+// Пишет только render-поток; обработчик сигнала читает без мьютекса.
+void crash_note(const char* format, ...) __attribute__((format(printf, 1, 2)));

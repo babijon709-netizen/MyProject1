@@ -6,6 +6,7 @@
 #include "game.h"        // esp_nearby_player_count
 #include "process.h"     // g_esp_attached
 #include "esp_draw.h"    // FrameBoxes
+#include "logfile.h"     // crash_note
 #include "ui_util.h"     // EaseOut3, TickSlideAnim
 #include "str.h"         // XS()
 #include "text_utf8.h"   // CopyTextUtf8
@@ -215,12 +216,19 @@ void DrawWatermark(float dt) {
         if (g_esp_attached) {
             // Обновляем снимок кадра (кэшируется на кадр) и берём число
             // игроков вокруг на все 360° — не только тех, кто попал на экран.
+            crash_note("hud pill: frame boxes");
             FrameBoxes(scrW, scrH);
             enemies = esp_nearby_player_count();
         }
 
         const float fs = 40.f, pad = 18.f, bR = 46.f;
-        const int bots = g_esp_attached ? esp_nearby_bot_count() : 0;
+        int bots = 0;
+        if (g_esp_attached) {
+            // Единственное место вне конвейера ESP, откуда стартует скан
+            // маркеров. Заметка отличает падение здесь от падения в меню.
+            crash_note("hud pill: bot scan");
+            bots = esp_nearby_bot_count();
+        }
         char enemyBuf[16], botBuf[16];
         snprintf(enemyBuf, sizeof(enemyBuf), "%d", enemies);
         snprintf(botBuf, sizeof(botBuf), "%d", bots);
