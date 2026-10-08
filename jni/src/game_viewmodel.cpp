@@ -11,7 +11,6 @@
 #include "maps_lookup.h"
 #include <chrono>
 #include <cerrno>
-#include <cmath>
 #include <limits>
 #include <cstdio>
 #include <fcntl.h>
@@ -310,27 +309,6 @@ fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
 fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
 no_recoil::Controller<HeapMemory> no_recoil_ctl(heap_memory);
 no_ballistics::Controller<HeapMemory> no_ballistics_ctl(heap_memory);
-
-// Имя Il2CppClass для диагностики быстрого подбора: какой класс элементов
-// плеер-лупа попался вместо DelayPromise. Чтение метаданных местами не
-// стабильно (см. named_klass) — тогда отдаём hex указателя.
-void fast_loot_klass_name(uint64_t klass, char* out, size_t cap) {
-    if (!out || cap == 0) return;
-    out[0] = 0;
-    uint64_t np = memory.ptr(klass + go_active::IL2CPP_CLASS_NAME);
-    char raw[24] = {};
-    if (np >= 0x10000 && g_mem.read_quiet(np, raw, sizeof(raw))) {
-        raw[sizeof(raw) - 1] = 0;
-        size_t w = 0;
-        for (size_t i = 0; raw[i] && w + 1 < cap; ++i) {
-            const unsigned char c = (unsigned char)raw[i];
-            if (c >= 0x20 && c < 0x7F) out[w++] = (char)c;  // фильтр от мусора
-        }
-        out[w] = 0;
-        if (out[0]) return;
-    }
-    snprintf(out, cap, "0x%llx", (unsigned long long)klass);
-}
 
 // Причина остановки быстрой стрельбы для лога: расшифровка стадии, которую
 // выставляет fast_fire::Controller (resolve/build_plan/apply в
@@ -676,25 +654,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         // зависит от цепочки игрока, поэтому тикается до её резолва.
         static fast_loot::State loot_last_state = fast_loot::State::Off;
         static bool loot_announced = false;
-        static bool loot_last_on = false;
-        static fast_loot::Clock::time_point loot_last_report{};
-        static fast_loot::Clock::time_point loot_last_zero_at{};
-        static int  loot_burst_count = 0;
-        static bool loot_burst_open = false;
-        static fast_loot::Diag loot_prev_diag{};
-
-        // Включение фичи обнуляет диагностику: жалоба «не сработало» читается
-        // по чистым счётчикам одной сессии, без хвостов прошлых игр.
-        if (settings.fast_loot && !loot_last_on) {
-            loot_speed.diag_reset();
-            loot_prev_diag = {};
-            loot_last_report = fast_loot::Clock::now();
-            loot_last_zero_at = {};
-            loot_burst_count = 0; loot_burst_open = false;
-            LogLine("fast loot: включён, диагностика сброшена (%s)", go_active::VersionName());
-        }
-        loot_last_on = settings.fast_loot;
-
         const int loot_zeroed = loot_speed.tick(g_il2cpp_base, settings.fast_loot);
         if (loot_speed.state() != loot_last_state) {
             loot_last_state = loot_speed.state();
@@ -704,119 +663,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         if (loot_zeroed > 0 && !loot_announced) {
             loot_announced = true;
             LogLine("fast loot: first zeroing — %d delay(s) of 0.35f completed early", loot_zeroed);
-        }
-
-        const auto loot_now = fast_loot::Clock::now();
-        // Серия сбора: открывается первым обнулением, закрывается полусекундой
-        // тишины — факт «собрал ли вообще» виден по логу напрямую.
-        if (loot_zeroed > 0) {
-            loot_burst_open = true;
-            loot_burst_count += loot_zeroed;
-            loot_last_zero_at = loot_now;
-        } else if (loot_burst_open &&
-                   loot_now - loot_last_zero_at > std::chrono::milliseconds(500)) {
-            loot_burst_open = false;
-            LogLine("fast loot: серия сбора закончена, обнулено задержек: %d", loot_burst_count);
-            loot_burst_count = 0;
-        }
-
-        // «Не работает»: раз в 10 с окно-дельты счётчиков. Фон игры — сотни
-        // чужих DelayPromise на 1.00/2.00/9.70/10.00 с каждые 10 с (видно в
-        // benzware.log) — сам по себе аномалией НЕ является: первые 10 с
-        // активности фиксируют базовую линию около-луковых длительностей, и
-        // дальше репортируются только: структурные обрывы, отказы записи или
-        // elapsed, исчезновение «своих» классов из лупа и НОВЫЕ значения
-        // около-луковой каденции (главный признак переехавшего 0.35).
-        static fast_loot::Clock::time_point loot_active_since{};
-        static float loot_base_spans[4] = {};
-        static bool  loot_baseline = false;
-        if (loot_speed.state() != fast_loot::State::Active) {
-            loot_active_since = {};
-            loot_baseline = false;
-        }
-        if (settings.fast_loot && loot_speed.state() == fast_loot::State::Active &&
-            !loot_burst_open && loot_now - loot_last_report >= std::chrono::seconds(10)) {
-            loot_last_report = loot_now;
-            const fast_loot::Diag& d = loot_speed.diag();
-            if (!loot_baseline) {
-                if (!loot_active_since.time_since_epoch().count())
-                    loot_active_since = loot_now;
-                else if (loot_now - loot_active_since >= std::chrono::seconds(10)) {
-                    loot_baseline = true;
-                    for (int i = 0; i < 4; ++i) loot_base_spans[i] = d.seen_timespans[i];
-                }
-            }
-            if (loot_baseline) {
-                int new_spans = 0;
-                char spans[96] = {};
-                for (int i = 0; i < 4 && d.seen_timespan_hits[i] > 0; ++i) {
-                    bool known = false;
-                    for (int b = 0; b < 4; ++b)
-                        if (loot_base_spans[b] != 0.f &&
-                            fabsf(loot_base_spans[b] - d.seen_timespans[i]) < 0.0001f) { known = true; break; }
-                    if (!known) {
-                        ++new_spans;
-                        const size_t l = strlen(spans);
-                        snprintf(spans + l, sizeof(spans) - l, "%s%.2fx%d",
-                                 spans[0] ? ", " : "", (double)d.seen_timespans[i],
-                                 d.seen_timespan_hits[i]);
-                    }
-                }
-                const int d_sweeps  = d.sweeps - loot_prev_diag.sweeps;
-                const int d_items   = d.items_seen - loot_prev_diag.items_seen;
-                const int d_hits    = d.klass_hits - loot_prev_diag.klass_hits;
-                const int d_aborts  = d.aborts - loot_prev_diag.aborts;
-                const int d_elapsed = d.elapsed_rejects - loot_prev_diag.elapsed_rejects;
-                const int d_writes  = d.write_fails - loot_prev_diag.write_fails;
-                // Около-луковое окно задевает и фон (1.00 с — см. комментарий
-                // near_cadence): из дельты near-промахов вычитаем дельты
-                // слотов базовой линии — остаток это near-значения, которые
-                // пришли после базовой линии и не влезли в 4 слота.
-                int d_near = d.cadence_near - loot_prev_diag.cadence_near;
-                for (int i = 0; i < 4; ++i) {
-                    if (d.seen_timespan_hits[i] <= 0) continue;
-                    bool known = false;
-                    for (int b = 0; b < 4; ++b)
-                        if (loot_base_spans[b] != 0.f &&
-                            fabsf(loot_base_spans[b] - d.seen_timespans[i]) < 0.0001f) { known = true; break; }
-                    if (known) {
-                        const int dh = d.seen_timespan_hits[i] - loot_prev_diag.seen_timespan_hits[i];
-                        d_near -= dh > 0 ? dh : 0;
-                    }
-                }
-                const bool klass_gone = d_items > 0 && d_hits == 0;
-                const bool anomaly = d_aborts > 0 || new_spans > 0 || d_elapsed > 0 ||
-                                     d_writes > 0 || klass_gone || d_near > 0;
-                if (anomaly) {
-                    char others[100] = {};
-                    bool others_ok = false;
-                    if (klass_gone) {
-                        for (int i = 0; i < 3 && d.other_klass[i]; ++i) {
-                            char nm[28]; fast_loot_klass_name(d.other_klass[i], nm, sizeof(nm));
-                            const size_t l = strlen(others);
-                            snprintf(others + l, sizeof(others) - l, "%s%s", i ? ", " : "", nm);
-                            others_ok = true;
-                        }
-                    }
-                    char near_extra[96] = {};
-                    if (d_near > 0 && !new_spans)
-                        snprintf(near_extra, sizeof(near_extra),
-                                 ", около-луковых промахов вне базовой линии +%d (значения в слоты не влезли)",
-                                 d_near);
-                    LogLine("fast loot: аномалия на окне 10с — проходов +%d, элементов +%d, класс-хитов +%d; "
-                            "обрывы +%d (маска 0x%x: 1 runners,2 длина,4 массив,8 шапка,16 capacity,32 элементы), "
-                            "elapsed-отказ +%d, запись-отказ +%d%s%s%s%s%s",
-                            d_sweeps, d_items, d_hits,
-                            d_aborts, d.abort_mask,
-                            d_elapsed, d_writes,
-                            new_spans ? ", новая каденция рядом с лутовой: " : "",
-                            new_spans ? spans : "",
-                            near_extra,
-                            others_ok ? ", класс промисов пропал; в лупе вижу: " : "",
-                            others_ok ? others : "");
-                }
-            }
-            loot_prev_diag = d;
         }
         if (!settings.fast_loot) loot_announced = false;
     }

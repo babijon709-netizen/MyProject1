@@ -59,29 +59,6 @@ inline std::uint64_t untag(std::uint64_t p) { return p & 0x00ffffffffffffffULL; 
 
 enum class State { Off, Waiting, Active, Failed };
 
-// Диагностика «иногда не работает»: каждая точка, где проход может молча
-// ничего не найти, складывает сюда счётчик. Наружу отдаётся снимком через
-// diag(), репорты в лог строит вызывающая сторона (game_viewmodel.cpp) —
-// у заголовка своего логгера нет и не будет.
-struct Diag {
-    Clock::time_point enabled_at{};   // reset при включении фичи
-    int  resolve_attempts = 0;        // попыток резолва слотов/классов
-    int  static_lost = 0;             // runners под helper_static_ не читается (статика переехала)
-    int  sweeps = 0;                  // проходов дошло до обхода элементов
-    int  abort_mask = 0;              // биты стадий обрыва прохода (см. sweep)
-    int  items_seen = 0;              // элементов раннеров просмотрено
-    int  klass_read_fails = 0;        // класс элемента не прочитался
-    int  klass_hits = 0;              // элемент — DelayPromise/IgnoreTimeScalePromise
-    int  cadence_misses = 0;          // класс тот, timespan != 0.35f (всего)
-    int  cadence_near = 0;            // из них около-луковые (0.05, 1.6]с — см. zero_if_cadence
-    int  aborts = 0;                  // обрывов прохода суммарно (для оконной дельты)
-    int  elapsed_rejects = 0;         // отброшено проверкой elapsed
-    int  write_fails = 0;             // write_heap отказал (ворота логируют сами)
-    float seen_timespans[4] = {};     // до 4 разных около-луковых timespan у «своих» классов
-    int   seen_timespan_hits[4] = {};
-    std::uint64_t other_klass[3] = {}; // первые 3 класса элементов НЕ из списка промисов
-};
-
 template<class IO> class Controller {
 public:
     explicit Controller(IO& io) : io_(io) {}
@@ -94,15 +71,12 @@ public:
         zeroed_total_ = 0;
         last_batch_ = 0;
         stage_ = 0;
-        diag_ = {};   // указатели прежней сессии в диагностике бессмысленны
     }
 
     State state() const { return state_; }
     int stage() const { return stage_; }           // где не сложился резолв (см. resolve)
     int zeroed_total() const { return zeroed_total_; }
     int last_batch() const { return last_batch_; } // обнулено за последний тик
-    const Diag& diag() const { return diag_; }
-    void diag_reset() { diag_ = {}; diag_.enabled_at = Clock::now(); }
 
     // Возвращает число обнулённых задержек (0 — ничего не попалось).
     int tick(uint64_t il2cpp_base, bool enabled) {
@@ -148,7 +122,6 @@ private:
 
     void resolve(uint64_t base) {
         stage_ = 0;
-        ++diag_.resolve_attempts;
         uint64_t helper = 0;
         if (!weapon_tuning::pointer(io_, base + go_active::PLAYER_LOOP_HELPER_TYPEINFO_RVA, helper) ||
             helper < 0x10000 || !io_.named_klass(helper, "PlayerLoopHelper", "Cysharp.Threading.Tasks")) {
@@ -172,55 +145,16 @@ private:
         state_ = State::Active;
     }
 
-    // Около-луковое окно каденции. Фон игры (виден в benzware.log: промисы
-    // ровно на 1.00/2.00/9.70/10.00 с тикают постоянно, сотнями за 10 с) —
-    // это посторонние DelayPromise: лечиться как «лутовая пауза» они не
-    // могут и только замусоривают слоты и репорты. Лутовая пауза живёт
-    // ниже секунды; если в новой сборке её изменят, искать надо значение,
-    // которое ПОЯВИЛОСЬ в этом окне позже базовой линии.
-    static bool near_cadence(float v) { return v > 0.05f && v <= 1.60f; }
-
-    // Запоминает значение timespan «своего» класса, отличное от каденции:
-    // главный признак, что в этом билде пауза «Забрать все» другая.
-    void note_timespan(float value) {
-        for (int i = 0; i < 4; ++i) {
-            if (diag_.seen_timespan_hits[i] > 0 && diag_.seen_timespans[i] == value) {
-                ++diag_.seen_timespan_hits[i]; return;
-            }
-            if (diag_.seen_timespan_hits[i] == 0) {
-                diag_.seen_timespans[i] = value; diag_.seen_timespan_hits[i] = 1; return;
-            }
-        }
-    }
-
-    // Первые три чужих класса, встреченных в плеер-лупе: если DelayPromise
-    // не находится вообще, их имена подскажут, что вместо него.
-    void note_other_klass(uint64_t klass) {
-        for (int i = 0; i < 3; ++i) {
-            if (diag_.other_klass[i] == klass) return;
-            if (diag_.other_klass[i] == 0) { diag_.other_klass[i] = klass; return; }
-        }
-    }
-
     // Обнуляет одну задержку, если поле всё ещё держит точную каденцию.
     int zero_if_cadence(uint64_t item, uint64_t timespan_off) {
         float timespan = 0.f, elapsed = 0.f;
-        if (!io_.read(item + timespan_off, timespan) || timespan != kCadence) {
-            if (viewmodel::finite(timespan) && timespan > 0.001f && timespan <= 30.f) {
-                ++diag_.cadence_misses;
-                if (near_cadence(timespan)) { ++diag_.cadence_near; note_timespan(timespan); }
-            }
-            return 0;
-        }
+        if (!io_.read(item + timespan_off, timespan) || timespan != kCadence) return 0;
         // elapsed живёт следом за полем размера в обеих раскладках: защита от
         // мусорного «попадания» в переработанный объект кучи.
         if (!io_.read(item + timespan_off + 4, elapsed)) return 0;
-        if (!viewmodel::finite(elapsed) || elapsed < 0.f || elapsed > 4.f * kCadence) {
-            ++diag_.elapsed_rejects;
-            return 0;
-        }
+        if (!viewmodel::finite(elapsed) || elapsed < 0.f || elapsed > 4.f * kCadence) return 0;
         const float zero = 0.f;
-        if (!io_.write_heap(item + timespan_off, zero)) { ++diag_.write_fails; return 0; }
+        if (!io_.write_heap(item + timespan_off, zero)) return 0;
         return 1;
     }
 
@@ -228,37 +162,20 @@ private:
     struct RunnerHead { std::int32_t tail; std::uint32_t pad; std::uint64_t items; };
     static_assert(sizeof(RunnerHead) == 16, "tail+items pair layout");
 
-    // abort_mask: 1 — указатель runners не читается, 2 — длина массива
-    // раннеров неправдоподобна, 4 — массив раннеров не прочитался,
-    // 8 — шапка раннера (tail+items), 16 — capacity элементов,
-    // 32 — массив элементов. Биты липкие до diag_reset: проход отказывается
-    // то в одном месте, то в другом, и одного «последнего» номера мало.
     int sweep() {
         uint64_t runners = 0;
         if (!weapon_tuning::pointer(io_, helper_static_ + go_active::PLAYERLOOPHELPER_RUNNERS, runners) ||
             runners < 0x10000) {
             helper_static_ = 0; // статика переехала (перезапуск сцены) — резолв заново
-            ++diag_.static_lost;
-            ++diag_.aborts;
-            diag_.abort_mask |= 1;
             return 0;
         }
         int32_t runner_count = 0;
         if (!io_.read(runners + go_active::IL2CPP_ARRAY_LENGTH, runner_count) ||
-            runner_count <= 0 || runner_count > kMaxRunners) {
-            ++diag_.aborts;
-            diag_.abort_mask |= 2;
-            return 0;
-        }
+            runner_count <= 0 || runner_count > kMaxRunners) return 0;
 
         std::uint64_t runner_ptrs[kMaxRunners] = {};
         if (!io_.read_range(runners + go_active::IL2CPP_ARRAY_FIRST_ELEMENT,
-                            runner_ptrs, (std::size_t)runner_count * sizeof(std::uint64_t))) {
-            ++diag_.aborts;
-            diag_.abort_mask |= 4;
-            return 0;
-        }
-        ++diag_.sweeps;
+                            runner_ptrs, (std::size_t)runner_count * sizeof(std::uint64_t))) return 0;
 
         std::uint64_t items_buf[kMaxItemsPerRunner];
         int zeroed = 0;
@@ -266,44 +183,28 @@ private:
             const uint64_t runner = untag(runner_ptrs[r]);
             if (runner < 0x10000) continue;
             RunnerHead head{};
-            if (!io_.read(runner + go_active::LOOPRUNNER_TAIL, head)) {
-                ++diag_.aborts;
-                diag_.abort_mask |= 8; continue;
-            }
+            if (!io_.read(runner + go_active::LOOPRUNNER_TAIL, head)) continue;
             if (head.tail <= 0) continue;
             const uint64_t items = untag(head.items);
             if (items < 0x10000) continue;
             int32_t capacity = 0;
-            if (!io_.read(items + go_active::IL2CPP_ARRAY_LENGTH, capacity) || capacity <= 0) {
-                ++diag_.aborts;
-                diag_.abort_mask |= 16; continue;
-            }
+            if (!io_.read(items + go_active::IL2CPP_ARRAY_LENGTH, capacity) || capacity <= 0) continue;
             const int32_t count = head.tail < capacity ? head.tail : capacity;
             const int32_t limit = count < kMaxItemsPerRunner ? count : kMaxItemsPerRunner;
             // Указатели элементов — одним чтением на весь диапазон.
             if (!io_.read_range(items + go_active::IL2CPP_ARRAY_FIRST_ELEMENT,
-                                items_buf, (std::size_t)limit * sizeof(std::uint64_t))) {
-                ++diag_.aborts;
-                diag_.abort_mask |= 32; continue;
-            }
+                                items_buf, (std::size_t)limit * sizeof(std::uint64_t))) continue;
             for (int32_t i = 0; i < limit; ++i) {
                 const uint64_t item = untag(items_buf[i]);
                 if (item < 0x10000) continue;
-                ++diag_.items_seen;
                 uint64_t klass = 0;
-                if (!weapon_tuning::pointer(io_, item, klass)) {
-                    ++diag_.klass_read_fails; continue;
-                }
+                if (!weapon_tuning::pointer(io_, item, klass)) continue;
                 // SCALED-набор полей — у DelayPromise, голый — у
                 // DelayIgnoreTimeScalePromise (см. game_offsets.h).
-                if (klass == klass_scaled_ && klass_scaled_) {
-                    ++diag_.klass_hits;
+                if (klass == klass_scaled_ && klass_scaled_)
                     zeroed += zero_if_cadence(item, go_active::DELAYPROMISE_SCALED_TIMESPAN);
-                } else if (klass == klass_unscaled_ && klass_unscaled_) {
-                    ++diag_.klass_hits;
+                else if (klass == klass_unscaled_ && klass_unscaled_)
                     zeroed += zero_if_cadence(item, go_active::DELAYPROMISE_TIMESPAN);
-                } else
-                    note_other_klass(klass);
             }
         }
         return zeroed;
@@ -316,7 +217,6 @@ private:
     State state_ = State::Waiting;
     Clock::time_point last_tick_{}, next_resolve_{};
     int zeroed_total_ = 0, last_batch_ = 0, stage_ = 0;
-    Diag diag_{};
 };
 
 } // namespace fast_loot
