@@ -18,6 +18,7 @@
 #include "mode_select.h"
 #include "metadata_dump.h"
 #include "skeleton_diag.h"
+#include "logfile.h"
 #include "mem_io.h"
 #include "kernel_io.h"
 #include "stealth.h"
@@ -295,6 +296,12 @@ int main(int argc, char* argv[]) {
             return skeldiag::Run(argc - i, argv + i);
     }
 
+    // Лог диагностики на устройстве: <CfgDir()>/benzware.log. Открываем до
+    // маскировки и до всего остального, чтобы в файл попали и привязка, и
+    // отказы транспорта, и найденные на живой памяти смещения.
+    LogOpen(CfgDir());
+    LogLine("чит: старт (pid %d)", (int)getpid());
+
     // Страж-трейсер САМЫМ ПЕРВЫМ делом после разбора аргументов: процесс ещё
     // однопоточен (чистый fork), а PTRACE_SEIZE обязан случиться ДО
     // PR_SET_DUMPABLE=0 в ApplyEarly — не-root среда иначе не даст потомку
@@ -484,6 +491,7 @@ int main(int argc, char* argv[]) {
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             if (nowSec - lastHist >= 1.0) {
                 lastHist = nowSec;
+                LogFrameBeat(frame);
                 // Сколько чтений памяти пришлось на кадр за секунду и сколько из
                 // них отказало: отличает «аим раздул объём чтений» от «каждое
                 // чтение ждёт в ядре» (см. esp_mem_reads_total).
@@ -494,6 +502,23 @@ int main(int argc, char* argv[]) {
                 const double readsPerFrame = frames ? (double)(readsNow - lastReads) / (double)frames : 0.0;
                 const unsigned long long failsDelta = failsNow - lastFails;
                 lastReads = readsNow; lastFails = failsNow;
+                // В файл — тем же куском, но не каждую секунду: ровный кадр
+                // пишем раз в десять, а при тормозах или отказах чтения —
+                // каждую (по ним видно и «аим раздул объём чтений», и «каждое
+                // чтение ждёт в ядре»). Иначе лог на 3 МБ живёт шесть часов.
+                static unsigned sec_tick = 0;
+                const bool interesting = failsDelta > 0 || worst > 50.0;
+                if (interesting || ++sec_tick >= 10) {
+                    sec_tick = 0;
+                    LogLine("кадр%s: %u/%u/%u/%u/%u (<20/<34/<50/<100/>=100 мс), "
+                            "худший %.0f мс (#%lu), чтений/кадр %.0f, отказов %llu, "
+                            "привязка %d, транспорт %s",
+                            interesting ? "!" : "",
+                            hist[0], hist[1], hist[2], hist[3], hist[4],
+                            worst, worstFrame, readsPerFrame, failsDelta,
+                            (int)esp_attach_state(),
+                            esp_mem_backend_kernel() ? "кернел" : "экстернал");
+                }
                 hist[0] = hist[1] = hist[2] = hist[3] = hist[4] = 0;
                 worst = 0.0; worstFrame = 0;
             }
@@ -519,5 +544,7 @@ int main(int argc, char* argv[]) {
     process_detach();
     CfgWatchFree();
     AudioFree();
+    LogLine("чит: выход");
+    LogClose();
     _exit(0);
 }

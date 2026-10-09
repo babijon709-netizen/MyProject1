@@ -5,6 +5,7 @@
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
+#include "logfile.h"             // файловый лог диагностики на устройстве
 #include "mem_io.h"                // чтение/запись памяти игры: транспорт + кэш блоков
 #include "kernel_io.h"             // кернел-транспорт (сокет ядерного драйвера)
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
@@ -4298,6 +4299,60 @@ static bool     g_character_model_probing = false;
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
 void esp_set_aim_bones_enabled(bool enabled) { g_aim_bones_requested = enabled; }
 
+#include "logfile.h"             // файловый лог диагностики на устройстве
+// ---- Лог конвейера костей -------------------------------------------------
+// Отказы здесь повторяются каждый кадр на каждого игрока, поэтому в файл
+// уходит одна строка на правило не чаще раза в period секунд: лог читаем,
+// кадр — нет.
+static void skeleton_log(int slot, double period, const char* fmt, ...)
+        __attribute__((format(printf, 3, 4)));
+static void skeleton_log(int slot, double period, const char* fmt, ...) {
+    static double last[16] = {};
+    if (slot < 0 || slot >= 16) return;
+    const double now = mono_seconds();
+    if (now - last[slot] < period) return;
+    last[slot] = now;
+    char text[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    LogLine("скелет: %s", text);
+}
+
+// Пример имён из поддерева модели: по ним видно, тот ли это риг и как
+// обфускатор назвал кости. Считаем все прочитанные, печатаем первые шесть.
+static void skeleton_sample_names(const std::vector<uint64_t>& nodes, char* out,
+                                  size_t cap, int& named) {
+    out[0] = '\0';
+    named = 0;
+    size_t used = 0;
+    for (uint64_t node : nodes) {
+        char name[48];
+        if (!read_transform_name(node, name, sizeof(name))) continue;
+        ++named;
+        if (named > 6) continue;
+        const size_t room = cap - used;
+        if (room < 2) break;
+        const int w = snprintf(out + used, room, "%s%s", used ? ", " : "", name);
+        if (w > 0) used += ((size_t)w < room) ? (size_t)w : room - 1;
+    }
+}
+
+// Раскладку пишем в лог один раз на смену: перебор дорог, а строка дешева —
+// по ней видно, какие смещения подобрал именно этот девайс.
+static void skeleton_log_layout(const char* what, const TransformHierarchyLayout& l) {
+    static TransformHierarchyLayout last{};
+    static bool have = false;
+    if (have && memcmp(&last, &l, sizeof(l)) == 0) return;
+    last = l; have = true;
+    LogLine("скелет: раскладка %s — данные +0x%llx индекс +0x%llx матрицы +0x%llx"
+            " индексы +0x%llx косвенно %d/%d",
+            what, (unsigned long long)l.data_offset, (unsigned long long)l.index_offset,
+            (unsigned long long)l.matrices_offset, (unsigned long long)l.indices_offset,
+            (int)l.matrices_indirect, (int)l.indices_indirect);
+}
+
 // characterModel (managed GameObject) -> native GameObject -> its Transform.
 static uint64_t model_root_at_offset(uint64_t player, uint64_t offset) {
     if (!player) return 0;
@@ -4335,8 +4390,17 @@ static uint64_t discover_character_model_offset(uint64_t player) {
             if (!read_transform_name(node, name, sizeof(name))) continue;
             if (match_bone_name(name) >= 0 && ++hits >= 3) break;
         }
-        if (hits >= 3) return offset;
+        if (hits >= 3) {
+            LogLine("скелет: слот characterModel найден перебором: +0x%llx "
+                    "(вшитый +0x%llx не дал модель)",
+                    (unsigned long long)offset,
+                    (unsigned long long)go_active::PLAYER_CHARACTER_MODEL);
+            return offset;
+        }
     }
+    skeleton_log(1, 60.0, "слот characterModel не найден: вшитый +0x%llx мёртв, "
+                          "перебор 0x40..0x300 не дал рига",
+                 (unsigned long long)go_active::PLAYER_CHARACTER_MODEL);
     return 0;
 }
 
@@ -4505,6 +4569,9 @@ static bool discover_gameobject_name_offset(const std::vector<uint64_t>& nodes) 
                 g_go_name_offset = offset;
                 g_go_name_plain_pointer = plain_pointer != 0;
                 g_go_name_offset_valid = true;
+                LogLine("скелет: смещение имени GameObject найдено +0x%llx (%s)",
+                        (unsigned long long)offset,
+                        plain_pointer ? "сырой указатель" : "core::string");
                 return true;
             }
         }
@@ -4567,6 +4634,7 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
         g_skeleton_layout = g_transform_hierarchy_layout;
         g_skeleton_layout_valid = true;
         g_skeleton_layout_anchor = sample_transform;
+        skeleton_log_layout("взята из общего перебора", g_skeleton_layout);
         return true;
     }
     const uint64_t base_offsets[][2] = {{0x38, 0x40}, {0x18, 0x20}};
@@ -4586,12 +4654,17 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
                         g_skeleton_layout = layout;
                         g_skeleton_layout_valid = true;
                         g_skeleton_layout_anchor = sample_transform;
+                        skeleton_log_layout("подобрана перебором", g_skeleton_layout);
                         return true;
                     }
                 }
             }
         }
     }
+    skeleton_log(2, 10.0, "раскладка иерархии не резолвится (сэмпл 0x%llx, "
+                          "общая раскладка %d, перебор идёт %d)",
+                 (unsigned long long)sample_transform,
+                 (int)g_transform_hierarchy_layout_valid, (int)layout_scan_in_progress());
     return false;
 }
 
@@ -4708,12 +4781,23 @@ static uint64_t skeleton_child_on_chain(uint64_t parent_transform, uint64_t data
 static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleton) {
     uint64_t kcc = 0;
     uint64_t ragdoll = resolve_player_ragdoll(player, kcc);
-    if (!ragdoll) return false;
+    if (!ragdoll) {
+        skeleton_log(3, 10.0, "рагдолл: не найден (player=0x%llx, KCC 0x%llx)",
+                     (unsigned long long)player, (unsigned long long)kcc);
+        return false;
+    }
 
     uint64_t bones_array = rd_ptr(ragdoll + RAGDOLL_BONES_ARRAY);
-    if (!bones_array) return false;
+    if (!bones_array) {
+        skeleton_log(4, 10.0, "рагдолл: массив m_Bones пуст (рагдолл 0x%llx, +0x%llx)",
+                     (unsigned long long)ragdoll, (unsigned long long)RAGDOLL_BONES_ARRAY);
+        return false;
+    }
     int32_t element_count = rd<int32_t>(bones_array + IL2CPP_ARRAY_LENGTH);
-    if (element_count < 4 || element_count > 64) return false;
+    if (element_count < 4 || element_count > 64) {
+        skeleton_log(4, 10.0, "рагдолл: длина m_Bones %d вне диапазона", (int)element_count);
+        return false;
+    }
 
     uint64_t pelvis = native_component_transform(
         managed_object_native(rd_ptr(ragdoll + RAGDOLL_PELVIS_RIGIDBODY)));
@@ -4742,7 +4826,10 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
             if (set_transform[j] == pelvis) { present = true; break; }
         if (!present && set_count < kMaxSet) set_transform[set_count++] = pelvis;
     }
-    if (set_count < 5) return false;
+    if (set_count < 5) {
+        skeleton_log(5, 10.0, "рагдолл: трансформов %d из %d (мало)", set_count, (int)element_count);
+        return false;
+    }
 
     if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) return false;
 
@@ -5013,15 +5100,30 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
     if (!g_go_name_offset_valid) ensure_gameobject_name_offset(player);
 
     uint64_t root = skeleton_model_root(player);
-    if (!root) return false;
+    if (!root) {
+        skeleton_log(6, 10.0, "имена: корень модели не найден (player=0x%llx, "
+                              "слот characterModel +0x%llx)",
+                     (unsigned long long)player,
+                     (unsigned long long)character_model_offset(player));
+        return false;
+    }
 
     // Wide scan of the whole model to locate "Hips" candidates. Deep bones
     // (arms/head) may be far down, so the cap here is generous.
     static std::vector<uint64_t> nodes;
     collect_transform_subtree(root, nodes, 1024);
-    if (nodes.size() < 8) return false;
+    if (nodes.size() < 8) {
+        skeleton_log(7, 10.0, "имена: поддерево модели пустое (%d узлов, корень 0x%llx)",
+                     (int)nodes.size(), (unsigned long long)root);
+        return false;
+    }
 
-    if (!g_go_name_offset_valid && !discover_gameobject_name_offset(nodes)) return false;
+    if (!g_go_name_offset_valid && !discover_gameobject_name_offset(nodes)) {
+        skeleton_log(8, 10.0, "имена: смещение имени GameObject не найдено "
+                              "(узлов %d, корень 0x%llx)",
+                     (int)nodes.size(), (unsigned long long)root);
+        return false;
+    }
 
     // Collect up to a few Hips candidates (render rig, ragdoll copies, ...).
     uint64_t hips_candidates[4] = {};
@@ -5033,7 +5135,14 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
         hips_candidates[hips_candidate_count++] = node;
         if (hips_candidate_count >= 4) break;
     }
-    if (!hips_candidate_count) return false;
+    if (!hips_candidate_count) {
+        char sample[256];
+        int named = 0;
+        skeleton_sample_names(nodes, sample, sizeof(sample), named);
+        skeleton_log(9, 10.0, "имена: hips не найден; узлов %d, имён прочитано %d: %s",
+                     (int)nodes.size(), named, sample[0] ? sample : "(пусто)");
+        return false;
+    }
 
     // Targeted parent->child descent along the known rig structure. Unlike a
     // breadth-first subtree scan this cannot starve on wide hierarchies (bone
@@ -5111,7 +5220,11 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
             if (found >= ESP_BONE_COUNT) break;
         }
     }
-    if (best_count < 6 || !best_bones[BONE_HIPS]) return false;
+    if (best_count < 6 || !best_bones[BONE_HIPS]) {
+        skeleton_log(10, 10.0, "имена: по ригу нашлось костей %d (hips %d) — мало",
+                     best_count, best_bones[BONE_HIPS] != 0);
+        return false;
+    }
     if (!resolve_skeleton_layout(best_bones[BONE_HIPS])) return false;
 
     uint64_t data = rd_ptr(best_bones[BONE_HIPS] + g_skeleton_layout.data_offset);
@@ -6248,6 +6361,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     uint64_t group_matrices[kMaxGroups] = {};
     uint64_t group_indices[kMaxGroups] = {};
     bool     group_ok[kMaxGroups] = {};
+    int      group_read_failed = 0;
     for (int g = 0; g < group_count; ++g) {
         int32_t needed = group_max[g] + 1;
         if (needed <= 0 || needed > 8192) continue;
@@ -6263,10 +6377,23 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         local_matrices[g].resize((size_t)needed);
         local_parents[g].resize((size_t)needed);
         if (!rd_buf(matrices, local_matrices[g].data(), (size_t)needed * sizeof(Matrix34)) ||
-            !rd_buf(indices, local_parents[g].data(), (size_t)needed * sizeof(int32_t))) continue;
+            !rd_buf(indices, local_parents[g].data(), (size_t)needed * sizeof(int32_t))) {
+            ++group_read_failed;
+            continue;
+        }
         group_matrices[g] = matrices;
         group_indices[g] = indices;
         group_ok[g] = true;
+    }
+    if (group_read_failed) {
+        skeleton_log(11, 10.0, "пакетное чтение массивов не удалось: групп %d из %d "
+                               "(нужно %d байт TRS, слоты +0x%llx/+0x%llx, косвенно %d/%d)",
+                     group_read_failed, group_count,
+                     (int)(group_max[0] + 1) * (int)sizeof(Matrix34),
+                     (unsigned long long)g_skeleton_layout.matrices_offset,
+                     (unsigned long long)g_skeleton_layout.indices_offset,
+                     (int)g_skeleton_layout.matrices_indirect,
+                     (int)g_skeleton_layout.indices_indirect);
     }
 
     int projected = 0;
@@ -6312,6 +6439,11 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         box.bones[bone][1] = screen.y;
         box.bone_valid[bone] = true;
         ++projected;
+    }
+    if (!projected) {
+        skeleton_log(12, 10.0, "ни одна кость не спроецировалась: костей в кэше %d, "
+                               "групп %d, отказов чтения массивов %d",
+                     skeleton.bone_count, group_count, group_read_failed);
     }
     // Aim points: exact bone world positions -> screen + angular offsets.
     //   [0] head  : skull centre. The Head joint sits at the base of the skull,
@@ -7120,11 +7252,18 @@ bool esp_init(pid_t pid, bool package_verified_release) {
         g_attach_state = any_bound ? ESP_ATTACH_BAD_IMAGE : ESP_ATTACH_NO_ACCESS;
         g_il2cpp_base = 0;
         g_pid = -1;
+        LogLine("привязка: отказ (%d: %s), pid %d, транспорт %s, кандидатов %d, "
+                "errno %d",
+                (int)g_attach_state,
+                g_attach_state == ESP_ATTACH_BAD_IMAGE ? "не тот образ" : "нет доступа",
+                (int)pid, g_mem.backend_name(), candidate_count, esp_mem_last_errno());
         return false;
     }
 
     g_il2cpp_base = chosen;
     g_attach_state = ESP_ATTACH_OK;
+    LogLine("привязка: pid %d, база libil2cpp 0x%llx, транспорт %s, профиль оффсетов %s",
+            (int)pid, (unsigned long long)chosen, g_mem.backend_name(), VersionName());
     return true;
 }
 
@@ -9002,6 +9141,36 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (live_track != g_player_track.end()) {
             live_track->second.corpse = false;
             live_track->second.corpse_at = 0.0;
+        }
+    }
+
+    // Сводка по скелетам — раз в kPeriod секунд, в файл: сколько игроков и у
+    // скольких кости сошлись, плюс счётчики чтений (отказы, метки TBI, мусор).
+    {
+        static double last_summary = -1e9;
+        const double now = mono_seconds();
+        if (now - last_summary >= 10.0) {
+            last_summary = now;
+            int with_bones = 0;
+            for (const EspBox& box : result) if (box.has_skeleton) ++with_bones;
+            LogLine("скелет: сводка — игроков %d, со скелетом %d; "
+                    "раскладка данные +0x%llx индекс +0x%llx матрицы +0x%llx индексы +0x%llx"
+                    " косвенно %d/%d; имя GameObject %s; модель +0x%llx (%s); "
+                    "чтений %llu отказов %llu обрывов %llu мусора %llu меток %llu",
+                    (int)result.size(), with_bones,
+                    (unsigned long long)g_skeleton_layout.data_offset,
+                    (unsigned long long)g_skeleton_layout.index_offset,
+                    (unsigned long long)g_skeleton_layout.matrices_offset,
+                    (unsigned long long)g_skeleton_layout.indices_offset,
+                    (int)g_skeleton_layout.matrices_indirect,
+                    (int)g_skeleton_layout.indices_indirect,
+                    g_go_name_offset_valid ? "найдено" : "НЕ НАЙДЕНО",
+                    (unsigned long long)character_model_offset(0),
+                    g_character_model_probed
+                        ? (g_character_model_offset ? "перебор" : "перебор не дал")
+                        : "вшитый",
+                    g_mem.reads_total(), g_mem.read_fails_total(), g_mem.cut_total(),
+                    g_mem.junk_total(), g_mem.tagged_total());
         }
     }
 
