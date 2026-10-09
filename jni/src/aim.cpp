@@ -15,6 +15,7 @@
 #include "manes_aim_source.h"
 #include "aim_priority.h"
 #include "mem_aim_control.h"
+#include "aim_trace.h"          // per-tick CSV in Downloads
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -675,6 +676,28 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     return true;
 }
 
+// ---- трасса аима: один CSV на сессию в Загрузках (см. aim_trace.h) ----------
+static void AimTraceCommit(const aim_trace::Record& r) {
+    if (aim_trace::writer().record(r) == aim_trace::Result::OpenFailed)
+        ShowToast(XS("Лог аима: нет доступа к Загрузкам"));
+}
+
+// Пишет строку на выходе из функции, в том числе по ранним return.
+struct AimTraceGuard {
+    aim_trace::Record r;
+    const float* fingerX = nullptr;
+    const float* fingerY = nullptr;
+    AimTraceGuard(const char* mode, float dt, const float* fx = nullptr, const float* fy = nullptr)
+        : fingerX(fx), fingerY(fy) {
+        r.mode = mode; r.dt = dt; r.wall = MonoNow();
+    }
+    ~AimTraceGuard() {
+        if (fingerX) r.fingerX = *fingerX;
+        if (fingerY) r.fingerY = *fingerY;
+        AimTraceCommit(r);
+    }
+};
+
 // ============================ Тач-аим ======================================
 static void UpdateAimTouch(float dt) {
     static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
@@ -717,6 +740,7 @@ static void UpdateAimTouch(float dt) {
     // Camera angle integrated from the box flow; used only when there is no
     // real camera axis (the flight model path).
     static float s_flowCamYaw = 0.f, s_flowCamPitch = 0.f;
+    AimTraceGuard tr("touch", dt, &s_fx, &s_fy);
 
     float sw = 0.f, sh = 0.f;
     if (!AimBegin(dt, sw, sh)) {
@@ -734,6 +758,7 @@ static void UpdateAimTouch(float dt) {
         return;
     }
 
+    tr.r.active = true;
     // Точка, из которой аим водит палец: выбирается в меню тапом по экрану
     // (вкладка «Аим», см. g_calibMode == 3). Пока не задана — прежняя позиция
     // справа по центру, поэтому поведение по умолчанию не меняется.
@@ -744,6 +769,7 @@ static void UpdateAimTouch(float dt) {
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx)) {
         // Keep the finger down briefly so a momentary read failure does not
         // register as a tap (tap-to-shoot in some layouts) or reset momentum.
+        tr.r.held = 1; tr.r.reason = 6;
         if (++s_lostFrames > 6) {
             AimReleaseFinger(s_fingerDown);
             s_haveLast = false; pick.reset();
@@ -772,6 +798,8 @@ static void UpdateAimTouch(float dt) {
         s_streakYaw = s_streakPitch = 0;
     }
 
+    tr.r.rawYaw = best.yaw; tr.r.rawPitch = best.pitch;
+    tr.r.targetId = best.id; tr.r.worldDist = best.world_dist;
     // Camera angles for this tick. Read before the target filter, which needs
     // them to turn the relative offset into an absolute angle.
     float camYaw = 0.f, camPitch = 0.f;
@@ -805,6 +833,8 @@ static void UpdateAimTouch(float dt) {
         }
     }
 
+    tr.r.filtYaw = best.yaw; tr.r.filtPitch = best.pitch;
+    tr.r.haveCam = haveCam ? 1 : 0; tr.r.camYaw = camYaw; tr.r.camPitch = camPitch;
     // ---- оценка коэффициента по реакции прицела ----
     // Скармливаем тот остаток, по которому контроллер и будет считать шаг (после
     // упреждения), и позицию пальца до этого шага. Коэффициент считается по
@@ -950,6 +980,7 @@ static void UpdateAimTouch(float dt) {
         (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
         s_pendTime += dt;
         if (s_pendTime < 0.25f) {
+            tr.r.held = 1; tr.r.reason = 1;
             Touch_Move(s_fx, s_fy);   // держим тач живым, ничего не двигаем
             return;
         }
@@ -970,7 +1001,7 @@ static void UpdateAimTouch(float dt) {
     // цель и обратно, маятник первых секунд наведения.
     //
     // Учёт «в полёте» поэтому считается двумя независимыми оценками, а какая
-    // из них правит — зависит от остатка (стенд tools/aim/lock_sim.cpp, сетка
+    // из них правит — зависит от остатка (стенд tools/aim/aim_sim.cpp, сетка
     // оверлей 12-60 fps × задержка касания 2-8 кадров игры, захват 30°):
     //
     //   1. ПОГЛОЩЕНИЕ: заказ копится в градусах, а списывается по факту
@@ -1173,6 +1204,7 @@ static void UpdateAimTouch(float dt) {
     const float qYaw   = gainKnownYaw   ? fabsf(gy) * gridPx : 0.f; // deg per device unit
     const float qPitch = gainKnownPitch ? fabsf(gp) * gridPx : 0.f;
 
+    tr.r.errYaw = errYaw; tr.r.errPitch = errPitch;
     // ---- dead zone ----
     // Target: ~3 cm at the target's range (well inside a head), but never
     // tighter than what the input grid can actually reach (0.55 step), and
@@ -1196,6 +1228,7 @@ static void UpdateAimTouch(float dt) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         // Заказанное за прошлые такты камера дорабатывает и без нас: окно
         // стареет само, приказы молча истекают по kTouchFlightLife.
+        tr.r.held = 1; tr.r.reason = 2;
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
         return;
     }
@@ -1217,6 +1250,7 @@ static void UpdateAimTouch(float dt) {
     errPitch = jitterGate(errPitch, s_streakPitch);
     if (errYaw == 0.f && errPitch == 0.f) {
         // Дрожь: палец стоит, камера не ходит за костью.
+        tr.r.held = 1; tr.r.reason = 3;
         if (s_fingerDown) Touch_Move(s_fx, s_fy);
         return;
     }
@@ -1236,9 +1270,10 @@ static void UpdateAimTouch(float dt) {
         // же пара «сдвиг пальца -> отклик» посчитает бросок пальца к точке.
         s_trackYaw.reset(); s_trackPitch.reset();
         clearFlight();
+        tr.r.held = 1; tr.r.reason = 4;
         return; // let the game register the touch before moving it
     }
-    if (s_holdFrames < 1) { ++s_holdFrames; Touch_Move(s_fx, s_fy); return; }
+    if (s_holdFrames < 1) { ++s_holdFrames; tr.r.held = 1; tr.r.reason = 4; Touch_Move(s_fx, s_fy); return; }
 
     // ---- controller ----
     // Speed slider keeps the old direction (higher = faster):
@@ -1294,6 +1329,7 @@ static void UpdateAimTouch(float dt) {
     }
     s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
     k *= s_flipDamp;
+    tr.r.flipDamp = s_flipDamp;
 
     // Мягкий старт при захвате.
     //
@@ -1314,6 +1350,7 @@ static void UpdateAimTouch(float dt) {
     s_acquire += dt / 0.20f;
     if (s_acquire > 1.f) s_acquire = 1.f;
     k *= 0.3f + 0.7f * s_acquire;
+    tr.r.acquire = s_acquire;
 
     // Спад доли шага у цели: чем меньше остаток, тем меньшую его долю
     // заказываем за такт. Иначе заказы, сделанные на последних градусах,
@@ -1369,6 +1406,7 @@ static void UpdateAimTouch(float dt) {
     const float ny = s_fy + stepUnitsY / unitsPerPx;
     dx = nx - s_fx; dy = ny - s_fy;
     if (dx == 0.f && dy == 0.f) {
+        tr.r.held = 1; tr.r.reason = 0;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         Touch_Move(s_fx, s_fy);
         return;
@@ -1386,6 +1424,7 @@ static void UpdateAimTouch(float dt) {
     if (minY < sh * 0.02f) minY = sh * 0.02f;
     if (maxY > sh * 0.98f) maxY = sh * 0.98f;
     if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
+        tr.r.lifted = 1;
         Touch_Up();
         s_fingerDown = false;
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
@@ -1398,6 +1437,7 @@ static void UpdateAimTouch(float dt) {
         return;
     }
     s_fx = nx; s_fy = ny;
+    tr.r.wrote = 1; tr.r.stepYaw = dx; tr.r.stepPitch = dy;
     s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
     if (useFlight) {
         // Заказ — «в полёт»: в градусах остатка. Рысканье: шаг dx поворачивает
@@ -1416,26 +1456,6 @@ static void UpdateAimTouch(float dt) {
 // в сайленте печатается то, что лежало в оси ДО нашей записи, — если там наше
 // вчерашнее значение, значит игра ось в этом кадре не переписывала.
 static unsigned long s_frames = 0;
-static float         s_logTime = 0.f;
-
-static const char* aim_mode_name() {
-    switch (g_state.aim_mode) {
-        case AIM_MODE_MEMORY: return "память";
-        default:              return "тач";
-    }
-}
-
-// Сколько раз ось выстрелаdobили в конце кадра между двумя строками лога
-
-static void AimLogTick(float dt) {
-    s_logTime += dt;
-    if (s_logTime < 0.25f) return;
-    s_logTime = 0.f;
-    const AimMemDiag& d = AimMemoryDiag();
-    if (g_state.aim_mode == AIM_MODE_MEMORY)
-        ;
-}
-
 // ====================== Мемори-аим: «память» ===============================
 //
 // Memory-aim работает напрямую через накопитель MouseLook. Новый шаг всегда
@@ -1494,6 +1514,7 @@ static float mem_axis_step(float err, float dt) {
 }
 
 static void UpdateAimMemory(float dt) {
+    AimTraceGuard tr("memory", dt);
     static AimPick pick;
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f;
     static bool  s_haveLast = false;
@@ -1512,6 +1533,7 @@ static void UpdateAimMemory(float dt) {
         return;
     }
     s_memDiag.inactive = 0;
+    tr.r.active = true;
     s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
 
     // MouseLook нужен не ради чувствительности (накопитель уже в градусах), а
@@ -1545,11 +1567,14 @@ static void UpdateAimMemory(float dt) {
     int noTgtWhy = 0;
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
+        tr.r.held = 1; tr.r.reason = 6;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
         MemDropControl();
         return;
     }
     s_memDiag.no_target = 0;
+    tr.r.rawYaw = best.yaw; tr.r.rawPitch = best.pitch;
+    tr.r.targetId = best.id; tr.r.worldDist = best.world_dist;
     if (pick.switched) {
         // Другая цель: подтверждение прошлой записи и дрейф по прежней кости
         // к ней не относятся.
@@ -1575,6 +1600,8 @@ static void UpdateAimMemory(float dt) {
     // накопитель фактические углы камеры. Разошлись — это чужой MouseLook.
     float camYaw = 0.f, camPitch = 0.f;
     const bool haveCam = esp_aim_camera_angles(camYaw, camPitch);
+    tr.r.haveCam = haveCam ? 1 : 0; tr.r.camYaw = camYaw; tr.r.camPitch = camPitch;
+    tr.r.accYaw = accY; tr.r.accPitch = accX;
     // Фактическое смещение камеры за прошлый такт: сравнивается с нашим шагом.
     bool  haveObs = false;
     float obsYaw = 0.f, obsPitch = 0.f;
@@ -1606,6 +1633,7 @@ static void UpdateAimMemory(float dt) {
                          dt, kMemTargetTau);
         errYaw   = WrapDeg180(s_memFilt.yaw - camYaw);
         errPitch = s_memFilt.pitch - camPitch;
+        tr.r.filtYaw = errYaw; tr.r.filtPitch = errPitch;
         // Шаг прошлого такта ещё не виден в камере — вычитаем его из ошибки,
         // иначе тот же остаток отрабатывается дважды и прицел раскачивается.
         if (haveObs) {
@@ -1617,10 +1645,13 @@ static void UpdateAimMemory(float dt) {
     }
     const float offYaw   = mem_axis_step(errYaw, dt);
     const float offPitch = mem_axis_step(errPitch, dt);
+    tr.r.errYaw = errYaw; tr.r.errPitch = errPitch;
+    tr.r.stepYaw = offYaw; tr.r.stepPitch = offPitch;
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         s_memLastOffYaw = s_memLastOffPitch = 0.f;
         ++s_memDiag.on_target;
+        tr.r.held = 1; tr.r.reason = 5;
         return;
     }
 
@@ -1637,6 +1668,7 @@ static void UpdateAimMemory(float dt) {
         return;
     }
     ++s_memDiag.writes;
+    tr.r.wrote = 1;
     // В координатах камеры: рысканье +, наклон вверх = -accX (см. выше).
     s_memLastOffYaw = offYaw;
     s_memLastOffPitch = offPitch;
@@ -1686,7 +1718,6 @@ void AimEndFrame() {
 void UpdateAim(float dt) {
     ++s_frames;
     const int mode = g_state.aim_mode;
-    AimLogTick(dt);
     if (mode == AIM_MODE_MEMORY) UpdateAimMemory(dt);
     else if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);
     else                              UpdateAimTouch(dt);
