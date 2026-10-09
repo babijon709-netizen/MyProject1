@@ -202,6 +202,12 @@ int         esp_nearby_player_count();
 // Number of recognised bots in the current ESP snapshot.
 int         esp_nearby_bot_count();
 
+// Диагностика конвейера костей для терминальной команды `xvcen skel`
+// (см. skeleton_diag.h): печатает в out состояние всех шагов построения
+// скелета по первым max_players игрокам. Возврат: 0 — скелеты строятся,
+// 2 — ни у одного игрока, 1 — список игроков пуст, -1 — плохие аргументы.
+int         esp_skeleton_diag(char* out, size_t cap, int max_players);
+
 // True while the local player is aiming down sights (ADS) with the current
 // weapon. Returns false when the state cannot be read (not attached, no
 // weapon, menus, etc.), so "aim only while scoped" fails closed.

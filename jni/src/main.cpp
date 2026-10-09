@@ -17,6 +17,7 @@
 #include "overlay_geometry.h"
 #include "mode_select.h"
 #include "metadata_dump.h"
+#include "skeleton_diag.h"
 #include "mem_io.h"
 #include "kernel_io.h"
 #include "stealth.h"
@@ -38,6 +39,8 @@
 //   su -c /data/local/tmp/xvcen --scan-driver    — + полный скан кодов команд
 //   su -c /data/local/tmp/xvcen dump             — рантайм-дамп global-metadata.dat
 //                                                  запущенной игры в benzware/dump/
+//   su -c /data/local/tmp/xvcen skel             — диагностика конвейера костей
+//                                                  (почему нет скелетов)
 // Печатает: root/не root, ядро, семейство сокета FT-драйвера и класс маячка,
 // живые пробы команд по собственной памяти (оба известных протокола FT),
 // RT-Dev (/dev/[A-GNY]{1,6}), RT-Hook (перехваченный syscall ioctl),
@@ -288,6 +291,8 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--scan-driver") == 0) return driver_check::Run(true);
         if (strcmp(argv[i], "dump") == 0 || strcmp(argv[i], "--dump") == 0)
             return metadump::Run(argc - i, argv + i);
+        if (strcmp(argv[i], "skel") == 0 || strcmp(argv[i], "--skel") == 0)
+            return skeldiag::Run(argc - i, argv + i);
     }
 
     // Страж-трейсер САМЫМ ПЕРВЫМ делом после разбора аргументов: процесс ещё

@@ -19,6 +19,7 @@
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
 
 #include <errno.h>     // errno при отказе записи (сайлент: ось выстрела)
+#include <stdarg.h>    // va_list: форматирование диагностики скелетов в буфер
 #include <string.h>
 #include <strings.h>   // strncasecmp (weapon prefab label cleanup)
 #include <sys/uio.h>
@@ -4285,13 +4286,22 @@ bool     g_go_name_offset_valid = false;
 static double   g_go_name_retry_at = 0.0;   // mono_seconds: не раньше этого момента
 static int      g_skeleton_builds_this_frame = 0; // heavy rescans: max 1 per frame
 
+// Слот characterModel в PlayerManager: вшитое значение переезжает между
+// сборками игры. 0 — «ещё не искали»; найденное смещение запоминается на всю
+// сессию (раскладка полей одна для всех игроков и не меняется до обновления).
+static uint64_t g_character_model_offset = 0;
+static bool     g_character_model_probed = false;
+// Защита от рекурсии: поиск модели читает имена, а поиск смещения имени сам
+// зовёт skeleton_model_root().
+static bool     g_character_model_probing = false;
+
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
 void esp_set_aim_bones_enabled(bool enabled) { g_aim_bones_requested = enabled; }
 
 // characterModel (managed GameObject) -> native GameObject -> its Transform.
-static uint64_t skeleton_model_root(uint64_t player) {
+static uint64_t model_root_at_offset(uint64_t player, uint64_t offset) {
     if (!player) return 0;
-    uint64_t managed_go = rd_ptr(player + PLAYER_CHARACTER_MODEL);
+    uint64_t managed_go = rd_ptr(player + offset);
     if (!managed_go) return 0;
     uint64_t native_go = rd_ptr(managed_go + MANAGED_CACHED_PTR);
     if (!native_go) return 0;
@@ -4302,6 +4312,50 @@ static uint64_t skeleton_model_root(uint64_t player) {
     // Sanity: the transform must point back at the same GameObject.
     if (rd_ptr(transform + COMPONENT_GAMEOBJECT) != native_go) return 0;
     return transform;
+}
+
+// Определена ниже: имя кости нужно до того, как найдено само имя GameObject.
+static int  match_bone_name(const char* raw_name);
+
+// Перебор полей PlayerManager в поисках модели: у модели под трансформом лежит
+// риг, то есть поддерево, в котором читаются знакомые имена костей. У любого
+// другого GameObject игрока (оружие, метка, коллайдеры) таких имён нет.
+// Дорого (до ~90 полей на поддерево), поэтому ровно один раз за сессию.
+static uint64_t discover_character_model_offset(uint64_t player) {
+    if (!g_go_name_offset_valid) return 0;   // без имени кость не опознать
+    static std::vector<uint64_t> nodes;
+    for (uint64_t offset = 0x40; offset <= 0x300; offset += 8) {
+        uint64_t transform = model_root_at_offset(player, offset);
+        if (!transform) continue;
+        collect_transform_subtree(transform, nodes, 128);
+        if (nodes.size() < 8) continue;
+        int hits = 0;
+        for (uint64_t node : nodes) {
+            char name[48];
+            if (!read_transform_name(node, name, sizeof(name))) continue;
+            if (match_bone_name(name) >= 0 && ++hits >= 3) break;
+        }
+        if (hits >= 3) return offset;
+    }
+    return 0;
+}
+
+static uint64_t character_model_offset(uint64_t player) {
+    if (!player) return go_active::PLAYER_CHARACTER_MODEL;
+    if (!g_character_model_probed && !g_character_model_probing && g_go_name_offset_valid) {
+        g_character_model_probing = true;
+        g_character_model_probed = true;      // пробуем ровно один раз
+        g_character_model_offset = model_root_at_offset(player, go_active::PLAYER_CHARACTER_MODEL)
+                                       ? go_active::PLAYER_CHARACTER_MODEL
+                                       : discover_character_model_offset(player);
+        g_character_model_probing = false;
+    }
+    return g_character_model_offset ? g_character_model_offset
+                                    : go_active::PLAYER_CHARACTER_MODEL;
+}
+
+static uint64_t skeleton_model_root(uint64_t player) {
+    return model_root_at_offset(player, character_model_offset(player));
 }
 
 static int read_transform_children(uint64_t transform, uint64_t* out, int max_children) {
@@ -4409,7 +4463,19 @@ bool read_transform_name(uint64_t transform, char* out, size_t cap) {
 // Find the GameObject name field offset by probing candidates against the
 // character model subtree until known bone names show up.
 static bool discover_gameobject_name_offset(const std::vector<uint64_t>& nodes) {
-    static const uint64_t kCandidates[] = {GAMEOBJECT_NAME_GUESS, 0x40, 0x50, 0x38, 0x30, 0x28, 0x58, 0x20, 0x60};
+    // Вшитая догадка — первой (на проверенных сборках имя лежит по ней),
+    // дальше весь диапазон полей GameObject. Прежний список из девяти
+    // кандидатов не накрывал сборки, где имя уехало на 0x68/0x70/0x88: имя не
+    // читалось вообще, а без него не находится ни одна кость (скелеты молчали
+    // на части устройств при живых боксах).
+    uint64_t candidates[40];
+    int candidate_count = 0;
+    candidates[candidate_count++] = GAMEOBJECT_NAME_GUESS;
+    for (uint64_t offset = 0x10; offset <= 0xB0 && candidate_count < 40; offset += 8) {
+        bool duplicate = false;
+        for (int i = 0; i < candidate_count; ++i) duplicate |= candidates[i] == offset;
+        if (!duplicate) candidates[candidate_count++] = offset;
+    }
     static const char* kProbeNames[] = {"hips", "spine", "spine1", "spine2", "neck", "head", "armature", "root", "pelvis"};
 
     std::vector<uint64_t> gameobjects;
@@ -4422,7 +4488,8 @@ static bool discover_gameobject_name_offset(const std::vector<uint64_t>& nodes) 
     if (gameobjects.size() < 8) return false;
 
     for (int plain_pointer = 0; plain_pointer < 2; ++plain_pointer) {
-        for (uint64_t offset : kCandidates) {
+        for (int ci = 0; ci < candidate_count; ++ci) {
+            const uint64_t offset = candidates[ci];
             int matches = 0;
             for (uint64_t go : gameobjects) {
                 char name[48];
@@ -4940,6 +5007,10 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
 
 static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton) {
     skeleton = CachedSkeleton{};
+
+    // Смещение имени — первым: без него не опознать кости, а значит не найти
+    // и саму модель, если вшитый слот characterModel уже не тот.
+    if (!g_go_name_offset_valid) ensure_gameobject_name_offset(player);
 
     uint64_t root = skeleton_model_root(player);
     if (!root) return false;
@@ -5621,6 +5692,12 @@ bool ensure_gameobject_name_offset(uint64_t player) {
     const double now = mono_seconds();
     if (now < g_go_name_retry_at) return false;
     uint64_t root = skeleton_model_root(player);
+    if (!root) {
+        // Вшитый слот characterModel не дал модель (поле переехало). Имя
+        // ищем по поддереву самого игрока: модель обычно лежит под ним, а для
+        // поиска смещения имени хватит любых GameObject с известными именами.
+        root = resolve_player_native_transform(player);
+    }
     if (!root) { g_go_name_retry_at = now + 2.0; return false; }
     static std::vector<uint64_t> nodes;
     collect_transform_subtree(root, nodes, 256);
@@ -7360,6 +7437,9 @@ void esp_reset() {
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
     g_go_name_offset_valid = false; g_go_name_retry_at = 0.0;
+    // Смещение имени и слот модели переучиваются заново: они найдены по
+    // живой памяти прошлого процесса и к новому не относятся.
+    g_character_model_offset = 0; g_character_model_probed = false;
     g_frame_vp_valid = false; g_frame_local_valid = false;
     reset_marker_caches();
 }
@@ -8938,4 +9018,138 @@ int esp_nearby_bot_count() {
     // skeleton ESP or aimbot mode to be enabled.
     esp_bot_aim_maintain();
     return static_cast<int>(esp_bot_aim_list().size());
+}
+
+// ---- Диагностика конвейера костей из терминала (xvcen skel) ---------------
+//
+// Логи на устройстве отключены (logfile.h — заглушка), поэтому «скелеты не
+// работают на этом устройстве» разбирается только так: короткоживущий процесс
+// привязывается к игре выбранным транспортом, один раз прогоняет весь
+// конвейер (список игроков -> модель -> имя GameObject -> раскладка иерархии
+// -> мировые позиции костей -> проекция) и печатает, на каком шаге он
+// рассыпался. В обычной работе чит этого не делает.
+int esp_skeleton_diag(char* out, size_t cap, int max_players) {
+    if (!out || cap < 128) return -1;
+    out[0] = '\0';
+    size_t pos = 0;
+    auto say = [&](const char* fmt, ...) {
+        if (pos + 1 >= cap) return;
+        va_list ap;
+        va_start(ap, fmt);
+        const int n = vsnprintf(out + pos, cap - pos, fmt, ap);
+        va_end(ap);
+        if (n > 0) pos += ((size_t)n < cap - pos) ? (size_t)n : cap - pos - 1;
+    };
+
+    // Кости нужны и для ESP, и для аима: включаем оба запроса, иначе конвейер
+    // их просто не строит (want_bones в esp_get_boxes).
+    esp_set_skeleton_enabled(true);
+    esp_set_aim_bones_enabled(true);
+
+    say("== скелеты: диагностика конвейера ==\n");
+    say("транспорт          : %s\n", g_mem.backend_name());
+    say("привязка           : %d (0 = OK)\n", (int)esp_attach_state());
+    say("чтений / отказов   : %llu / %llu\n",
+        g_mem.reads_total(), g_mem.read_fails_total());
+    say("меток TBI / мусора : %llu / %llu    обрывов: %llu\n",
+        g_mem.tagged_total(), g_mem.junk_total(), g_mem.cut_total());
+    say("профиль оффсетов   : %s\n", VersionName());
+
+    const TransformHierarchyLayout& gl = g_transform_hierarchy_layout;
+    say("раскладка общая    : найдена=%d перебор_идёт=%d (данные +0x%llx индекс +0x%llx)\n",
+        (int)g_transform_hierarchy_layout_valid, (int)layout_scan_in_progress(),
+        (unsigned long long)gl.data_offset, (unsigned long long)gl.index_offset);
+    say("раскладка скелета  : найдена=%d (данные +0x%llx индекс +0x%llx матрицы +0x%llx"
+        " индексы +0x%llx косвенно %d/%d)\n",
+        (int)g_skeleton_layout_valid,
+        (unsigned long long)g_skeleton_layout.data_offset,
+        (unsigned long long)g_skeleton_layout.index_offset,
+        (unsigned long long)g_skeleton_layout.matrices_offset,
+        (unsigned long long)g_skeleton_layout.indices_offset,
+        (int)g_skeleton_layout.matrices_indirect, (int)g_skeleton_layout.indices_indirect);
+    say("имя GameObject     : найдено=%d (смещение +0x%llx, %s)\n",
+        (int)g_go_name_offset_valid, (unsigned long long)g_go_name_offset,
+        g_go_name_plain_pointer ? "сырой указатель" : "core::string");
+    say("слот модели        : +0x%llx (%s)\n",
+        (unsigned long long)character_model_offset(0),
+        g_character_model_probed
+            ? (g_character_model_offset ? "найден перебором" : "перебор не дал модели")
+            : "вшитый");
+
+    const std::vector<uint64_t> players = read_configured_player_transforms(nullptr);
+    say("игроков в списке   : %d\n", (int)players.size());
+    if (players.empty()) {
+        say("!! список игроков пуст — конвейер костей не запускался\n");
+        return 1;
+    }
+
+    // Полный прогон кадра: он и строит скелеты, и заполняет g_skeletons.
+    const std::vector<EspBox> boxes = esp_get_boxes(1920, 1080);
+    int skeletons_ok = 0;
+    const int limit = max_players > 0 ? std::min<int>(max_players, (int)players.size()) : (int)players.size();
+    for (int i = 0; i < limit; ++i) {
+        const uint64_t player = players[i];
+        say("[%d] игрок 0x%llx\n", i, (unsigned long long)player);
+
+        const uint64_t native = resolve_player_native_transform(player);
+        Vec3 pos{};
+        const bool pos_ok = native && read_transform_hierarchy_position(native, pos);
+        say("    трансформ 0x%llx позиция %s (%.1f, %.1f, %.1f)\n",
+            (unsigned long long)native, pos_ok ? "ок" : "НЕТ",
+            (double)pos.x, (double)pos.y, (double)pos.z);
+
+        const uint64_t root = skeleton_model_root(player);
+        static std::vector<uint64_t> nodes;
+        collect_transform_subtree(root, nodes, 1024);
+        say("    модель: корень 0x%llx, узлов %d\n",
+            (unsigned long long)root, (int)nodes.size());
+
+        int named = 0, hips = 0;
+        char sample[256] = {};
+        size_t sample_used = 0;
+        for (uint64_t node : nodes) {
+            char name[48];
+            if (!read_transform_name(node, name, sizeof(name))) continue;
+            ++named;
+            if (match_bone_name(name) == BONE_HIPS) ++hips;
+            if (sample_used + 1 < sizeof(sample) && named <= 8) {
+                const size_t room = sizeof(sample) - sample_used;
+                const int w = snprintf(sample + sample_used, room, "%s%s",
+                                       sample_used ? ", " : "", name);
+                if (w > 0) sample_used += (size_t)w < room ? (size_t)w : room - 1;
+            }
+        }
+        say("    имена: прочитано %d, hips-кандидатов %d\n", named, hips);
+        say("    пример имён: %s\n", sample[0] ? sample : "(нет)");
+
+        int world_bones = 0;
+        auto it = g_skeletons.find(player);
+        if (it != g_skeletons.end()) {
+            say("    кэш скелета: валиден=%d собрано=%d тумблер=%d отказов=%d\n",
+                (int)it->second.valid, it->second.bone_count,
+                it->second.bone_transform[BONE_HIPS] != 0, it->second.fail_streak);
+            for (int b = 0; b < ESP_BONE_COUNT; ++b)
+                if (it->second.bone_world_age[b] >= 1 && it->second.bone_world_age[b] <= 9)
+                    ++world_bones;
+        } else {
+            say("    кэш скелета: НЕТ (построение не дошло до фиксации)\n");
+        }
+        say("    мировых позиций костей: %d из %d\n", world_bones, (int)ESP_BONE_COUNT);
+
+        const EspBox* box = nullptr;
+        for (const EspBox& candidate : boxes)
+            if (candidate.id == player) { box = &candidate; break; }
+        if (!box) {
+            say("    бокс: НЕТ (игрок не попал в кадр ESP)\n");
+            continue;
+        }
+        int valid = 0;
+        for (int b = 0; b < ESP_BONE_COUNT; ++b) valid += box->bone_valid[b] ? 1 : 0;
+        say("    бокс: has_skeleton=%d костей=%d/%d экран головы (%.0f, %.0f)\n",
+            (int)box->has_skeleton, valid, (int)ESP_BONE_COUNT,
+            (double)box->bones[BONE_HEAD][0], (double)box->bones[BONE_HEAD][1]);
+        if (box->has_skeleton) ++skeletons_ok;
+    }
+    say("игроков со скелетом: %d из %d\n", skeletons_ok, limit);
+    return skeletons_ok > 0 ? 0 : 2;
 }
