@@ -8,6 +8,7 @@
 #include "mem_io.h"                // чтение/запись памяти игры: транспорт + кэш блоков
 #include "kernel_io.h"             // кернел-транспорт (сокет ядерного драйвера)
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
+#include "diag_log.h"
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // выбранный Release/Beta профиль
 #include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
@@ -4471,6 +4472,11 @@ static constexpr int kSkeletonLayoutMissLimit = 4;
 // правда умерла» (якорь тоже не читается — переучиваем).
 static uint64_t g_skeleton_layout_anchor = 0;
 
+// Причина провала построения скелета (для DiagLog): 0 — не провал/иначе,
+// 1 — мало трансформов, 2 — разметка иерархии не сошлась, 3 — мало костей по именам.
+static int s_skelRagdollWhy = 0;
+static int s_skelNamesWhy = 0;
+
 static bool resolve_skeleton_layout(uint64_t sample_transform) {
     if (g_skeleton_layout_valid) {
         if (skeleton_layout_reads_plausible(g_skeleton_layout, sample_transform)) {
@@ -4677,7 +4683,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
     }
     if (set_count < 5) return false;
 
-    if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) return false;
+    if (!resolve_skeleton_layout(pelvis ? pelvis : set_transform[0])) { s_skelRagdollWhy = 2; return false; }
 
     // Bones may live in different TransformHierarchies (the game re-parents
     // parts of the rig at runtime), so resolve arrays per hierarchy.
@@ -4714,7 +4720,7 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
         }
         set_count = write;
     }
-    if (set_count < 5) return false;
+    if (set_count < 5) { s_skelRagdollWhy = 1; return false; }
     for (int i = 0; i < set_count; ++i) {
         uint64_t matrices = 0, indices = 0;
         chain_length[i] = hierarchy_arrays(set_data[i], matrices, indices)
@@ -5040,8 +5046,8 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
             if (found >= ESP_BONE_COUNT) break;
         }
     }
-    if (best_count < 6 || !best_bones[BONE_HIPS]) return false;
-    if (!resolve_skeleton_layout(best_bones[BONE_HIPS])) return false;
+    if (best_count < 6 || !best_bones[BONE_HIPS]) { s_skelNamesWhy = 3; return false; }
+    if (!resolve_skeleton_layout(best_bones[BONE_HIPS])) { s_skelNamesWhy = 4; return false; }
 
     uint64_t data = rd_ptr(best_bones[BONE_HIPS] + g_skeleton_layout.data_offset);
     if (!data) return false;
@@ -5072,11 +5078,22 @@ static bool build_skeleton_from_names(uint64_t player, CachedSkeleton& skeleton)
 static bool build_skeleton(uint64_t player, CachedSkeleton& skeleton) {
     skeleton = CachedSkeleton{};
 
+    s_skelRagdollWhy = 0; s_skelNamesWhy = 0;
     CachedSkeleton from_ragdoll{};
     bool ragdoll_ok = build_skeleton_from_ragdoll(player, from_ragdoll);
 
     CachedSkeleton from_names{};
     bool names_ok = build_skeleton_from_names(player, from_names);
+
+    {
+        static unsigned long s_skelFails = 0;
+        const unsigned long n = ++s_skelFails;
+        if (!(ragdoll_ok && names_ok) && (n <= 30 || n % 300 == 0))
+            DiagLog("skel build#%lu player=0x%llx ragdoll=%d why=%d bones=%d | names=%d why=%d bones=%d layoutValid=%d",
+                    n, (unsigned long long)player, (int)ragdoll_ok, s_skelRagdollWhy,
+                    (int)from_ragdoll.bone_count, (int)names_ok, s_skelNamesWhy,
+                    (int)from_names.bone_count, (int)g_skeleton_layout_valid);
+    }
 
     if (names_ok && (!ragdoll_ok || from_names.bone_count >= from_ragdoll.bone_count)) {
         skeleton = from_names;
