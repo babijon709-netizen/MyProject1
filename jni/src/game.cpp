@@ -6176,6 +6176,12 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         if (needed <= 0 || needed > 8192) continue;
         uint64_t matrices = rd_ptr(group_data[g] + g_skeleton_layout.matrices_offset);
         uint64_t indices = rd_ptr(group_data[g] + g_skeleton_layout.indices_offset);
+        // Раскладка, у которой matrices/indices лежат не в самом слоте, а по
+        // указателю из него: без разыменования читается указатель вместо
+        // массива, пакетный проход срывается и скелет гаснет (на сборках с
+        // косвенными слотами — то есть «на части устройств»).
+        if (g_skeleton_layout.matrices_indirect) matrices = rd_ptr(matrices);
+        if (g_skeleton_layout.indices_indirect) indices = rd_ptr(indices);
         if (!matrices || !indices) continue;
         local_matrices[g].resize((size_t)needed);
         local_parents[g].resize((size_t)needed);
