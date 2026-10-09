@@ -8267,10 +8267,18 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // The selected build profile already contains the PlayerManager position
     // field. Use it directly; KCC/model below cover objects whose synced field
     // has not been initialized yet.
+    // Позиция игрока: прямое поле или обход иерархии. Так было в рабочих сборках
+    // (benzwaresource 05.10): forced PLAYER_POSITION отключал обход иерархии, и
+    // на устройствах с другим libunity скелеты не строились вообще.
     if (!g_player_position_validated) {
-        g_player_position_offset = PLAYER_POSITION;
-        g_use_direct_player_position = true;
-        g_player_position_validated = true;
+        if (!discover_player_position_offset(s_transforms)) {
+            note_player_pipeline_health(false);
+            publish_camera_only_frame(sw, sh);
+            append_bot_boxes(result);
+            return transient_return(2);
+        }
+    } else {
+        recheck_direct_player_position(s_transforms);
     }
 
     bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
