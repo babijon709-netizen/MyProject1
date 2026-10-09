@@ -156,6 +156,7 @@ struct CfgBlob {
     int   esp_box_type;
     float esp_box_rounding;
 };
+static_assert(sizeof(CfgBlob) == 260, "stable cfg blob");
 
 // UI state that used to live in sidecar files (.lang/.accent/.layout/.mode)
 // is appended after ConfigExtension as a trailer. CfgBlob and the extension
@@ -557,6 +558,50 @@ void ConfigLoad(int idx, bool announce) {
         cfg::esp::ally_col     = s.esp_ally_col;
     cfg::esp::box_type         = s.esp_box_type;
     cfg::esp::box_rounding     = s.esp_box_rounding;
+    // ---- Санитизация: конфиг кочует между билдами с одним version=4 ------
+    // Слоты годами переименовывались «на месте», поэтому в принятом поле
+    // может лежать байт чужого смысла: NaN, значение старого диапазона,
+    // alpha 0 у цвета. Раньше проверялась только часть полей — отсюда
+    // жалобы «у одного аим мёртв, у другого скелеты не видно». Тут всё,
+    // что дальше читают фичи, приводится к диапазону UI-слайдера;
+    // NaN/вне-диапазона → дефолт слайдера. Мёртвые слоты (box_type,
+    // box_rounding, fill_pct, stroke/rounding в cfg::esp) ни одна фича не
+    // читает — их не трогаем.
+    {
+        auto num = [](float v, float lo, float hi, float deflt) {
+            return (std::isfinite(v) && v >= lo && v <= hi) ? v : deflt;
+        };
+        g_state.esp_thick = num(g_state.esp_thick, 0.5f, 5.f, 2.f);
+        g_state.gun_str = num(g_state.gun_str, 1.f, 10.f, 5.f);
+        cfg::aim::fov = num(cfg::aim::fov, 5.f, 180.f, 80.f);
+        g_state.gun_trigger_delay = num(g_state.gun_trigger_delay, 0.f, 1.f, 0.f);
+        if (g_state.aim_bone < 0 || g_state.aim_bone > 2) g_state.aim_bone = 0;
+        cfg::aim::bone = g_state.aim_bone;
+        // Цвет: каналы 0..1; alpha 0 из старого слота делал фичу «включена,
+        // но невидима» (классика у скелетов) — поднимаем до непрозрачной.
+        auto col = [&num](ImVec4& c) {
+            c.x = num(c.x, 0.f, 1.f, 1.f);
+            c.y = num(c.y, 0.f, 1.f, 1.f);
+            c.z = num(c.z, 0.f, 1.f, 1.f);
+            if (!std::isfinite(c.w) || c.w <= 0.02f || c.w > 1.f) c.w = 1.f;
+        };
+        col(cfg::esp::box_col);       col(cfg::esp::box_col_invis);
+        col(cfg::esp::name_col);      col(cfg::esp::distance_col);
+        col(cfg::esp::weapon_col);    col(cfg::esp::tracer_col);
+        col(cfg::esp::skeleton_col);  col(cfg::esp::animal_col);
+        col(cfg::esp::loot_col);      col(cfg::esp::ally_col);
+        col(cfg::esp::pickup_col);
+        // bool-байты из блоба могут нести не 0/1 (в старых версиях там были
+        // иные поля): чтение bool с таким представлением формально UB.
+        // Приводим к 0/1 через байт, не доверяя g_state значению как bool.
+        auto b01 = [](bool& b) { b = *reinterpret_cast<const unsigned char*>(&b) != 0; };
+        b01(g_state.aim_touch); b01(g_state.aim_special); b01(g_state.aim_scope_only);
+        b01(cfg::aim::draw_fov);
+        b01(g_state.esp_box); b01(g_state.esp_name); b01(g_state.esp_wall);
+        b01(g_state.esp_chams); b01(g_state.esp_weapon); b01(g_state.esp_tracer);
+        b01(g_state.esp_skeleton); b01(g_state.esp_ore); b01(g_state.esp_animal);
+        b01(g_state.esp_team); b01(g_state.ui_dark_mode);
+    }
     g_darkTheme = g_state.ui_dark_mode;
     snprintf(g_loadedConfigName, sizeof(g_loadedConfigName), "%s", g_configs[idx].name);
     g_cfgLoadedIdx = idx;
