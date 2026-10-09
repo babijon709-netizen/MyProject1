@@ -22,11 +22,12 @@ int main() {
     CHECK(near(base(10.f, 12.f, true), 12.f));
     CHECK(near(base(10.f, 12.f, false), 10.f));
 
-    // Камера ещё не догнала запись: отклонение учитывается, шаг не дублируется.
-    CHECK(near(error(1.0f, 12.f, 10.f), 1.0f - 2.0f));
-    CHECK(near(error(1.0f, 10.f, 10.f), 1.0f));
-    // Перенос через 180: цель 0.5, запись 179.8, камера -179.8 -> база 179.8 - (-179.8) = 359.6 ~ -0.4.
-    CHECK(near(error(0.5f, 179.8f, -179.8f), 0.5f - wrap180(359.6f)));
+    // Шаг прошлого такта ещё не в камере: вычитаем его из ошибки.
+    CHECK(near(error(1.0f, 0.4f, true), 0.6f));
+    CHECK(near(error(-1.0f, -0.4f, true), -0.6f));
+    // Без ожидания записи ошибка не меняется, знак шага не влияет.
+    CHECK(near(error(1.0f, 0.4f, false), 1.0f));
+    CHECK(near(error(1.0f, NAN, true), 1.0f));
 
     if (fails) { std::printf("test_mem_lag_comp: %d FAILED\n", fails); return 1; }
     std::printf("test_mem_lag_comp: ok\n");

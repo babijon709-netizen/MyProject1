@@ -1427,6 +1427,9 @@ static void UpdateAimMemory(float dt) {
     // Кадров с последней записи: до kPendingFrames она ещё не видна в камере.
     static int   s_writeAge = 1000;
     if (s_writeAge < 1000) ++s_writeAge;
+    // Шаги прошлой записи в градусах (уже с учётом знака накопителя): их ещё
+    // нет в камере, пока запись не применилась.
+    static float s_lastOffYaw = 0.f, s_lastOffPitch = 0.f;
     float sw = 0.f, sh = 0.f;
     int why = 0;
     if (!AimBegin(dt, sw, sh, &why)) {
@@ -1518,8 +1521,8 @@ static void UpdateAimMemory(float dt) {
     const bool pend = haveCam && mem_lag_comp::pending(s_haveLastWrite, consumed, s_writeAge);
     const float baseYaw   = mem_lag_comp::base(accY, s_lastWriteY, pend);
     const float basePitch = mem_lag_comp::base(accX, s_lastWriteX, pend);
-    const float errYaw   = haveCam ? mem_lag_comp::error(best.yaw,   baseYaw,   camYaw)   : best.yaw;
-    const float errPitch = haveCam ? mem_lag_comp::error(best.pitch, basePitch, camPitch) : best.pitch;
+    const float errYaw   = mem_lag_comp::error(best.yaw,   s_lastOffYaw,   pend);
+    const float errPitch = mem_lag_comp::error(best.pitch, s_lastOffPitch, pend);
     const float offYaw   = mem_axis_step(errYaw, dt);
     const float offPitch = mem_axis_step(errPitch, dt);
     if (offYaw == 0.f && offPitch == 0.f) {
@@ -1545,6 +1548,7 @@ static void UpdateAimMemory(float dt) {
     s_lastWriteX = writeX; s_lastWriteY = writeY;
     s_haveLastWrite = true;
     s_writeAge = 0;
+    s_lastOffYaw = offYaw; s_lastOffPitch = offPitch;
 }
 
 

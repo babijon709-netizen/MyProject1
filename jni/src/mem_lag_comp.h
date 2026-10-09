@@ -26,10 +26,13 @@ inline float base(float acc, float lastWrite, bool pend) {
     return pend ? lastWrite : acc;
 }
 
-// targetOff — угол цели от прицела (градусы), cam — угол камеры по ESP,
-// base — текущая эффективная позиция накопителя (см. base()).
-inline float error(float targetOff, float base, float cam) {
-    return targetOff - wrap180(base - cam);
+// target — угол цели от прицела в градусах (тот же знак, что у best.yaw/pitch).
+// lastStep — шаг, который мы записали на прошлом такте, в тех же единицах.
+// Он ещё не виден в камере, поэтому вычитаем его из ошибки. Знак накопителя
+// здесь не нужен: шаг берётся в градусах прямо из mem_axis_step.
+inline float error(float target, float lastStep, bool pend) {
+    if (!pend || !std::isfinite(lastStep)) return target;
+    return target - lastStep;
 }
 
 } // namespace mem_lag_comp
