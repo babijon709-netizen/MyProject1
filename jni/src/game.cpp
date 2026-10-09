@@ -8243,6 +8243,22 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         const bool disc_found = discover_layout_from_native_transforms(probe_set, disc_positions, disc_candidates);
         static unsigned long s_discCalls = 0;
         const unsigned long dn = ++s_discCalls;
+        if (dn == 1 && !probe_set.empty()) {
+            // Сырой дамп первых 0x100 байт seed-трансформа: что реально лежит по
+            // смещениям. Нужен, чтобы увидеть структуру на устройстве, где поиск
+            // раскладки не сходится (candidates=0).
+            const uint64_t seed = probe_set[0];
+            DiagLog("seed dump transform=0x%llx", (unsigned long long)seed);
+            for (uint64_t off = 0x0; off <= 0x100; off += 0x20) {
+                const uint64_t q0 = rd_ptr(seed + off);
+                const uint64_t q1 = rd_ptr(seed + off + 8);
+                const int32_t  i0 = rd<int32_t>(seed + off);
+                const int32_t  i1 = rd<int32_t>(seed + off + 8);
+                DiagLog("seed +0x%02llx ptr=0x%llx ptr+8=0x%llx i32=%d i32+8=%d",
+                        (unsigned long long)off, (unsigned long long)q0, (unsigned long long)q1,
+                        (int)i0, (int)i1);
+            }
+        }
         if (disc_found || dn <= 5 || dn % 120 == 0)
             DiagLog("hierarchy discover#%lu found=%d positions=%zu candidates=%zu set=%zu",
                     dn, (int)disc_found, disc_positions, disc_candidates, probe_set.size());
