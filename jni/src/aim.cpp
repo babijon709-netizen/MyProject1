@@ -14,6 +14,7 @@
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
 #include "aim_priority.h"
+#include "mem_aim_control.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -1401,7 +1402,22 @@ static constexpr float kMemMaxSpeedDeg  = 72.0f;
 // приняла значение. Это только диагностика отклика в меню.
 static constexpr float kMemAckEps = 0.10f;
 
+// Постоянная времени сглаживания абсолютного угла цели. Кость каждый такт
+// дрожит на доли градуса (дыхание, анимация); без фильтра каждый шум уходит
+// прямо в запись. 50 мс — около трёх тактов при 60 FPS: шум гасится примерно
+// втрое, отставание на цель, идущую 30°/с, около 0.4°.
+static constexpr float kMemTargetTau = 0.05f;
+
 static AimMemDiag s_memDiag;
+static mem_aim_control::AngleFilter s_memFilt;
+// Шаг, записанный в прошлом такте (в координатах камеры): сколько из него
+// камера ещё не отработала, решает pending_part.
+static float s_memLastOffYaw = 0.f, s_memLastOffPitch = 0.f;
+
+static void MemDropControl() {
+    s_memFilt.reset();
+    s_memLastOffYaw = s_memLastOffPitch = 0.f;
+}
 
 const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
@@ -1439,6 +1455,7 @@ static void UpdateAimMemory(float dt) {
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        MemDropControl();
         return;
     }
     s_memDiag.inactive = 0;
@@ -1466,6 +1483,7 @@ static void UpdateAimMemory(float dt) {
         // не растёт. Без отметки здесь кадр не отличить от «цели не было».
         ++s_memDiag.read_fail;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        MemDropControl();
         return;
     }
 
@@ -1475,6 +1493,7 @@ static void UpdateAimMemory(float dt) {
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        MemDropControl();
         return;
     }
     s_memDiag.no_target = 0;
@@ -1482,6 +1501,7 @@ static void UpdateAimMemory(float dt) {
         // Другая цель: подтверждение прошлой записи и дрейф по прежней кости
         // к ней не относятся.
         s_haveLastWrite = false;
+        MemDropControl();
     }
 
     // ---- ACK по накопителю --------------------------------------------------
@@ -1502,9 +1522,17 @@ static void UpdateAimMemory(float dt) {
     // накопитель фактические углы камеры. Разошлись — это чужой MouseLook.
     float camYaw = 0.f, camPitch = 0.f;
     const bool haveCam = esp_aim_camera_angles(camYaw, camPitch);
+    // Фактическое смещение камеры за прошлый такт: сравнивается с нашим шагом.
+    bool  haveObs = false;
+    float obsYaw = 0.f, obsPitch = 0.f;
     if (haveCam) {
         s_memDiag.mismatch = fabsf(WrapDeg180(accY - camYaw)) +
                              fabsf(WrapDeg180(accX - camPitch));
+        if (s_haveLast) {
+            obsYaw   = WrapDeg180(camYaw - s_lastCamYaw);
+            obsPitch = camPitch - s_lastCamPitch;
+            haveObs  = true;
+        }
         // Камера задвигалась в такт записи и накопитель не расходится —
         // разворачивается именно наша запись (дополнительно к ACK).
         if (s_haveLast && s_memDiag.mismatch < 1.0f &&
@@ -1517,10 +1545,28 @@ static void UpdateAimMemory(float dt) {
     }
 
     // ---- плавный жёсткий лок --------------------------------------------------
-    const float offYaw   = mem_axis_step(best.yaw, dt);
-    const float offPitch = mem_axis_step(best.pitch, dt);
+    // Ошибка берётся от сглаженного абсолютного угла цели (камера + смещение),
+    // а не от сырого смещения: иначе шум кости шёл бы прямо в запись.
+    float errYaw = best.yaw, errPitch = best.pitch;
+    if (haveCam) {
+        s_memFilt.update(WrapDeg180(camYaw + best.yaw), camPitch + best.pitch,
+                         dt, kMemTargetTau);
+        errYaw   = WrapDeg180(s_memFilt.yaw - camYaw);
+        errPitch = s_memFilt.pitch - camPitch;
+        // Шаг прошлого такта ещё не виден в камере — вычитаем его из ошибки,
+        // иначе тот же остаток отрабатывается дважды и прицел раскачивается.
+        if (haveObs) {
+            errYaw   -= mem_aim_control::pending_part(s_memLastOffYaw,   obsYaw);
+            errPitch -= mem_aim_control::pending_part(s_memLastOffPitch, obsPitch);
+        }
+    } else {
+        MemDropControl();
+    }
+    const float offYaw   = mem_axis_step(errYaw, dt);
+    const float offPitch = mem_axis_step(errPitch, dt);
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
+        s_memLastOffYaw = s_memLastOffPitch = 0.f;
         ++s_memDiag.on_target;
         return;
     }
@@ -1534,9 +1580,13 @@ static void UpdateAimMemory(float dt) {
     // Y — рысканье (вправо — больше).
     if (!esp_mem_aim_write_angles(writeX, writeY)) {
         ++s_memDiag.fails;
+        s_memLastOffYaw = s_memLastOffPitch = 0.f;
         return;
     }
     ++s_memDiag.writes;
+    // В координатах камеры: рысканье +, наклон вверх = -accX (см. выше).
+    s_memLastOffYaw = offYaw;
+    s_memLastOffPitch = offPitch;
     // Запомнить записанное — в обёрнутом виде: чтение возвращает обёрнутые
     // углы, и сравнение на следующем такте обязано быть в тех же координатах.
     s_lastWriteX = writeX; s_lastWriteY = writeY;
