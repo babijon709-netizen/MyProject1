@@ -454,6 +454,29 @@ static void *TypeA(void *arg) {
     return nullptr;
 }
 
+// Имена узлов, которые берём первыми (EVIOCGNAME). На cliffs (Xiaomi) настоящая
+// панель — NVTCapacitiveTouchScreen (event11). «Xiaomi Touch» (INPUT_PROP_POINTER)
+// и перо NVTCapacitivePen* тоже проходят checkDeviceIsTouch; при выборе по
+// младшему индексу EVIOCGRAB уходит на них, а не на панель — поэтому GUI не
+// нажимается. Номер eventN плавает между загрузками, матчим по имени, не по пути.
+static const char *const kPreferredTouchNames[] = {"NVTCapacitiveTouchScreen"};
+
+static int findPreferredTouchNode(int maxIndex) {
+    char temp[128], name[128];
+    for (int i = 0; i <= maxIndex; i++) {
+        sprintf(temp, "/dev/input/event%d", i);
+        int fd = open(temp, O_RDONLY);
+        if (fd < 0) continue;
+        memset(name, 0, sizeof(name));
+        const int r = ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
+        close(fd);
+        if (r <= 0) continue;
+        for (const char *want : kPreferredTouchNames)
+            if (strcmp(name, want) == 0) return i;
+    }
+    return -1;
+}
+
 bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
     char temp[128];
     DIR *dir = opendir("/dev/input/");
@@ -463,13 +486,16 @@ bool Touch_Init(int w, int h, uint32_t orientation_, bool readOnly) {
         if (strstr(ptr->d_name, "event"))
             eventCount++;
     }
+    closedir(dir);
     struct input_absinfo abs, absX[maxE], absY[maxE];
     static int s_single[maxE];
     int fd, i, tmp1, tmp2;
     int screenX, screenY, minCnt = eventCount + 1;
     int minKind = 0;
     fdNum = 0;
+    const int prefIdx = findPreferredTouchNode(eventCount);
     for (i = 0; i <= eventCount; i++) {
+        if (prefIdx >= 0 && i != prefIdx) continue;
         sprintf(temp, "/dev/input/event%d", i);
         fd = open(temp, O_RDWR);
         if (fd < 0) {
