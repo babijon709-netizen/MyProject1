@@ -968,13 +968,22 @@ static void UpdateAimTouch(float dt) {
     // (камера стоит), настоящее медленное движение знак держит и проходит.
     // Без порога контроллер гонял палец за дрожью с частотой кадров —
     // 110 реверсов на стенде, видимый маятник у цели.
-    static constexpr float kTouchJitterBand  = 0.45f;
+    // Raised 0.45 → 0.80°: bone animation jitter on held target is typically
+    // 0.3–0.7° RMS; widening the band keeps the finger still through that noise.
+    // Real slow drift (running target) still exceeds 0.80° and passes through.
+    static constexpr float kTouchJitterBand  = 0.80f;
+    // Back to 3: with the wider band we can afford one more frame of confirmation
+    // before committing a step — reduces finger micro-jitter at long range.
     static constexpr int   kTouchDriftStreak = 3;
     // Доля шага у цели падает вместе с остатком (до минимума): при длинной
     // трубе касания поздние прилёты заказанного не перелетают кость. На
     // стенде перелёт на дрожи ±0.4° падает с 0.9° до 0.4°, реверсов 0.
-    static constexpr float kTouchRampBand = 2.5f;   // град, с чего начинается спад
-    static constexpr float kTouchRampMin  = 0.40f;  // пол: ниже шаг станет меньше пикселя и прицел залипнет
+    // Ramp band raised: 2.5 → 5.0 deg — controller runs at full gain until we're
+    // within 5° of the target instead of 2.5°, faster close-in tracking.
+    // Floor raised: 0.40 → 0.55 — less step reduction near bone; combined with the
+    // higher kStable this prevents hanging near the head at final approach.
+    static constexpr float kTouchRampBand = 5.0f;
+    static constexpr float kTouchRampMin  = 0.55f;
     const bool  useFlight = !haveCam;
     auto clearFlight = [&]() {
         s_flight.clear();
@@ -1209,7 +1218,10 @@ static void UpdateAimTouch(float dt) {
     // устойчивости здесь не лишний — «почти пропал, но не до конца» (19.09).
     // На скорость захвата это почти не влияет: при большой ошибке шаг всё
     // равно упирается в потолок maxStep.
-    const float kStable = 0.45f;
+    // Raised from 0.45 → 0.65: controller takes a larger bite of the error each
+    // frame during acquisition, cuts lock-on time from ~8 frames to ~4-5.
+    // The flight-absorb and flip-damp still prevent overshoot.
+    const float kStable = 0.65f;
     const float fracMid = 0.25f + (5.f - 1.f) / 9.f * 0.75f;   // слайдер 5
     if (k > kStable) k = kStable;
     if (frac < fracMid) k *= frac / fracMid;
@@ -1231,7 +1243,10 @@ static void UpdateAimTouch(float dt) {
     if (flipYaw || flipPitch) {
         s_flipDamp = 0.45f;
     } else if (s_flipDamp < 1.f) {
-        s_flipDamp += (1.f - s_flipDamp) * (dt * 2.5f);
+        // Faster recovery: 2.5 → 5.0 — damp lasts ~2 frames instead of ~4.
+        // The flip is already a committed overshoot; recovering quickly lets
+        // the controller correct back without a second oscillation.
+        s_flipDamp += (1.f - s_flipDamp) * (dt * 5.0f);
         if (s_flipDamp > 1.f) s_flipDamp = 1.f;
     }
     s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
@@ -1253,9 +1268,13 @@ static void UpdateAimTouch(float dt) {
     // первого шага; наведение всё равно занимает считанные кадры: при большой
     // ошибке шаг и в треть размера упирается в потолок.
     if (pick.switched) s_acquire = 0.f;
-    s_acquire += dt / 0.20f;
+    // Shortened ramp: 0.05 s instead of 0.20 s — full gain in ~3 frames at 60fps.
+    // The flight absorb already prevents stacked-order overshoot on acquisition;
+    // the long ramp was only masking that and slowing the initial snap.
+    s_acquire += dt / 0.05f;
     if (s_acquire > 1.f) s_acquire = 1.f;
-    k *= 0.3f + 0.7f * s_acquire;
+    // Floor raised to 0.5 so the very first frame still commits half the error.
+    k *= 0.5f + 0.5f * s_acquire;
 
     // Спад доли шага у цели: чем меньше остаток, тем меньшую его долю
     // заказываем за такт. Иначе заказы, сделанные на последних градусах,
@@ -1386,8 +1405,19 @@ static void AimLogTick(float dt) {
 // MouseLook полный шум одного снимка рига. Мёртвая зона меньше одного пикселя
 // на обычном FOV; за ней шаг плавно ограничен скоростью. Поэтому лок остаётся
 // на кости, а микроколебания анимации/чтения не превращаются в дёрганье камеры.
-static constexpr float kMemDeadbandDeg  = 0.035f;
-static constexpr float kMemMaxSpeedDeg  = 72.0f;
+// Raised 0.035 → 0.15°: at typical FOV/resolution 0.035° is sub-pixel and bone
+// read noise alone exceeds it every frame, causing a write each tick → camera
+// micro-jitter on hold.  0.15° is ~1 screen pixel at 60° FOV / 1080p and sits
+// above the noise floor while still well inside a head at any normal range.
+static constexpr float kMemDeadbandDeg  = 0.15f;
+// Raised 72 → 240 deg/s: at 60 fps this is 4°/frame, enough to snap across a
+// typical target angular size (~3-5°) in a single write.  The frame_gain
+// smoothing still controls overshoot; the old 72°/s cap was slowing lock-on.
+static constexpr float kMemMaxSpeedDeg  = 240.0f;
+// First N writes after a target switch run at full gain (no frame_gain cap) to
+// snap instantly onto the new bone. After kMemSnapFrames the normal smooth
+// controller takes over for precise hold.
+static constexpr int   kMemSnapFrames   = 3;
 // ACK по накопителю: расхождение с нашей записью, в пределах которого игра
 // приняла значение. Это только диагностика отклика в меню.
 static constexpr float kMemAckEps = 0.10f;
@@ -1396,20 +1426,31 @@ static AimMemDiag s_memDiag;
 
 const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
-// Остаток -> гладкий шаг жёсткого лока. Кость должна быть в пределах
-// kMemDeadbandDeg, а не перескакиваться каждым шумным измерением. За границей
-// шаг пропорционален остатку и ограничен угловой скоростью. Коэффициент
-// приведён к dt, поэтому поведение не меняется вместе с FPS оверлея.
-static float mem_axis_step(float err, float dt) {
+// Остаток -> гладкий шаг жёсткого лока.
+// snap=true: acquisition mode — takes the full remaining error in one write
+// (capped by kMemMaxSpeedDeg * dt).  Used for the first kMemSnapFrames after a
+// target switch, so the lock jumps to the bone immediately without the frame_gain
+// ramp causing a visible lag.
+// snap=false: normal smooth hold — frame_gain limits the step for stable tracking.
+static float mem_axis_step(float err, float dt, bool snap) {
     if (!std::isfinite(err)) return 0.f;
     if (fabsf(err) <= kMemDeadbandDeg) return 0.f;
-    float speed = g_state.gun_str;
-    if (!(speed >= 1.f)) speed = 1.f;
-    if (speed > 10.f) speed = 10.f;
-    const float smooth = 0.25f + (speed - 1.f) / 9.f * 0.75f;
-    const float gain = manes_aim_source::frame_gain(smooth, dt);
     const float maxStep = kMemMaxSpeedDeg * dt;
-    float step = err * gain;
+    float step;
+    if (snap) {
+        // Full step — clamp only by the speed cap.
+        step = err;
+    } else {
+        float speed = g_state.gun_str;
+        if (!(speed >= 1.f)) speed = 1.f;
+        if (speed > 10.f) speed = 10.f;
+        // Raise smooth floor: 0.25 → 0.45 so the tracking loop is tighter.
+        // The old 0.25 floor gave ~17% of error per frame at the lowest slider
+        // setting — visibly slow when following a moving target.
+        const float smooth = 0.45f + (speed - 1.f) / 9.f * 0.55f;
+        const float gain = manes_aim_source::frame_gain(smooth, dt);
+        step = err * gain;
+    }
     if (step >  maxStep) step =  maxStep;
     if (step < -maxStep) step = -maxStep;
     return step;
@@ -1419,6 +1460,9 @@ static void UpdateAimMemory(float dt) {
     static AimPick pick;
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f;
     static bool  s_haveLast = false;
+    // Countdown of snap-mode writes remaining (set to kMemSnapFrames on target
+    // switch; decrements each write; 0 = normal smooth hold).
+    static int   s_snapRemain = 0;
     // Последняя запись в накопитель (в тех же завёрнутых координатах, что
     // вернёт чтение): по совпадению видно, приняла ли игра запись.
     static float s_lastWriteX = 0.f, s_lastWriteY = 0.f;
@@ -1430,6 +1474,7 @@ static void UpdateAimMemory(float dt) {
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        s_snapRemain = 0;
         return;
     }
     s_memDiag.inactive = 0;
@@ -1466,13 +1511,15 @@ static void UpdateAimMemory(float dt) {
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        s_snapRemain = 0;
         return;
     }
     s_memDiag.no_target = 0;
     if (pick.switched) {
-        // Другая цель: подтверждение прошлой записи и дрейф по прежней кости
-        // к ней не относятся.
+        // New target: reset snap counter so the first kMemSnapFrames writes
+        // snap directly to the bone without frame_gain smoothing.
         s_haveLastWrite = false;
+        s_snapRemain = kMemSnapFrames;
     }
 
     // ---- ACK по накопителю --------------------------------------------------
@@ -1508,8 +1555,10 @@ static void UpdateAimMemory(float dt) {
     }
 
     // ---- плавный жёсткий лок --------------------------------------------------
-    const float offYaw   = mem_axis_step(best.yaw, dt);
-    const float offPitch = mem_axis_step(best.pitch, dt);
+    const bool doSnap = (s_snapRemain > 0);
+    const float offYaw   = mem_axis_step(best.yaw,   dt, doSnap);
+    const float offPitch = mem_axis_step(best.pitch,  dt, doSnap);
+    if (s_snapRemain > 0) --s_snapRemain;
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         ++s_memDiag.on_target;
