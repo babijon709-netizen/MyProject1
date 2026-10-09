@@ -14,6 +14,7 @@
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
 #include "mem_lag_comp.h"       // задержка записи в накопитель
+#include "aim_predict.h"        // альфа-бета предиктор цели
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -185,12 +186,8 @@ float AimSensitivityGain(bool& from_game) {
 struct AimPick {
     unsigned long long lastId = 0;      // прилипчивая цель
     int   lastBone    = -1;             // слот точки прицела прошлого такта
-    float prevTgtYaw = 0.f, prevTgtPitch = 0.f;
-    float prevCamYaw = 0.f, prevCamPitch = 0.f;
-    // Скорость цели со сглаживанием — по ней считается упреждение (см. выбор
-    // цели): дрожь кости каждый кадр меняет знак и в среднем даёт ноль, а
-    // настоящее движение идёт в одну сторону и в среднем остаётся.
-    float velYaw = 0.f, velPitch = 0.f;
+    // Трек цели в мировых углах: сглаженная позиция и скорость (см. aim_predict.h).
+    aim_predict::Track trk;
     bool  havePrev   = false;
     // Цель в этом кадре сменилась. Режиму важно: обученный коэффициент и
     // упреждение по прошлой цели к новой не относятся (тач, например,
@@ -200,7 +197,7 @@ struct AimPick {
     bool  switched   = false;
 
     void reset() { lastId = 0; lastBone = -1; havePrev = false; switched = false;
-                   velYaw = 0.f; velPitch = 0.f; }
+                   aim_predict::reset(trk); }
 };
 
 // Common per-frame checks. Calibration, detached state, freecam, and the
@@ -269,13 +266,14 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
 // поэтому цель задана константой.
 static constexpr int   kAimBoneSlot = 1;
 
-// Множитель упреждения по скорости цели (кадров вперёд). 0 — выключено.
-// Действует только в ТАЧ-режиме: там камера догоняет кость через трубу
-// касания, и цель за это время уходит. Мемори-аиму упреждение не нужно и
-// выключено: лок каждый такт пишет в память абсолютный угол самой кости —
-// упреждать нечего, а сдвиг точки вперёд по ходу цели выглядел бы как
-// «прицел убегает от головы» (жалоба 19.09). 0.055 — просьба 24.09.
-static constexpr float kAimVelocityLead = 0.055f;
+// Упреждение, секунды вперёд: сколько времени проходит от решения до того,
+// как камера реально окажется в точке. Мемори: шаг применяется на следующем
+// кадре игры — это один кадр. Тач: труба касания, ей нужен запас побольше.
+// Раньше мемори упреждения не было (жалоба 19.09 «прицел убегает от головы»);
+// теперь предиктор фильтрует дрожь кости, поэтому упреждение на один кадр
+// даёт попадание в точку, а не сдвиг. Откат: kAimLeadMemSec = 0.
+static constexpr float kAimLeadMemSec   = 1.f / 60.f;
+static constexpr float kAimLeadTouchSec = 0.05f;
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
 static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
 static unsigned long s_bones_not_projected = 0; // скелет есть, кости не легли на экран
@@ -565,82 +563,26 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         return false;
     }
 
-    // Lead a moving target: the game applies our step next frame, by
-    // which time the target has moved on. Use the target's angular velocity
-    // relative to the camera (with the camera's own rotation removed) and
-    // aim one frame ahead. Reset on target switch.
-    //
-    // Камера здесь та же, что и в обучении коэффициента (esp_aim_camera_angles):
-    // вычитать отстающий базис из матрицы вида из угловой скорости цели нельзя —
-    // в поправку попадал бы его запаздывающий поворот, и прицел уезжал бы в
-    // сторону. Нет настоящей оси — нет и упреждения: так вёл цель эталонный аим.
-    //
-    // Упреждение действует только в ТАЧ-режиме: камера догоняет кость через
-    // трубу касания, и цель за это время уходит. Мемори-лок пишет абсолютный
-    // угол самой кости каждый такт — ему упреждать нечего (просьба 24.09:
-    // «есть ли упреждение в мемори аиме, оно там не нужно»).
-    if (g_state.aim_mode == AIM_MODE_TOUCH) {
+    // Предикт в мировых углах (камера + смещение): собственный поворот камеры
+    // в скорость цели не попадает. Трек сбрасывается при смене цели, паузе
+    // чтения и скачке за порог. Упреждение — время, а не кадры.
+    {
         float cy = 0.f, cp = 0.f;
-        // Мусорный угол камеры (чтение сорвалось) не годится даже в
-        // нормализацию: упреждение по нему уводит прицел, а раньше из-за него
-        // ещё и зависал цикл приведения угла.
-        bool haveC = esp_aim_camera_angles(cy, cp) && std::isfinite(cy) && std::isfinite(cp);
-        if (best.id == pick.lastId && pick.havePrev && haveC) {
-            const float dCamYaw = WrapDeg180(cy - pick.prevCamYaw);
-            float dCamPitch = cp - pick.prevCamPitch;
-            // world-space angular motion of the target = change in offset + camera rotation
-            float vYaw = (best.yaw - pick.prevTgtYaw) + dCamYaw;
-            float vPitch = (best.pitch - pick.prevTgtPitch) + dCamPitch;
-            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 10.f && fabsf(vPitch) < 10.f) {
-                pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
-                // Скорость сглаживаем, прежде чем упреждать по ней. Раньше
-                // упреждение брало сырой прирост за кадр, а он у дрожащей кости
-                // каждый кадр другого знака: прицел получал рывок в полный
-                // размах дрожи и ещё столько же вперёд — то есть дрожь
-                // удваивалась. Это и была жалоба «мемори трясётся»: магнит
-                // держал цель, но вокруг неё камера ходила.
-                const float kv = 0.35f;
-                pick.velYaw   += (vYaw   - pick.velYaw)   * kv;
-                pick.velPitch += (vPitch - pick.velPitch) * kv;
-                // Below this the "motion" is bone animation jitter (breathing,
-                // sway), which at long range is larger than the head itself.
-                // Extrapolating it would double the error, so only lead real
-                // movement. Aim more than a frame ahead for fast movers so the
-                // crosshair stays on a laterally running target (the controller
-                // smoothing otherwise makes it trail behind).
-                const float leadMin = degPerPx * 2.f;
-                float vMag = sqrtf(pick.velYaw * pick.velYaw + pick.velPitch * pick.velPitch);
-                if (vMag > leadMin) {
-                    // Забегаем чуть больше чем на кадр вперёд (игра применит
-                    // шаг в своём следующем кадре). По сглаженной скорости это
-                    // безопасно: дрожь в неё не проходит, а постоянное
-                    // движение проходит целиком. Множитель больше 1.1 только
-                    // мерил: при 2.0 цель идёт с остатком 0.98° против 0.70°,
-                    // то есть прицел уезжает вперёд, а не отстаёт.
-                    // История: было до 1.5 кадра вперёд — выглядело как «аим
-                    // пытается запредиктить движение игрока» (жалоба 19.09):
-                    // точка уезжала вперёд по ходу цели, а когда цель меняла
-                    // направление, прицел оказывался не там. Поэтому упреждение
-                    // долго стояло на нуле. Просьба 24.09 — вернуть упреждение
-                    // в тач и поднять его до 0.055 кадра: оно компенсирует трубу
-                    // касания и уход цели за время догонки. Кэп 1.5 кадра
-                    // оставлен, чтобы не уезжать далеко вперёд по ходу цели.
-                    float k = kAimVelocityLead * (1.f - leadMin / vMag);
-                    if (k > 1.5f) k = 1.5f;
-                    best.yaw   += pick.velYaw   * k;
-                    best.pitch += pick.velPitch * k;
-                }
-            } else {
-                // Скорость сорвалась (мусор) — и сглаженную обнуляем, чтобы
-                // одиночный выброс не тянул прицел дальше.
-                pick.velYaw = pick.velPitch = 0.f;
-                pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
+        const bool haveC = esp_aim_camera_angles(cy, cp) && std::isfinite(cy) && std::isfinite(cp);
+        if (best.id != pick.lastId) aim_predict::reset(pick.trk);
+        if (haveC) {
+            const double now = MonoNow();
+            if (aim_predict::update(pick.trk, cy + best.yaw, cp + best.pitch, now)) {
+                const float lead = (g_state.aim_mode == AIM_MODE_TOUCH) ? kAimLeadTouchSec : kAimLeadMemSec;
+                float py = 0.f, pp = 0.f;
+                aim_predict::predict(pick.trk, lead, py, pp);
+                best.yaw   = aim_predict::wrap180(py - cy);
+                best.pitch = pp - cp;
             }
         } else {
-            pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
+            aim_predict::reset(pick.trk);
         }
-        if (haveC) { pick.prevCamYaw = cy; pick.prevCamPitch = cp; pick.havePrev = true; }
-        else pick.havePrev = false;
+        pick.havePrev = haveC;
     }
     // Цель взята — с этого такта камера (или ось выстрела) наша: автофарм ей
     // больше не командует.
@@ -1254,9 +1196,13 @@ static void UpdateAimTouch(float dt) {
     // первого шага; наведение всё равно занимает считанные кадры: при большой
     // ошибке шаг и в треть размера упирается в потолок.
     if (pick.switched) s_acquire = 0.f;
-    s_acquire += dt / 0.20f;
+    s_acquire += dt / 0.35f;
     if (s_acquire > 1.f) s_acquire = 1.f;
-    k *= 0.3f + 0.7f * s_acquire;
+    {
+        // smoothstep: медленный старт, без рывка в первую треть окна
+        const float a = s_acquire * s_acquire * (3.f - 2.f * s_acquire);
+        k *= 0.15f + 0.85f * a;
+    }
 
     // Спад доли шага у цели: чем меньше остаток, тем меньшую его долю
     // заказываем за такт. Иначе заказы, сделанные на последних градусах,
