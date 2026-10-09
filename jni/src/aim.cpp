@@ -6,6 +6,7 @@
 #include "aim_learn.h"           // оценка град/px по реакции прицела
 #include "app_state.h"
 #include "cfg.h"
+#include "diag_log.h"
 #include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
 #include "ui_util.h"
@@ -541,6 +542,21 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         if (strictBoneLock && sticky) score = -1.f;
         else if (sticky) score *= 0.35f;
         if (score < bestScore) { bestScore = score; best = t; }
+    }
+
+    {
+        static double s_selLogAt = -1e9;
+        const double now = (double)clock() / CLOCKS_PER_SEC;
+        if (now - s_selLogAt >= 1.0) {
+            s_selLogAt = now;
+            DiagLog("select valid=%d boxes=%lu bots=%lu dead=%lu ally=%lu noSk=%lu noProj=%lu "
+                    "offscr=%lu outFov=%lu botNoEsp=%lu fovR=%.1f cfgFov=%.1f camFov=%.1f "
+                    "sw=%.0f sh=%.0f mode=%d bone=%d",
+                    (int)best.valid, s_seen_boxes, s_seen_bots, s_dead_skipped, s_ally_skipped,
+                    s_no_skeleton, s_bones_not_projected, s_offscreen_skipped, s_out_of_fov,
+                    s_bot_noesp_skipped, fovR, cfg::aim::fov, camFov, sw, sh,
+                    g_state.aim_mode, wantBone);
+        }
     }
 
     if (!best.valid) {
@@ -1366,11 +1382,15 @@ static const char* aim_mode_name() {
 
 static void AimLogTick(float dt) {
     s_logTime += dt;
-    if (s_logTime < 0.25f) return;
+    if (s_logTime < 0.5f) return;
     s_logTime = 0.f;
-    const AimMemDiag& d = AimMemoryDiag();
-    if (g_state.aim_mode == AIM_MODE_MEMORY)
-        ;
+    const bool gate = g_state.aim_touch && g_esp_attached && g_calibMode == 0 && !g_state.freecam_on;
+    DiagLog("state touch=%d mode=%d gate=%d attached=%d calib=%d freecam=%d scope=%d "
+            "bone=%d cfgFov=%.1f gunFov=%.1f tx=%.3f ty=%.3f active=%d",
+            (int)g_state.aim_touch, g_state.aim_mode, (int)gate, (int)g_esp_attached,
+            (int)g_calibMode, (int)g_state.freecam_on, (int)g_state.aim_scope_only,
+            g_state.aim_bone, cfg::aim::fov, g_state.gun_fov,
+            g_state.aim_tx, g_state.aim_ty, (int)g_aimActive);
 }
 
 // ====================== Мемори-аим: «память» ===============================

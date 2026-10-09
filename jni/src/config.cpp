@@ -9,6 +9,7 @@
 #include "lang.h"
 #include "game.h"
 #include "cfg_pick.h"
+#include "diag_log.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -596,6 +597,11 @@ static void LoadCfgByName(const char* name, bool announce) {
     for (int i = 0; i < g_configCount; i++)
         if (strcmp(g_configs[i].name, name) == 0) { g_cfgLoadedIdx = i; break; }
     for (int i = 0; i < kMaxConfigs; i++) g_cfgLoadAnim[i] = 0.f;
+    DiagLog("cfg load name=%s aimTouch=%d mode=%d scope=%d bone=%d cfgFov=%.1f gunFov=%.1f "
+            "gunStr=%.2f tx=%.3f ty=%.3f predictMs=%.1f",
+            name, (int)g_state.aim_touch, g_state.aim_mode, (int)g_state.aim_scope_only,
+            g_state.aim_bone, cfg::aim::fov, g_state.gun_fov, g_state.gun_str,
+            g_state.aim_tx, g_state.aim_ty, g_state.aim_lead_ms);
     if (announce) {
         ShowToast(XS("Конфиг загружен"));
         PlaySound(SND_SUCCESS);
