@@ -13,6 +13,7 @@
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
+#include "bing87/bing87_touch_adapter.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -661,7 +662,54 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
 }
 
 // ============================ Тач-аим ======================================
+// Аим на тач: адаптер Bing87 (jni/include/bing87). Угловая ошибка приходит из
+// AimSelectTarget; масштаб град->px — из degPerPx (camFov / sh).
 static void UpdateAimTouch(float dt) {
+    static bing87::TouchAimAdapter s_touchAim(bing87::TouchConfig{});
+    static AimPick s_pick;
+    static int s_lostFrames = 0;
+
+    float sw = 0.f, sh = 0.f;
+    if (!AimBegin(dt, sw, sh)) {
+        s_touchAim.Reset();
+        s_fingerDown = false;
+        s_pick.reset();
+        s_lostFrames = 0;
+        return;
+    }
+
+    AimTarget best;
+    float degPerPx = 0.f;
+    const bool haveTarget = AimSelectTarget(sw, sh, s_pick, best, degPerPx);
+
+    bing87::TouchConfig cfg;
+    cfg.slot = 9;
+    cfg.screen_width = sw;
+    cfg.screen_height = sh;
+    cfg.anchor_x = AimTouchFracX() * sw;
+    cfg.anchor_y = AimTouchFracY() * sh;
+    cfg.pixels_per_degree_x = degPerPx > 0.f ? 1.f / degPerPx : 0.f;
+    cfg.pixels_per_degree_y = cfg.pixels_per_degree_x;
+    s_touchAim.Configure(cfg);
+
+    // Короткий провал чтения не должен превращаться в тап: палец держим 6 кадров с нулевой ошибкой.
+    if (!haveTarget) {
+        if (++s_lostFrames > 6) {
+            s_touchAim.Reset();
+            s_fingerDown = false;
+            s_pick.reset();
+            return;
+        }
+        s_fingerDown = s_touchAim.Tick(true, true, 0.f, 0.f, dt);
+        return;
+    }
+    s_lostFrames = 0;
+
+    s_fingerDown = s_touchAim.Tick(true, true, best.yaw, best.pitch, dt);
+}
+
+#if 0 // legacy touch aim (заменён адаптером Bing87)
+static void UpdateAimTouchLegacy(float dt) {
     static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
     static bool  s_haveLast = false;
@@ -1569,6 +1617,8 @@ void AimEndFrame() {
                       g_aimActive && !g_state.freecam_on;
     if (!keep) silent_aim::clear();
 }
+
+#endif // legacy touch aim
 
 // Диспетчер: какой режим ведёт камеру в этом кадре.
 void UpdateAim(float dt) {
