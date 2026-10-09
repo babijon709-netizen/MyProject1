@@ -297,7 +297,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.aim_vis_check  = cfg::aim::vis_check;
     s.aim_draw_fov   = cfg::aim::draw_fov;
     s.aim_mode       = (uint8_t)((g_state.aim_mode >= 0 && g_state.aim_mode <= 2) ? g_state.aim_mode : 0);
-    s.aim_fov        = cfg::aim::fov;
+    s.aim_fov        = g_state.gun_fov;
     // Слот aim_lead давно свободен (см. CfgBlob) — теперь в нём живёт
     // дальность автофарма. Старые конфиги держат тут 0 и дадут дефолт.
     s.aim_lead       = g_state.farm_range;
@@ -463,7 +463,6 @@ static void LoadCfgByName(const char* name, bool announce) {
     g_state.aim_mode    = (s.aim_mode <= 2) ? (int)s.aim_mode : 0;
     cfg::aim::vis_check  = false;
     cfg::aim::draw_fov   = s.aim_draw_fov;
-    cfg::aim::fov        = s.aim_fov;
     // Дальность автофарма переехала в бывший слот aim_lead; в старых
     // конфигах там 0 — тогда остаётся дефолт 100 м.
     g_state.farm_range   = (s.aim_lead >= 10.f && s.aim_lead <= 300.f) ? s.aim_lead : 100.f;
@@ -559,7 +558,10 @@ static void LoadCfgByName(const char* name, bool announce) {
         };
         g_state.esp_thick = num(g_state.esp_thick, 0.5f, 5.f, 2.f);
         g_state.gun_str = num(g_state.gun_str, 1.f, 10.f, 5.f);
-        cfg::aim::fov = num(cfg::aim::fov, 5.f, 180.f, 80.f);
+        // Радиус аима — слайдер «Радиус» (gun_fov). aim.cpp читает cfg::aim::fov,
+        // который меню синхронизирует только при открытой вкладке аима; без
+        // этой строки после загрузки аим брал устаревший aim_fov из файла.
+        cfg::aim::fov = g_state.gun_fov;
         g_state.gun_trigger_delay = num(g_state.gun_trigger_delay, 0.f, 1.f, 0.f);
         if (g_state.aim_bone < 0 || g_state.aim_bone > 2) g_state.aim_bone = 0;
         cfg::aim::bone = g_state.aim_bone;
