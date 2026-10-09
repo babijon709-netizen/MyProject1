@@ -13,6 +13,7 @@
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
+#include "mem_lag_comp.h"       // задержка записи в накопитель
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -1423,6 +1424,9 @@ static void UpdateAimMemory(float dt) {
     // вернёт чтение): по совпадению видно, приняла ли игра запись.
     static float s_lastWriteX = 0.f, s_lastWriteY = 0.f;
     static bool  s_haveLastWrite = false;
+    // Кадров с последней записи: до kPendingFrames она ещё не видна в камере.
+    static int   s_writeAge = 1000;
+    if (s_writeAge < 1000) ++s_writeAge;
     float sw = 0.f, sh = 0.f;
     int why = 0;
     if (!AimBegin(dt, sw, sh, &why)) {
@@ -1481,8 +1485,9 @@ static void UpdateAimMemory(float dt) {
     // игрок между нашими тактами не добавлял, чужой MouseLook значение не
     // перезаписал. Диагностике это даёт «отклик» и там, где оси камеры нет
     // вовсе (штатный режим этого устройства).
+    bool consumed = false;
     if (s_haveLastWrite) {
-        const bool consumed =
+        consumed =
             fabsf(WrapDeg180(accY - s_lastWriteY)) < kMemAckEps &&
             fabsf(WrapDeg180(accX - s_lastWriteX)) < kMemAckEps;
         if (consumed) s_memDiag.responded = true;
@@ -1508,8 +1513,15 @@ static void UpdateAimMemory(float dt) {
     }
 
     // ---- плавный жёсткий лок --------------------------------------------------
-    const float offYaw   = mem_axis_step(best.yaw, dt);
-    const float offPitch = mem_axis_step(best.pitch, dt);
+    // Запись ещё не отразилась в камере: ошибку считаем от записанного
+    // значения, иначе шаг учитывается второй раз и прицел перелетает.
+    const bool pend = haveCam && mem_lag_comp::pending(s_haveLastWrite, consumed, s_writeAge);
+    const float baseYaw   = mem_lag_comp::base(accY, s_lastWriteY, pend);
+    const float basePitch = mem_lag_comp::base(accX, s_lastWriteX, pend);
+    const float errYaw   = haveCam ? mem_lag_comp::error(best.yaw,   baseYaw,   camYaw)   : best.yaw;
+    const float errPitch = haveCam ? mem_lag_comp::error(best.pitch, basePitch, camPitch) : best.pitch;
+    const float offYaw   = mem_axis_step(errYaw, dt);
+    const float offPitch = mem_axis_step(errPitch, dt);
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         ++s_memDiag.on_target;
@@ -1518,8 +1530,8 @@ static void UpdateAimMemory(float dt) {
 
     // Накопитель MouseLook хранит текущую ориентацию игры. Прибавляем только
     // сглаженный остаток; источник углов ESP уже учтён при расчёте best.
-    const float writeY = WrapDeg180(accY + offYaw);
-    const float writeX = WrapDeg180(accX - offPitch);
+    const float writeY = WrapDeg180(baseYaw + offYaw);
+    const float writeX = WrapDeg180(basePitch - offPitch);
 
     // Градусы -> накопитель игры: X — «наклон вниз» (вверх — меньше),
     // Y — рысканье (вправо — больше).
@@ -1532,6 +1544,7 @@ static void UpdateAimMemory(float dt) {
     // углы, и сравнение на следующем такте обязано быть в тех же координатах.
     s_lastWriteX = writeX; s_lastWriteY = writeY;
     s_haveLastWrite = true;
+    s_writeAge = 0;
 }
 
 
