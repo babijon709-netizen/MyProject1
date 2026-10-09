@@ -12,6 +12,7 @@
 #include <linux/uinput.h>
 
 #include "imgui.h"
+#include "touch_device_filter.h"
 
 #define maxE 5
 #define maxF 10
@@ -134,6 +135,8 @@ static bool Touch_readOnly = false;
 //   2 — однотачевый type-A (ABS_X/ABS_Y + BTN_TOUCH): так выглядят
 //       virtio/qemu-тачпады и «мышиная интеграция» в VMOS/X8/F1 и облачных
 //       телефонах — из-за них на ВМ и падало «Failed init touch!».
+// INPUT_PROP_POINTER-тачпады и BTN_TOOL_PEN-дигитайзеры отбрасываются: на
+// Xiaomi они идут рядом с настоящей DIRECT-панелью и сбрасывают MouseDown.
 static int checkDeviceIsTouch(int fd);
 static void genRandomString(char *string, int length) {
     int flag, i;
@@ -648,11 +651,19 @@ static bool checkDeviceHasKey(int fd, int keyCode) {
     return found;
 }
 
+static bool checkDeviceHasProp(int fd, int propCode) {
+    unsigned long bits[(INPUT_PROP_MAX + 8 * sizeof(unsigned long)) /
+                       (8 * sizeof(unsigned long))]{};
+    if (ioctl(fd, EVIOCGPROP(sizeof(bits)), bits) < 0) return false;
+    const int width = 8 * (int)sizeof(unsigned long);
+    return (bits[propCode / width] & (1UL << (propCode % width))) != 0;
+}
+
 static int checkDeviceIsTouch(int fd) {
     uint8_t *bits = NULL;
     ssize_t bits_size = 0;
     int res, j, k;
-    bool hasMtX = false, hasMtY = false, hasX = false, hasY = false;
+    touchfilter::Caps caps{};
     struct input_absinfo abs{};
     while (true) {
         res = ioctl(fd, EVIOCGBIT(EV_ABS, bits_size), bits);
@@ -664,16 +675,18 @@ static int checkDeviceIsTouch(int fd) {
     for (j = 0; j < res; j++) {
         for (k = 0; k < 8; k++)
             if (bits[j] & 1 << k && ioctl(fd, EVIOCGABS(j * 8 + k), &abs) == 0) {
-                if (j * 8 + k == ABS_MT_POSITION_X) hasMtX = true;
-                if (j * 8 + k == ABS_MT_POSITION_Y) hasMtY = true;
-                if (j * 8 + k == ABS_X) hasX = true;
-                if (j * 8 + k == ABS_Y) hasY = true;
+                if (j * 8 + k == ABS_MT_POSITION_X) caps.mt_x = true;
+                if (j * 8 + k == ABS_MT_POSITION_Y) caps.mt_y = true;
+                if (j * 8 + k == ABS_X) caps.abs_x = true;
+                if (j * 8 + k == ABS_Y) caps.abs_y = true;
             }
     }
     free(bits);
-    if (hasMtX && hasMtY) return 1;
-    if (hasX && hasY && checkDeviceHasKey(fd, BTN_TOUCH)) return 2;
-    return 0;
+    caps.btn_touch = checkDeviceHasKey(fd, BTN_TOUCH);
+    caps.tool_pen = checkDeviceHasKey(fd, BTN_TOOL_PEN);
+    caps.direct = checkDeviceHasProp(fd, INPUT_PROP_DIRECT);
+    caps.pointer = checkDeviceHasProp(fd, INPUT_PROP_POINTER);
+    return (int)touchfilter::classify(caps);
 }
 
 void Touch_Close() {
