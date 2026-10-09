@@ -2816,6 +2816,17 @@ static bool g_body_caches_dirty = false; // clear per-player caches on the next 
 
 static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
     uint64_t best_offset = find_direct_player_position_offset(players);
+    {
+        static double s_posLogAt = -1e9;
+        const double now = mono_seconds();
+        if (now - s_posLogAt >= 5.0) {
+            s_posLogAt = now;
+            DiagLog("posmode players=%d directOffset=0x%llx streak=%d sinceSec=%.2f hierValid=%d useDirect=%d",
+                    (int)players.size(), (unsigned long long)best_offset, g_direct_position_fail_streak,
+                    g_direct_position_fail_since ? now - g_direct_position_fail_since : 0.0,
+                    (int)g_transform_hierarchy_layout_valid, (int)g_use_direct_player_position);
+        }
+    }
     if (best_offset) {
         g_direct_position_fail_streak = 0;
         g_direct_position_fail_since = 0.0;
@@ -2831,7 +2842,11 @@ static bool discover_player_position_offset(const std::vector<uint64_t>& players
     if (g_direct_position_fail_streak < 60 &&
         (now - g_direct_position_fail_since) < kDirectPositionSettleSeconds) return false;
     size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
-    if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
+    const bool discovered = discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count);
+    DiagLog("hierarchy discover found=%d positions=%llu candidates=%llu players=%d",
+            (int)discovered, (unsigned long long)discovered_position_count,
+            (unsigned long long)hierarchy_candidate_count, (int)players.size());
+    if (discovered) {
         g_use_direct_player_position = false;
         g_player_position_validated = true; g_matrix_configuration_validated = false;
         g_direct_position_recheck = 0;
