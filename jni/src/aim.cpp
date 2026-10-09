@@ -1395,6 +1395,7 @@ static void UpdateAimTouchLegacy(float dt) {
     }
     Touch_Move(s_fx, s_fy);
 }
+#endif // legacy touch aim
 
 // ---- диагностика режимов: по 4 строки в секунду в лог (Загрузки) ----------
 // Главное, что должно быть видно: выигрывает ли запись гонку у игры. Поэтому
@@ -1617,8 +1618,6 @@ void AimEndFrame() {
                       g_aimActive && !g_state.freecam_on;
     if (!keep) silent_aim::clear();
 }
-
-#endif // legacy touch aim
 
 // Диспетчер: какой режим ведёт камеру в этом кадре.
 void UpdateAim(float dt) {
