@@ -8,7 +8,6 @@
 #include "aim.h"                 // g_aimActive, s_fingerDown (владелец камеры)
 #include "esp_draw.h"            // FrameBoxes
 #include "menu.h"                // g_calibMode
-#include "logfile.h"             // LogStatus — рёбра состояния фарма
 #include "process.h"             // g_esp_attached
 #include <cmath>
 
@@ -178,28 +177,6 @@ constexpr float kPitchDeadSpot = 0.50f;  // град: субградусный p
 
 static void UpdateFarmInner(float dt);
 
-// Статус-лог фарма: ребро активности («стоп/активен») и, когда с включённым
-// фармом цели нет, причина простоя раз в 10 с — иначе «фарм молчит» нечем
-// отличить от «фарм выключен». why: 1 нет ресурсов, 2 нет привязки,
-// 3 экран неизвестен, 4 цели нет в радиусе.
-static void farm_log_state(int why) {
-    static bool   was = false;
-    static double idle_at = -1e9;
-    if (g_farmActive != was) {
-        was = g_farmActive;
-        LogStatus("фарм: %s", was ? "активен" : "стоп");
-    }
-    if (was || !g_state.farm_on || !why) return;
-    const double now = (double)clock() / CLOCKS_PER_SEC;
-    if (now - idle_at < 10.0) return;
-    idle_at = now;
-    const char* reason = why == 1 ? "не выбран ни один ресурс" :
-                         why == 2 ? "нет привязки к игре" :
-                         why == 3 ? "размер экрана неизвестен" : "цели в радиусе нет";
-    LogStatus("фарм: простаивает — %s (узлов %d, код %d, дальность %.0f м)",
-              reason, g_farmNodes, g_farmReason, (double)g_state.farm_range);
-}
-
 void UpdateFarm(float dt) {
     UpdateFarmInner(dt);
 }
@@ -277,7 +254,6 @@ static void UpdateFarmInner(float dt) {
     esp_farm_set_resources(mask);
     esp_farm_set_range(g_state.farm_range);
 
-    farm_log_state(mask == 0 ? 1 : (!g_esp_attached ? 2 : 0));
     if (mask == 0 || !g_esp_attached) {
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
@@ -299,7 +275,7 @@ static void UpdateFarmInner(float dt) {
         sw = (float)displayInfo.height; sh = (float)displayInfo.width;
     }
     if (sw < 100.f || sh < 100.f) {
-        g_farmActive = false; farm_log_state(3);
+        g_farmActive = false;
         releaseAll(); return;
     }
 
@@ -322,7 +298,7 @@ static void UpdateFarmInner(float dt) {
             s_camTurn = false; s_memPend = false; s_memWait = 0.f;
             return; // палец движения оставляем, где был
         }
-        g_farmActive = false; farm_log_state(4);
+        g_farmActive = false;
         releaseAll();
         g_farmPhase = 0; g_farmPaused = false;
         g_farmHpPct = -1.f; g_farmSpotLife = -1.f; g_farmBlocked = false;
@@ -332,7 +308,6 @@ static void UpdateFarmInner(float dt) {
     }
     s_lostTime = 0.f;
     g_farmActive = true;
-    farm_log_state(0);
     g_farmPaused = !driving;
     g_farmTgtDist = tgt.aim_dist;
     g_farmReach = tgt.melee_reach;

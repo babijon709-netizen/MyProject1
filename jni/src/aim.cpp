@@ -1,6 +1,5 @@
 #include "aim.h"
 #include "silent_aim.h"
-#include "logfile.h"
 #include "main.h"                // displayInfo, native_window_screen_*
 #include "game.h"
 #include "Android_touch/TouchHelperA.h"
@@ -378,7 +377,6 @@ static bool aim_camera_flow(float& yawDeg, float& pitchDeg) {
 // прочесть: в логе 17:06 таких было 32 из 92, и что именно не пустило
 // цель — отфильтровали трупа, круг обзора или пустой список — не видно.
 static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx, int* why = nullptr) {
-    LogStage(kStageAimSelect);
     if (why) *why = 0;
     const unsigned long was_ally = s_ally_skipped, was_dead = s_dead_skipped;
     const unsigned long was_nosk = s_no_skeleton,  was_noproj = s_bones_not_projected;
@@ -400,10 +398,6 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                                     s_bot_noesp_skipped;
         if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
             s_at = now;
-            LogStatus("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
-                    s_seen_boxes, s_seen_bots, s_bot_noesp_skipped, s_ally_skipped, s_dead_skipped,
-                    s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
-                    s_offscreen_skipped, s_out_of_fov);
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;
@@ -654,10 +648,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
     // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
     if (best.id != pick.lastId)
-        LogStatus("аим: цель 0x%llx здоровье=%.1f respawning=%d смерть=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
-                (unsigned long long)best.id, (double)best.health,
-                (int)best.respawning, (int)best.death_flag, (double)best.world_dist,
-                (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
+        ;
     pick.switched = (best.id != pick.lastId);
     const double now = MonoNow();
     if (pick.switched) {
@@ -671,7 +662,6 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
 
 // ============================ Тач-аим ======================================
 static void UpdateAimTouch(float dt) {
-    LogStage(kStageAimSelect);
     static float s_fx = 0.f, s_fy = 0.f;         // finger position (px)
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f; // absolute camera angles
     static bool  s_haveLast = false;
@@ -1380,10 +1370,7 @@ static void AimLogTick(float dt) {
     s_logTime = 0.f;
     const AimMemDiag& d = AimMemoryDiag();
     if (g_state.aim_mode == AIM_MODE_MEMORY)
-        LogLine("аим: %s кадр=%lu объект=%d отклик=%d записей=%d отказов=%d расхождение=%.1f молчит=%d прицел=%d источник=%d нетцели=%d нацели=%d чтение=%d",
-                aim_mode_name(), s_frames, (int)d.params, (int)d.responded,
-                d.writes, d.fails, (double)d.mismatch, d.inactive, d.ads, d.ads_source,
-                d.no_target, d.on_target, d.read_fail);
+        ;
 }
 
 // ====================== Мемори-аим: «память» ===============================
@@ -1465,7 +1452,6 @@ static void UpdateAimMemory(float dt) {
     // считается от него; абсолютной базе он не нужен, но прочитать его всё
     // равно необходимо: это самая дешёвая проверка, что объект жив.
     float accX = 0.f, accY = 0.f;
-    LogStage(kStageAimRead);
     if (!esp_mem_aim_read_angles(accX, accY)) {
         // Самый молчаливый путь: цель есть, писать нечем, а ни один счётчик
         // не растёт. Без отметки здесь кадр не отличить от «цели не было».
@@ -1537,7 +1523,6 @@ static void UpdateAimMemory(float dt) {
 
     // Градусы -> накопитель игры: X — «наклон вниз» (вверх — меньше),
     // Y — рысканье (вправо — больше).
-    LogStage(kStageAimWrite);
     if (!esp_mem_aim_write_angles(writeX, writeY)) {
         ++s_memDiag.fails;
         return;

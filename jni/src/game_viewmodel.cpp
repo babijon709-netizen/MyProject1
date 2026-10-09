@@ -18,7 +18,6 @@
 #include <unistd.h>
 #include "game_viewmodel_internal.h"
 #include "game_internal.h"
-#include "logfile.h"
 
 namespace {
 struct Memory {
@@ -188,9 +187,6 @@ bool heap_gate_allows(uint64_t address, size_t size) {
                     case object_data::Reject::SpansBoundary:reason = "write spans the mapping end"; break;
                     default: break;
                 }
-                LogStatus("запись в кучу отклонена воротами: адрес 0x%llx, %zu байт — %s; карта: %s",
-                        (unsigned long long)address, size, reason,
-                        line[0] ? line : (text ? "(строка не найдена)" : "(карта не прочиталась)"));
             }
             return false;
         }
@@ -330,23 +326,6 @@ const char* fast_fire_stop_reason(viewmodel::Status status, int stage) {
         default: return "waiting for bind or player";
     }
 }
-// Переходы статуса быстрой стрельбы в лог; отдельно подсвечивается сам факт
-// остановки («перестала работать») с причиной. Зовётся после КАЖДОГО
-// rapid_fire.tick и после ручных смен статуса на отвязанном пути.
-void log_fast_fire_transition() {
-    static int last_stage = -1;
-    static viewmodel::Status last_status = viewmodel::Status::Off;
-    const int stage = rapid_fire.stage();
-    const viewmodel::Status status = rapid_fire.status;
-    if (stage == last_stage && status == last_status) return;
-    if (last_status == viewmodel::Status::Active && status != viewmodel::Status::Active)
-        LogStatus("fast fire: stopped — %s (status=%d stage=%d)",
-                fast_fire_stop_reason(status, stage), (int)status, stage);
-    else
-        LogStatus("fast fire: status=%d stage=%d (1 local,2 FPManager,3 slot,4 type,5 owner,6 mode/wait,7 timing,8 changed,9 restore,10 write,11 burst overlap guard)",
-                (int)status, stage);
-    last_stage = stage; last_status = status;
-}
 // «Без отдачи»: расшифровка стадий из no_recoil_memory.h для лога.
 const char* no_recoil_stop_reason(viewmodel::Status status, int stage) {
     if (status == viewmodel::Status::Off) return "disabled or game unbound";
@@ -363,20 +342,6 @@ const char* no_recoil_stop_reason(viewmodel::Status status, int stage) {
         case 13: case 14: return "write not confirmed by readback";
         default:         return "waiting for bind or player";
     }
-}
-void log_no_recoil_transition() {
-    static int last_stage = -1;
-    static viewmodel::Status last_status = viewmodel::Status::Off;
-    const int stage = no_recoil_ctl.stage();
-    const viewmodel::Status status = no_recoil_ctl.status;
-    if (stage == last_stage && status == last_status) return;
-    if (last_status == viewmodel::Status::Active && status != viewmodel::Status::Active)
-        LogStatus("no recoil: stopped — %s (status=%d stage=%d)",
-                no_recoil_stop_reason(status, stage), (int)status, stage);
-    else
-        LogStatus("no recoil: status=%d stage=%d (1-2 local,3-4 identity,5 FPManager,6 not hitscan,7 owner,8 config,9 recoil asset,10-14 write)",
-                (int)status, stage);
-    last_stage = stage; last_status = status;
 }
 const char* no_ballistics_kind_name(no_ballistics::Kind kind) {
     using no_ballistics::Kind;
@@ -421,89 +386,6 @@ const char* no_ballistics_stop_reason(viewmodel::Status status, int stage) {
         case 18: return "original values could not be restored";
         default: return "waiting for bind or player";
     }
-}
-void log_no_ballistics_transition() {
-    using Clock = std::chrono::steady_clock;
-    static int last_stage = -1, last_error_stage = -1;
-    static viewmodel::Status last_status = viewmodel::Status::Off;
-    static uint64_t last_context = ~uint64_t{0}, last_writes = ~uint64_t{0};
-    static uint64_t last_restores = ~uint64_t{0}, last_error_address = ~uint64_t{0};
-    static Clock::time_point last_emit{};
-
-    const int stage = no_ballistics_ctl.stage();
-    const viewmodel::Status status = no_ballistics_ctl.status;
-    const no_ballistics::DebugInfo d = no_ballistics_ctl.debug_info();
-    const auto now = Clock::now();
-    const bool transition = stage != last_stage || status != last_status ||
-                            d.context_generation != last_context;
-    const bool error_changed = d.error_stage != last_error_stage ||
-        (d.error_stage && d.error_address != last_error_address);
-    const bool restore_changed = d.restore_generation != last_restores;
-    const bool writes_pending = d.write_generation != last_writes;
-    const bool write_due = writes_pending && now - last_emit >= std::chrono::seconds(5);
-    const bool error_due = error_changed &&
-        (transition || now - last_emit >= std::chrono::seconds(1));
-    const bool heartbeat = status == viewmodel::Status::Active &&
-        now - last_emit >= std::chrono::seconds(30);
-    if (!transition && !restore_changed && !write_due && !error_due && !heartbeat) return;
-
-    const char* reason = status == viewmodel::Status::Active
-        ? "ok" : no_ballistics_stop_reason(status, stage);
-    const char* game = go_active::selected_version == go_active::GameVersion::Beta
-        ? "beta" : "release";
-    char weapon_name[72]{}, weapon_ns[96]{};
-    char config_name[72]{}, config_ns[96]{};
-    char profile_name[72]{}, profile_ns[96]{};
-    char projectile_name[72]{}, projectile_ns[96]{};
-    auto describe = [&](uint64_t object, char* name, size_t name_size,
-                        char* namespaze, size_t namespace_size) {
-        if (heap_memory.describe(object, name, name_size, namespaze, namespace_size)) return;
-        std::snprintf(name, name_size, "%s", object ? "unreadable" : "-");
-        std::snprintf(namespaze, namespace_size, "%s", object ? "unreadable" : "-");
-    };
-    describe(d.probe_weapon, weapon_name, sizeof(weapon_name), weapon_ns, sizeof(weapon_ns));
-    describe(d.probe_config, config_name, sizeof(config_name), config_ns, sizeof(config_ns));
-    describe(d.probe_profile, profile_name, sizeof(profile_name), profile_ns, sizeof(profile_ns));
-    describe(d.probe_projectile, projectile_name, sizeof(projectile_name), projectile_ns, sizeof(projectile_ns));
-    LogStatus("no ballistics: game=%s status=%s(%d) stage=%d reason=%s kind=%s probe_kind=%s "
-            "weapon=0x%llx config=0x%llx profile=0x%llx prefab=0x%llx "
-            "types[weapon=%s.%s config=%s.%s profile=%s.%s prefab=%s.%s] "
-            "probe[player=0x%llx fp=0x%llx weapon=0x%llx config=0x%llx profile=0x%llx prefab=0x%llx]",
-            game, no_ballistics_status_name(status), (int)status, stage, reason,
-            no_ballistics_kind_name(d.kind), no_ballistics_kind_name(d.probe_kind),
-            (unsigned long long)d.weapon, (unsigned long long)d.config,
-            (unsigned long long)d.profile, (unsigned long long)d.projectile,
-            weapon_name, weapon_ns, config_name, config_ns,
-            profile_name, profile_ns, projectile_name, projectile_ns,
-            (unsigned long long)d.probe_player, (unsigned long long)d.probe_fp,
-            (unsigned long long)d.probe_weapon, (unsigned long long)d.probe_config,
-            (unsigned long long)d.probe_profile, (unsigned long long)d.probe_projectile);
-    LogStatus("no ballistics: fields target=%02x read=%02x zero=%02x wrote=%02x saved=%02x "
-            "restore_try=%02x restored=%02x skipped=%02x saved_values=[%.5g,%.5g,%.5g;%.5g,%.5g,%.5g] "
-            "last=0x%llx %.5g->%.5g generations=context:%llu write:%llu restore:%llu "
-            "(bits0-2=profile gravity/air/underwater, bits3-5=prefab gravity/air/underwater)",
-            (unsigned)d.target_mask, (unsigned)d.read_mask, (unsigned)d.zero_mask,
-            (unsigned)d.patched_mask, (unsigned)d.saved_mask,
-            (unsigned)d.restore_attempted_mask, (unsigned)d.restored_mask,
-            (unsigned)d.restore_skipped_mask,
-            (double)d.original_values[0], (double)d.original_values[1], (double)d.original_values[2],
-            (double)d.original_values[3], (double)d.original_values[4], (double)d.original_values[5],
-            (unsigned long long)d.last_address, (double)d.last_before, (double)d.last_after,
-            (unsigned long long)d.context_generation, (unsigned long long)d.write_generation,
-            (unsigned long long)d.restore_generation);
-    if (d.error_stage) {
-        LogStatus("no ballistics: error stage=%d reason=%s address=0x%llx value=%.7g",
-                d.error_stage, no_ballistics_stop_reason(viewmodel::Status::Failed, d.error_stage),
-                (unsigned long long)d.error_address, (double)d.error_value);
-    }
-    last_stage = stage;
-    last_status = status;
-    last_context = d.context_generation;
-    last_writes = d.write_generation;
-    last_restores = d.restore_generation;
-    last_error_stage = d.error_stage;
-    last_error_address = d.error_address;
-    last_emit = now;
 }
 uint64_t unity_base = 0;
 using Clock = std::chrono::steady_clock;
@@ -556,10 +438,9 @@ uint64_t find_unity() {
             last_logged_build = id;
             last_logged_maps = count;
             if (id_read)
-                LogStatus("fps: libunity не опознан, build id %016llx, mapped=%d (игра обновилась?)",
-                        (unsigned long long)id, count);
+                ;
             else
-                LogLine("fps: libunity не опознан, build id не прочитан (+0x318), mapped=%d", count);
+                ;
         }
     }
     return found;
@@ -591,8 +472,6 @@ void tick_fps(uint64_t session, int requested_limit) {
     }
     if (changed || fps_last_log != fps_controller.status) {
         fps_last_log = fps_controller.status;
-        LogStatus("fps: requested=%d target limit status=%d (0 off,1 waiting,2 set,4 memory error); actual FPS is device/pacing dependent",
-                limit, (int)fps_last_log);
     }
 }
 uint64_t epoch = 1;
@@ -609,16 +488,13 @@ void esp_viewmodel_reset(bool restore) {
     controller.reset(restore && g_mem.bound());
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
-        LogStatus("weapon data: originals could not all be restored before disconnect; restart game");
+        ;
     if (!rapid_fire.reset(restore && g_mem.bound()))
-        LogStatus("fast fire: originals could not all be restored before disconnect; restart game");
-    log_fast_fire_transition();
+        ;
     if (!no_recoil_ctl.reset(restore && g_mem.bound()))
-        LogStatus("no recoil: originals could not all be restored before disconnect; restart game");
-    log_no_recoil_transition();
+        ;
     if (!no_ballistics_ctl.reset(restore && g_mem.bound()))
-        LogStatus("no ballistics: originals could not all be restored before disconnect; restart game");
-    log_no_ballistics_transition();
+        ;
     loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
@@ -634,13 +510,10 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
         rapid_fire.reset(false);
         rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        log_fast_fire_transition();
         no_recoil_ctl.reset(false);
         no_recoil_ctl.status = settings.no_recoil_button ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        log_no_recoil_transition();
         no_ballistics_ctl.reset(false);
         no_ballistics_ctl.status = settings.no_ballistics ? viewmodel::Status::Waiting : viewmodel::Status::Off;
-        log_no_ballistics_transition();
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
@@ -657,12 +530,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         const int loot_zeroed = loot_speed.tick(g_il2cpp_base, settings.fast_loot);
         if (loot_speed.state() != loot_last_state) {
             loot_last_state = loot_speed.state();
-            LogStatus("fast loot: state=%d stage=%d (0 off,1 waiting,2 active,3 failed; stage: 1 helper slot,2 statics,3 promise classes)",
-                    (int)loot_last_state, loot_speed.stage());
         }
         if (loot_zeroed > 0 && !loot_announced) {
             loot_announced = true;
-            LogStatus("fast loot: first zeroing — %d delay(s) of 0.35f completed early", loot_zeroed);
         }
         if (!settings.fast_loot) loot_announced = false;
     }
@@ -699,10 +569,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         if (!player) {
             if (!local_source_failed) {
                 local_source_failed=true;
-                LogStatus("viewmodel: local PlayerManager unavailable; cached=0x%llx class=0x%llx rva=0x%llx",
-                        (unsigned long long)g_local_player,
-                        (unsigned long long)g_game_controller_class,
-                        (unsigned long long)GAME_CONTROLLER_TYPEINFO_RVA);
             }
             // A failed read is NOT a confirmed scene change. Keep pending
             // originals so a later successful frame can still restore them.
@@ -710,11 +576,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             controller.status={wait,wait};
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire);
-            log_fast_fire_transition();
             no_recoil_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_recoil_button);
-            log_no_recoil_transition();
             no_ballistics_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_ballistics);
-            log_no_ballistics_transition();
             return;
         }
         local_source_failed=false;
@@ -736,11 +599,8 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_last_flags = weapon_flags;
         weapons.tick(epoch, g_il2cpp_base, player, want_no_spread);
         rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire);
-        log_fast_fire_transition();
         no_recoil_ctl.tick(epoch, g_il2cpp_base, player, settings.no_recoil_button);
-        log_no_recoil_transition();
         no_ballistics_ctl.tick(epoch, g_il2cpp_base, player, settings.no_ballistics);
-        log_no_ballistics_transition();
     }
     {
         // Log no-spread resolution changes only.
@@ -749,9 +609,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         if (stage != last_stage) {
             last_stage = stage;
             if (stage)
-                LogStatus("weapon no-spread chain failed at stage %d (1-13 resolve, 14-18 validate/write)", stage);
+                ;
             else
-                LogLine("weapon no-spread chain resolved");
+                ;
         }
     }
     // Magic-Farm keeps the verified normal hit path (and therefore server-side
@@ -771,8 +631,6 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
         st.no_spread != last_log.no_spread) {
-        LogStatus("viewmodel: fov=%d hands=%d; spread=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
-                (int)st.fov, (int)st.hands, (int)st.no_spread);
         last_log = st;
     }
 }

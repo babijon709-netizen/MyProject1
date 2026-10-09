@@ -12,7 +12,6 @@
 #include "widgets.h"
 #include "menu.h"
 #include "config.h"
-#include "logfile.h"
 #include "theme.h"
 #include "app_state.h"
 #include "overlay_geometry.h"
@@ -385,13 +384,10 @@ int main(int argc, char* argv[]) {
     CenterMenuOnDisplay();
     g_menuFadeIn = 0.f;
 
-    LogOpen();
-    LogWatchdogStart();
     unsigned long frame = 0;
     while (main_thread_flag) {
         ++frame;
         g_frame_done.store(false);
-        LogStage(kStageFrameBegin);
         // Вскрытие тормозов оверлея (лог 07:37: кадр встаёт на 200–400 мс
         // пачками, писатель при этом ровный — стоит именно main). Если кадр
         // дольше 100 мс — пишем, в какой стадии он стоял и сколько из этого
@@ -421,10 +417,8 @@ int main(int argc, char* argv[]) {
                 if (g_state.fake_lag) {
                     g_fakeLag.setPercent((int)g_state.fake_lag_percent);
                     g_fakeLag.apply(true);
-                    LogLine("fakelag: включён %d%%", (int)g_state.fake_lag_percent);
                 } else {
                     g_fakeLag.apply(false);
-                    LogLine("fakelag: выключен — правила iptables сняты");
                 }
                 lastOn = g_state.fake_lag;
                 lastPct = (int)g_state.fake_lag_percent;
@@ -436,15 +430,12 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-        LogStage(kStageEsp);
         DrawEspOverlay();
         slowMark();   // 1: после ESP
         UpdateAim(ImGui::GetIO().DeltaTime);
         slowMark();   // 2: после аима
-        LogStage(kStageFarm);
         UpdateFarm(ImGui::GetIO().DeltaTime);
         slowMark();   // 3: после фарма
-        LogStage(kStageMenu);
         // Индикация привязки (тосты «игра найдена / не найдена») убрана:
         // состояние видно по счётчику игроков в пилюле.
         RenderMenu();
@@ -456,7 +447,6 @@ int main(int argc, char* argv[]) {
             break;
         }
         slowMark();   // 4: после меню
-        LogStage(kStageFreecam);
         UpdateFreecam(ImGui::GetIO().DeltaTime);   // фрикам: полёт камеры
         AimEndFrame(); // закрыть lease, если меню/фрикам выключили сайлент позднее
         slowMark();   // 5: после фрикама
@@ -464,19 +454,13 @@ int main(int argc, char* argv[]) {
             g_frame_done.store(true, std::memory_order_release);
             break;
         }
-        LogStage(kStageFrameEnd);
         drawEnd();
         slowMark();   // 6: после свопа
-        LogFrameBeat(frame);
         if (slowT[6] - slowT[0] > 100.0) {
             struct timespec slowCpu1{};
             clock_gettime(CLOCK_THREAD_CPUTIME_ID, &slowCpu1);
             const double slowCpu = (slowCpu1.tv_sec - slowCpu0.tv_sec) * 1000.0 +
                                    (slowCpu1.tv_nsec - slowCpu0.tv_nsec) * 1e-6;
-            LogLine("тормоз: кадр %lu %.0fмс (cpu %.0f, фрикам %d): esp %.0f аим %.0f фарм %.0f меню %.0f фри %.0f своп %.0f",
-                    frame, slowT[6] - slowT[0], slowCpu, (int)g_state.freecam_on,
-                    slowT[1] - slowT[0], slowT[2] - slowT[1], slowT[3] - slowT[2],
-                    slowT[4] - slowT[3], slowT[5] - slowT[4], slowT[6] - slowT[5]);
         }
         // Гистограмма кадров раз в секунду: ловит МИКРОтормоза (<100мс), ниже
         // порога «тормоза». Чистое наблюдение: на кадр не влияет.
@@ -505,12 +489,6 @@ int main(int argc, char* argv[]) {
                 const double readsPerFrame = frames ? (double)(readsNow - lastReads) / (double)frames : 0.0;
                 const unsigned long long failsDelta = failsNow - lastFails;
                 lastReads = readsNow; lastFails = failsNow;
-                LogLine("кадргист: %u/%u/%u/%u/%u (<20/<34/<50/<100/>=100мс), худший %lu %.0fмс (esp %.0f аим %.0f фарм %.0f меню %.0f фри %.0f своп %.0f) чтений/кадр %.0f отказов %llu",
-                        hist[0], hist[1], hist[2], hist[3], hist[4], worstFrame, worst,
-                        worstSplit[1] - worstSplit[0], worstSplit[2] - worstSplit[1],
-                        worstSplit[3] - worstSplit[2], worstSplit[4] - worstSplit[3],
-                        worstSplit[5] - worstSplit[4], worstSplit[6] - worstSplit[5],
-                        readsPerFrame, failsDelta);
                 hist[0] = hist[1] = hist[2] = hist[3] = hist[4] = 0;
                 worst = 0.0; worstFrame = 0;
             }
@@ -536,6 +514,5 @@ int main(int argc, char* argv[]) {
     process_detach();
     CfgWatchFree();
     AudioFree();
-    LogClose();
     _exit(0);
 }

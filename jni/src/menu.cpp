@@ -14,7 +14,6 @@
 #include "str.h"
 #include "esp_draw.h"
 #include "aim.h"
-#include "logfile.h"                 // AimTouchFracX/Y (строки калибровки)
 #include "media/tab_icons.h"
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -95,7 +94,7 @@ float TabContent(int tab, float dt, float cW) {
         const bool aimWasOn = g_state.aim_touch;
         ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
         if (aimWasOn != g_state.aim_touch)
-            LogLine("аим: %s (режим %d)", g_state.aim_touch ? "включён" : "выключен", g_state.aim_mode);
+            ;
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
         ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true, false, &cfg::aim::fov_col);
 
@@ -124,8 +123,6 @@ float TabContent(int tab, float dt, float cW) {
                 const bool tapped = WasTappedHere() && !popBlk && !IsScrollDragging() && !g_input.touchConsumed;
                 if (tapped && g_state.aim_mode != mode) {
                     g_state.aim_mode = mode;
-                    LogLine("аим: выбран режим %d (%s), аим %s", mode, lbl,
-                            g_state.aim_touch ? "включён" : "выключен");
                     PlaySound(SND_CLICK);
                     g_input.touchConsumed = true;
                 }
@@ -214,7 +211,6 @@ float TabContent(int tab, float dt, float cW) {
                     char b[160];
                     snprintf(b, sizeof(b), XS("%s|%s"), XS("Выбор цели"), lbl);
                     ShowToast(b);
-                    LogLine("аим: выбор цели — %s (приоритет %d)", lbl, slot);
                     PlaySound(SND_CLICK);
                     g_input.touchConsumed = true;
                 }
@@ -1426,9 +1422,6 @@ void UpdateFreecam(float dt) {
         double now = ImGui::GetTime();
         if (now - s_last >= 5.0) {
             s_last = now;
-            LogLine("фрикам: UI — активен=%d вкл=%d экран=%.0fx%.0f joy=%d look=%d up=%d down=%d",
-                    (int)esp_freecam_active(), (int)g_state.freecam_on,
-                    (double)vw, (double)vh, s_fc_joy_id, s_fc_look_id, s_fc_up_id, s_fc_down_id);
         }
     }
     // Здоровье ввода за секунду полёта: видно просадки кадров (макс dt),
@@ -1439,9 +1432,6 @@ void UpdateFreecam(float dt) {
         const double nowIn = ImGui::GetTime();
         if (nowIn - s_fc_in_last >= 1.0) {
             s_fc_in_last = nowIn;
-            LogLine("фрикам: ввод — кадров %d, макс dt %.0f мс, сброс джоя/обзора %d/%d, грейс %d, отброс обзора %d",
-                    s_fc_in_frames, (double)(s_fc_in_maxdt * 1000.f),
-                    s_fc_in_joyfree, s_fc_in_lookfree, s_fc_in_grace, s_fc_in_lookdrop);
             s_fc_in_frames = 0; s_fc_in_maxdt = 0.f;
             s_fc_in_joyfree = s_fc_in_lookfree = s_fc_in_grace = s_fc_in_lookdrop = 0;
         }
@@ -1767,7 +1757,6 @@ void RenderMenu() {
     // Метка до всего остального: пока в CRASH висит «menu: popover» (последняя
     // метка прошлого кадра), падение в голове функции — SyncAccentToTheme,
     // CfgWatchTick (inotify + опендир конфигов) или блок Tick.
-    crash_note("menu: head");
     auto& io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt > 0.1f) dt = 0.1f;
@@ -1857,24 +1846,18 @@ void RenderMenu() {
 
     // Худ отдельной стадией: пилюля счётчика зовёт FrameBoxes и скан ботов
     // (esp_nearby_bot_count), и падение в них в логе выглядело как stage=menu.
-    LogStage(kStageHud);
     // Лог 15:35:17: SIGABRT на render-потоке, stage=menu, note=- — игра была
     // не привязана, поэтому ни одной заметки не возникло, и внутри меню
     // локализовать негде. Метки идут каждый кадр и перекрывают друг друга:
     // в CRASH видна последняя, т.е. секция, в которой мы упали.
-    crash_note("menu: hud pill");
     DrawWatermark(dt);
-    crash_note("menu: toast");
     DrawToast(dt);
-    LogStage(kStageMenu);
-    crash_note("menu: body");
 
     // ---- Режим калибровки зон вводом с экрана ------------------------------
     // Меню спрятано; первый тап по экрану записывает позицию (в долях экрана):
     // зону джойстика/огня автофарма, точку, из которой аимбот водит палец,
     // центр джойстика фрикама (4) или счётчика игроков (5).
     if (g_calibMode != 0) {
-        crash_note("menu: calib mode %d", (int)g_calibMode);
         float dw = 0.f, dh = 0.f;
         VisibleScreen(dw, dh);
         if (dw < 100.f || dh < 100.f) { g_calibMode = 0; return; }
@@ -2267,7 +2250,6 @@ void RenderMenu() {
                         | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground
                         | ImGuiWindowFlags_NoMove      | ImGuiWindowFlags_NoNav;
 
-    crash_note("menu: window");
     ImGui::Begin("##menu", nullptr, wf);
     {
         auto  bgP  = g_win.pos;
@@ -2688,13 +2670,10 @@ void RenderMenu() {
         rdl->AddCircleFilled({cx + r * cosf(a1), cy + r * sinf(a1)}, capR, col, 24);
     }
 
-    crash_note("menu: sheet");
     DrawSheet(dt, wp, WW, WH);
     // vis= важен: DrawPopover при закрытом популяре выходит сразу, и падение
     // после него — это уже ImGui::End() или затемнение, а не сам популяр.
-    crash_note("menu: popover vis=%d", (int)g_pop.visible);
     DrawPopover(dt, wp, WW, WH);
-    crash_note("menu: end");
     ImGui::End();
     if (g_menuFadeIn < 1.f) {
         float mA = 1.f - EaseInOut(g_menuFadeIn);
@@ -2703,7 +2682,6 @@ void RenderMenu() {
         ofg->AddRectFilled(g_win.pos, {g_win.pos.x + WW, g_win.pos.y + WH},
             IM_COL32(int(bgC.x*255), int(bgC.y*255), int(bgC.z*255), int(mA * 255)), R::Card);
     }
-    crash_note("menu: fade done");
 }
 
 

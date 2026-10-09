@@ -7,7 +7,6 @@
 #include "ui_util.h"           // ColU32
 #include "game_offsets_active.h" // go_active::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
-#include "logfile.h"
 #include "esp_box_hold.h"        // состав боксов/маркеров на кадр
 #include "overlay_geometry.h"
 #include <algorithm>
@@ -95,12 +94,6 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         if (s_out.size() > raw_count)
             diag_hold_max = std::max(diag_hold_max, (int)(s_out.size() - raw_count));
         if (now - diag_at >= 1.0) {
-            LogLine("ESP-ДИАГ-РЕНДЕР: кадры=%d raw=%u..%u draw=%u..%u transient=%d удержано<=%d",
-                    diag_frames,
-                    (unsigned)(diag_raw_min == (size_t)-1 ? 0 : diag_raw_min),
-                    (unsigned)diag_raw_max,
-                    (unsigned)(diag_draw_min == (size_t)-1 ? 0 : diag_draw_min),
-                    (unsigned)diag_draw_max, diag_transient, diag_hold_max);
             diag_at = now; diag_frames = diag_transient = 0;
             diag_raw_min = diag_draw_min = (size_t)-1;
             diag_raw_max = diag_draw_max = 0;
@@ -441,9 +434,7 @@ void DrawEspOverlay() {
         // Маркеры — отдельная стадия: сканирование реестра и позиции сущностей
         // живут в FrameMarkers, и падение в них при stage=esp неотличимо от
         // падения в конвейере игроков.
-        LogStage(kStageMarkers);
         const std::vector<EspMarker>& frame_markers = FrameMarkers();
-        LogStage(kStageEsp);
         for (const EspMarker& marker : frame_markers) {
             if (!marker.name[0]) continue;
             if (!std::isfinite(marker.x) || !std::isfinite(marker.y)) continue;

@@ -14,7 +14,6 @@
 #include "mount_latch.h"           // удержание бокса на транспорте (хост-проверяемый)
 #include "body_clip.h"             // отсечение тела по ближней плоскости (хост-проверяемый)
 #include "Vector.h"
-#include "logfile.h"     // диагностический лог (Загрузки)
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
 
@@ -1011,8 +1010,6 @@ static uint64_t resolve_local_player() {
                 s_checked_at = now;
                 const uint64_t fresh = read_local_player_from_static();
                 if (fresh && fresh != cached) {
-                    LogStatus("память: локальный игрок сменился 0x%llx -> 0x%llx (кеш был чужим)",
-                            (unsigned long long)cached, (unsigned long long)fresh);
                     g_local_player = fresh;
                     return fresh;
                 }
@@ -1376,15 +1373,8 @@ static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matric
         const double now = memio::now_seconds();
         if (now - s_last >= 2.0) {
             s_last = now;
-            LogLine("фрикам: перебор — трансформ 0x%llx, из компонента 0x%llx, кандидатов %d, позиций %d, ближайшее %.1f м",
-                    (unsigned long long)tf[0], (unsigned long long)tf[1], count, positions,
-                    (double)(best_d >= 0.f ? best_d : -1.f));
             // Которое из трёх толкований дало позицию и что вообще нашлось.
             // Без этого не видно, сломался путь GameObject или сама иерархия.
-            LogLine("фрикам: источники — кандидат %d из толкования %d, трансформы 0x%llx/0x%llx/0x%llx, камера %d",
-                    best_k, (best_k >= 0 ? cand_src[best_k] : -1),
-                    (unsigned long long)tf[0], (unsigned long long)tf[1],
-                    (unsigned long long)tf[2], (int)know_cam);
         }
         if (best_dist) *best_dist = (best_k >= 0 ? best_d : -1.f);
         return false;
@@ -1467,27 +1457,6 @@ static bool transform_world_to_local(uint64_t matrices, uint64_t indices, int32_
     return vec3_is_finite(local);
 }
 
-// Отказ включения — в лог, но не чаще раза в 2 с: меню пробует включить
-// фрикам каждые полсекунды, и без этого лог забивался бы однотипными строками.
-// Причина — номером, а не строкой (русские литералы вне вызова LogLine
-// проверка переводов считает подписями визуалов).
-static void log_freecam_fail(int reason, uint64_t transform, float dist) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    if (dist >= 0.f) {
-        LogStatus("фрикам: не включён — мировая позиция не совпала с камерой (трансформ 0x%llx, ближайшее расхождение %.1f м)",
-                (unsigned long long)transform, (double)dist);
-        return;
-    }
-    switch (reason) {
-        case 0: LogStatus("фрикам: не включён — камера ещё не найдена"); break;
-        case 1: LogStatus("фрикам: не включён — нет трансформа камеры (0x%llx)", (unsigned long long)transform); break;
-        case 2: LogStatus("фрикам: не включён — массивы Transform не читаются (0x%llx)", (unsigned long long)transform); break;
-        default: LogStatus("фрикам: не включён — локальная матрица камеры не читается (0x%llx)", (unsigned long long)transform); break;
-    }
-}
 
 bool esp_freecam_active() { return g_freecam_on; }
 
@@ -1939,7 +1908,6 @@ static bool freecam_local_for_target(uint64_t matrices, uint64_t indices, int32_
     // (лог 02:25 — 2214 отброшенная поправка подряд, трансформ вечно в нуле).
     const float sl = sqrtf(step.x * step.x + step.y * step.y + step.z * step.z);
     if (sl > 200.f && !absolute) {
-        LogLine("фрикам: поправка отброшена — шаг %.1f м длиннее 200 м", (double)sl);
         return false;
     }
     local_out = local;
@@ -2116,14 +2084,12 @@ bool esp_freecam_set(bool on) {
         g_freecam_on = false;
         g_freecam_saved_ok = false;
         g_freecam_has_yawpitch = false;
-        LogStatus("фрикам: выключен, камера вернулась к телу");
         return false;
     }
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
     uint64_t transform = camera_transform();
     if (!transform) {
         g_freecam_fail = g_native_camera ? 2 : 1; g_freecam_fail_dist = -1.f;
-        log_freecam_fail(g_native_camera ? 1 : 0, 0, -1.f);
         return false;
     }
     uint64_t matrices = 0, indices = 0;
@@ -2137,14 +2103,12 @@ bool esp_freecam_set(bool on) {
         if (!resolve_transform_arrays(transform, matrices, indices, index, &dist)) {
             g_freecam_fail = dist >= 0.f ? 4 : 3;
             g_freecam_fail_dist = dist;
-            log_freecam_fail(2, transform, dist);
             return false;
         }
     }
     Matrix34 m{};
     if (!rd_exact(matrices + (uint64_t)index * sizeof(Matrix34), m)) {
         g_freecam_fail = 3; g_freecam_fail_dist = -1.f;
-        log_freecam_fail(3, transform, -1.f);
         return false;
     }
     Vec3 pos{}, scale{};
@@ -2177,9 +2141,6 @@ bool esp_freecam_set(bool on) {
     g_freecam_fail = 0; g_freecam_fail_dist = dist;   // 0 = порядок
     // Сколько слотов ведём — по логу видно, один набор массивов у камеры или
     // два чередующихся (жалоба «мерицает»): при одном слоте второй записи нет.
-    LogStatus("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx, слотов %d",
-            (double)pos.x, (double)pos.y, (double)pos.z,
-            (unsigned long long)transform, (int)g_fc_own_n);
     return true;
 }
 
@@ -2228,9 +2189,6 @@ static bool freecam_write() {
                 if (nm != g_fc_last_m || nn != g_fc_last_n || nidx != g_fc_last_i) {
                     g_fc_array_changes.fetch_add(1);
                     g_fc_last_m = nm; g_fc_last_n = nn; g_fc_last_i = nidx;
-                    LogLine("фрикам: массивы перерешены — была позиция (%.1f, %.1f, %.1f), в матрице вида (%.1f, %.1f, %.1f), расхождение %.1f м",
-                            (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
-                            (double)view_pos.x, (double)view_pos.y, (double)view_pos.z, (double)err);
                 }
                 g_freecam_matrices = nm; g_freecam_indices = nn; g_freecam_index = nidx;
                 m = nm; n = nn; idx = nidx;
@@ -2480,12 +2438,6 @@ static void freecam_tick() {
                 s_ow_prev = ow_t; s_owm_prev = owm_t; s_ev_prev = ev_t;
             }
             const unsigned sk = g_fc_skew.exchange(0);
-            LogLine("фрикам: цель (%.1f, %.1f, %.1f), в памяти (%.1f, %.1f, %.1f), игра видит (%.1f, %.1f, %.1f), писатель %u/с, затёрто игрой %u/с (в среднем %.1f м), недолёт %.2f м, подмен массивов %u, кривых базисов %u%s",
-                    (double)g_freecam_pos.x, (double)g_freecam_pos.y, (double)g_freecam_pos.z,
-                    (double)in_mem.x, (double)in_mem.y, (double)in_mem.z,
-                    (double)g_cam_pos.x, (double)g_cam_pos.y, (double)g_cam_pos.z,
-                    wc, ow, (double)(ow ? owm / (float)ow : 0.f), (double)gap, ac, sk,
-                    wf ? " (отказы записи)" : "");
             // Сколько наборов массивов ведём и что лежит в_parent_ у каждого.
             // Мерцание камеры (жалоба 19.09) живёт ровно здесь: в логе 19:53
             // «игра видит» через строку меняется с цели на (-0.0, -0.0, -0.0),
@@ -2511,21 +2463,15 @@ static void freecam_tick() {
                                     (int)S.i, (int)parent,
                                     parent < 0 ? " (корень)" : (zero_p ? " НУЛЕВОЙ" : ""));
                 }
-                LogLine("фрикам: наборы — всего %d%s", (int)g_fc_own_n, buf);
                 const unsigned sf = g_fc_samp.exchange(0), hf = g_fc_hit.exchange(0),
                                zf = g_fc_zero.exchange(0), of = g_fc_other.exchange(0);
-                LogLine("фрикам: за период отсчётов %u — у цели %u, в нуле %u, другое %u",
-                        sf, hf, zf, of);
             }
             // Чем именно оказалась затёрта наша запись. По этому значению
             // видно, кто второй пишет в ту же ячейку: если это текущая позиция
             // головы — запись перебивает игра, и бороться надо её кадром, а не
             // частотой нашего писателя.
             if (ow)
-                LogLine("фрикам: затёрто игрой %u раз за период, расхождение до %.1f м, в памяти оказалось (%.1f, %.1f, %.1f), снимок был (%.1f, %.1f, %.1f)",
-                        ow, (double)(owm / (float)ow),
-                        (double)owx, (double)owy, (double)owz,
-                        (double)osx, (double)osy, (double)osz);
+                ;
             // Чем контур посчитал поправку. По этой строке проверяется вся
             // арифметика: мировая позиция камеры обязана быть равна
             // «позиция родителя + поворот родителя × (масштаб × локальную)»,
@@ -2541,19 +2487,6 @@ static void freecam_tick() {
                 // Литерал с ведущим пробелом: генератор таблиц перевода
                 // считает подписью визуала любой русский литерал без пробела
                 // в начале, а эта строка уходит только в лог.
-                LogLine("фрикам: разбор — индекс %d, родитель %d,%s, лок (%.2f, %.2f, %.2f), посчитано (%.1f, %.1f, %.1f), шаг (%.2f, %.2f, %.2f)",
-                        (int)g_freecam_index, (int)g_fc_diag_parent,
-                        g_fc_diag_absolute ? " запись целиком" : " шаг",
-                        (double)L.x, (double)L.y, (double)L.z,
-                        (double)C.x, (double)C.y, (double)C.z,
-                        (double)S.x, (double)S.y, (double)S.z);
-                LogLine("фрикам: родитель — поза (%.1f, %.1f, %.1f), поворот (%.3f, %.3f, %.3f, %.3f), масштаб (%.3f, %.3f, %.3f), разница с камерой %.2f м",
-                        (double)P.x, (double)P.y, (double)P.z,
-                        (double)Q.x, (double)Q.y, (double)Q.z, (double)Q.w,
-                        (double)Z.x, (double)Z.y, (double)Z.z,
-                        (double)sqrtf((C.x - g_cam_pos.x) * (C.x - g_cam_pos.x) +
-                                      (C.y - g_cam_pos.y) * (C.y - g_cam_pos.y) +
-                                      (C.z - g_cam_pos.z) * (C.z - g_cam_pos.z)));
             }
         }
     }
@@ -3022,69 +2955,9 @@ static std::atomic<uint64_t> g_mouse_look_klass{0};
 // настоящей поломке это событие идёт каждый кадр.
 enum class LookFail { none, noPlayer, wrongPlayer, noObject, badSens, wrongOwner };
 
-// Сообщение — прямо в вызове лога: отдельные русские литералы в game.cpp
-// проверка переводов считает подписями визуалов (строки лога она уже
-// пропускает, см. tools/lang/gen_tables.py). Пишем не чаще раза в 2 с: при
-// настоящей поломке событие идёт каждый кадр.
-static void log_look_fail(LookFail f, uint64_t mouse_look, float sens) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    switch (f) {
-        case LookFail::noPlayer:
-            LogStatus("память: MouseLook не найден — нет игрока");
-            break;
-        case LookFail::wrongPlayer:
-            LogStatus("память: MouseLook не найден — адрес игрока не той структуры");
-            break;
-        case LookFail::noObject:
-            LogStatus("память: MouseLook не найден — объекта нет (0x%llx)",
-                    (unsigned long long)mouse_look);
-            break;
-        case LookFail::badSens:
-            LogStatus("память: MouseLook=0x%llx — чувствительность вне диапазона (%.3f)",
-                    (unsigned long long)mouse_look, (double)sens);
-            break;
-        default: break;
-    }
-}
 
-// Чужой MouseLook: адрес нашёлся и класс подошёл, но владелец (m_EventHandler
-// -> manager) — не тот игрок. В лог не чаще раза в 2 с: при подмене объекта
-// событие идёт каждый кадр.
-static void log_look_wrong_owner(uint64_t mouse_look, uint64_t owner, uint64_t player) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    LogStatus("память: MouseLook=0x%llx чужой — владелец 0x%llx, а не игрок 0x%llx",
-            (unsigned long long)mouse_look, (unsigned long long)owner, (unsigned long long)player);
-}
 
-// Игрок найден, но помечен как НЕ локальный (Mirror.isLocalPlayer = false).
-// Это ровно тот случай, который раньше проходил все проверки: MouseLook у
-// чужого игрока той же структуры, с той же чувствительностью, — и углы мы
-// писали ему, а своя камера не двигалась.
-static void log_look_not_local(uint64_t player, uint64_t mouse_look) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    LogStatus("память: игрок 0x%llx не локальный (isLocalPlayer=0) — MouseLook 0x%llx чужой",
-            (unsigned long long)player, (unsigned long long)mouse_look);
-}
 
-// MouseLook той же структуры, но его m_LookRoot стоит не у камеры: объект
-// чужого игрока или умершего. Проверка по геометрии, не по адресу.
-static void log_look_wrong_camera(uint64_t mouse_look, float dist) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    LogStatus("память: MouseLook=0x%llx не у камеры — m_LookRoot в %.1f м от неё",
-            (unsigned long long)mouse_look, (double)dist);
-}
 
 // Кому принадлежит этот MouseLook. Почему нельзя верить одному адресу: объект
 // лежит по указателю из игрока, но игрок мог уже умереть, а память — уехать
@@ -3256,7 +3129,6 @@ static void look_mismatch(bool mismatch) {
     if (now - s_look_mismatch_since > 2.0 && g_mouse_look_klass.load()) {
         g_mouse_look_klass.store(0);
         s_look_mismatch_since = 0.0;
-        LogLine("память: класс MouseLook забыт — учу заново");
     }
 }
 
@@ -3303,27 +3175,6 @@ static bool mouse_look_from_cache(uint64_t player, uint64_t& out) {
     return true;
 }
 
-// Объект взят из кеша, а не найден заново: в лог пишем не чаще раза в 5 с,
-// потому что при долгой паузе это событие идёт каждый кадр.
-// Причина передаётся номером, а не строкой: русские литералы, висящие не
-// в самом вызове LogLine, проверка переводов считает подписями визуалов и
-// требует для них перевод (см. tools/lang/gen_tables.py).
-static void log_look_cached(int reason, uint64_t mouse_look) {
-    static double s_last = -1e9;
-    static int s_last_reason = -1;
-    const double now = memio::now_seconds();
-    if (now - s_last < 5.0 && reason == s_last_reason) return;
-    s_last = now; s_last_reason = reason;
-    switch (reason) {
-        case 0: LogStatus("память: MouseLook=0x%llx взят из кеша — игрок не подтверждён", (unsigned long long)mouse_look); break;
-        case 1: LogStatus("память: MouseLook=0x%llx взят из кеша — адрес игрока не той структуры", (unsigned long long)mouse_look); break;
-        case 2: LogStatus("память: MouseLook=0x%llx взят из кеша — объект не читается", (unsigned long long)mouse_look); break;
-        case 4: LogStatus("память: MouseLook=0x%llx взят из кеша — найденный объект чужой", (unsigned long long)mouse_look); break;
-        case 5: LogStatus("память: MouseLook=0x%llx взят из кеша — игрок не локальный", (unsigned long long)mouse_look); break;
-        case 6: LogStatus("память: MouseLook=0x%llx взят из кеша — объект не у камеры", (unsigned long long)mouse_look); break;
-        default: LogStatus("память: MouseLook=0x%llx взят из кеша — объект чужого класса", (unsigned long long)mouse_look); break;
-    }
-}
 
 static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
@@ -3350,7 +3201,6 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
             return true;
         }
         if (drives == 0) {                // найден, но его m_LookRoot не у камеры
-            log_look_wrong_camera(from_camera, cam_dist);
             from_camera = 0;
         } else {
             g_look_source = 1;
@@ -3376,27 +3226,26 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
         // он был нужен только чтобы этот MouseLook найти.
         if (why) *why = LookFail::noPlayer;
         if (mouse_look_from_cache(s_ml_cached_player, out)) {
-            log_look_cached(0, out);
             return true;
         }
         return false;
     }
     if (g_player_manager_class && rd_ptr(player) != g_player_manager_class) {
         if (why) *why = LookFail::wrongPlayer;
-        if (mouse_look_from_cache(player, out)) { log_look_cached(1, out); return true; }
+        if (mouse_look_from_cache(player, out)) { return true; }
         return false;
     }
     uint64_t mouse_look = rd_ptr(player + PLAYER_MOUSE_LOOK_OFFSET);
     if (mouse_look < 0x10000) {  // ноль или мусор вместо указателя
         if (why) *why = LookFail::noObject;
-        if (mouse_look_from_cache(player, out)) { log_look_cached(2, out); return true; }
+        if (mouse_look_from_cache(player, out)) { return true; }
         return false;
     }
     const uint64_t klass = rd_ptr(mouse_look);
     const uint64_t known = g_mouse_look_klass.load();
     if (known ? (klass != known) : (klass < 0x10000)) {
         if (why) *why = LookFail::noObject;
-        if (mouse_look_from_cache(player, out)) { log_look_cached(3, out); return true; }
+        if (mouse_look_from_cache(player, out)) { return true; }
         return false;
     }
     // Свежий объект проверяем строже кеша: он только что найден по указателю,
@@ -3406,8 +3255,7 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (owner && player && owner != player) {
         if (why) *why = LookFail::wrongOwner;
         look_mismatch(true);
-        log_look_wrong_owner(mouse_look, owner, player);
-        if (mouse_look_from_cache(player, out)) { log_look_cached(4, out); return true; }
+        if (mouse_look_from_cache(player, out)) { return true; }
         return false;
     }
     // Признак Mirror: isLocalPlayer. В отличие от владельца он читается у
@@ -3417,8 +3265,7 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (local == 0) {
         if (why) *why = LookFail::wrongOwner;
         look_mismatch(true);
-        log_look_not_local(player, mouse_look);
-        if (mouse_look_from_cache(player, out)) { log_look_cached(5, out); return true; }
+        if (mouse_look_from_cache(player, out)) { return true; }
         return false;
     }
     // И последняя сверка — геометрией: m_LookRoot обязан стоять у камеры.
@@ -3427,8 +3274,7 @@ static bool resolve_local_mouse_look(uint64_t& out, LookFail* why = nullptr) {
     if (drives == 0) {
         if (why) *why = LookFail::wrongOwner;
         look_mismatch(true);
-        log_look_wrong_camera(mouse_look, d);
-        if (mouse_look_from_cache(player, out)) { log_look_cached(6, out); return true; }
+        if (mouse_look_from_cache(player, out)) { return true; }
         return false;
     }
     g_look_source = 0;
@@ -3448,13 +3294,11 @@ bool esp_mem_aim_look_params(float& deg_per_unit, bool& invert_y, bool& gyro) {
     uint64_t mouse_look = 0;
     LookFail why = LookFail::none;
     if (!resolve_local_mouse_look(mouse_look, &why)) {
-        log_look_fail(why, mouse_look, 0.f);
         return false;
     }
     const float value = rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET);
     if (!std::isfinite(value) || value < 0.05F || value > 100.0F) {
         look_mismatch(true);
-        log_look_fail(LookFail::badSens, mouse_look, value);
         return false;
     }
     deg_per_unit = value;
@@ -3494,33 +3338,6 @@ static uint64_t s_look_wrote_addr = 0;
 static float    s_look_wrote_x = 0.f, s_look_wrote_y = 0.f;
 static double   s_look_wipe_at = -1e9;
 
-// Накопитель MouseLook — это НЕ завёрнутый угол, а сумма всего ввода: игра
-// заворачивает его сама, уже применяя к повороту камеры, а хранит как есть.
-// Лог 20:45 показывает это прямо: накопитель=(0.81, 291.10) при камере
-// (-0.81, -69.69), то есть 291.10 − 360 = −68.9 — и есть поворот камеры;
-// то же на (−185.69 → 174.58) и на (−237.85 → 123.92).
-//
-// Проверка «больше 360 — значит читаем не тот объект» из-за этого была
-// ошибкой: стоило игроку докрутить взгляд за пол-оборота, как аим слепнул.
-// Лог 20:45:48–20:45:51: три секунды подряд «чтение=15 в кадр», ни одной
-// записи при живом MouseLook (объект=1) и включённом прицеле — ровно то, что
-// в жалобе названо «иногда не стреляет по цели».
-//
-// Поэтому обе грани — и чтение, и запись — работают с завёрнутым значением:
-// поворот камеры от этого не меняется (разница ровно на 360°), зато мы
-// остаёмся внутри любого клампа игры и не теряем объект из-за собственной
-// проверки.
-// Значения накопителя, которые мы всё-таки отвергли: миллионы градусов — это
-// уже не накопитель, а мусор вместо объекта. Печатаем, чтобы отличие от
-// законных ±360 было видно, а не угадывалось.
-static void log_angles_out_of_range(uint64_t mouse_look, float x, float y) {
-    static double s_last = -1e9;
-    const double now = memio::now_seconds();
-    if (now - s_last < 2.0) return;
-    s_last = now;
-    LogStatus("память: MouseLook=0x%llx — накопитель не angles (%.1f, %.1f)",
-            (unsigned long long)mouse_look, (double)x, (double)y);
-}
 
 static float wrap_deg180(float v) {
     if (!std::isfinite(v)) return v;
@@ -3538,7 +3355,6 @@ bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
     // Широкая граница вместо прежних ±360: она ловит мусор вместо указателя
     // (миллионы градусов), а не законный накопитель в триста-четыреста.
     if (fabsf(angles[0]) > 1e6F || fabsf(angles[1]) > 1e6F) {
-        log_angles_out_of_range(mouse_look, angles[0], angles[1]);
         return false;
     }
     x_deg = wrap_deg180(angles[0]);
@@ -3553,9 +3369,6 @@ bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
         const double now = memio::now_seconds();
         if (wiped && now - s_look_wipe_at >= 2.0) {
             s_look_wipe_at = now;
-            LogLine("память: запись стёрта игрой — писали (%.2f, %.2f), читается (%.2f, %.2f)",
-                    (double)s_look_wrote_x, (double)s_look_wrote_y,
-                    (double)angles[0], (double)angles[1]);
         }
     }
     // Все поля раз в секунду: ищем то, что совпадает с углами камеры.
@@ -3568,22 +3381,10 @@ bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
             rd_buf(mouse_look + 0x88, input, sizeof(input));
             float cam_yaw = 0.f, cam_pitch = 0.f;
             const bool have_cam = esp_aim_camera_angles(cam_yaw, cam_pitch);
-            LogLine("память: поля MouseLook=0x%llx накопитель=(%.2f, %.2f) KQQ=(%.2f, %.2f) ввод=(%.3f, %.3f) камера=%d (%.2f, %.2f)",
-                    (unsigned long long)mouse_look,
-                    (double)angles[0], (double)angles[1],
-                    (double)kqq[0], (double)kqq[1],
-                    (double)input[0], (double)input[1],
-                    (int)have_cam, (double)cam_pitch, (double)cam_yaw);
         }
     }
     if (mouse_look != g_look_addr_logged.exchange(mouse_look))
-        LogStatus("память: MouseLook=0x%llx углы=(%.2f, %.2f) чувствительность=%.3f инверсия=%d гироскоп=%d источник=%d игрок=0x%llx локальный=%d до камеры=%.1f м",
-                (unsigned long long)mouse_look, angles[0], angles[1],
-                (double)rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET),
-                (int)(rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0),
-                (int)(rd_ptr(mouse_look + MOUSELOOK_GYRO) >= 0x10000),
-                g_look_source, (unsigned long long)g_look_player_addr,
-                g_look_local, (double)g_look_cam_dist);
+        ;
     return true;
 }
 
@@ -3645,20 +3446,10 @@ bool esp_mem_aim_last_shot(float& time_sec) {
 // при смене мира, и это первое, что стоит проверить, когда «сайлент молчит».
 static std::atomic<uint64_t> g_axis_addr_logged{0};
 
-static void log_axis_chain(uint64_t addr, const float* dir) {
-    if (addr == g_axis_addr_logged.load()) return;
-    g_axis_addr_logged.store(addr);
-    if (!addr) { LogLine("сайлент: цепь оси потеряна (нет игрока, хендлера или оси)"); return; }
-    if (!dir) { LogLine("сайлент: цепь оси адрес=0x%llx", (unsigned long long)addr); return; }
-    const float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    LogLine("сайлент: цепь адрес=0x%llx значение=(%.4f, %.4f, %.4f) длина=%.4f",
-            (unsigned long long)addr, dir[0], dir[1], dir[2], len);
-}
 
 bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z) {
     uint64_t addr = 0;
-    if (!resolve_look_direction(addr)) { log_axis_chain(0, nullptr); return false; }
-    LogStage(kStageAimRead);
+    if (!resolve_look_direction(addr)) { return false; }
     const Vec3 dir = rd_v3(addr);
     if (!vec3_is_finite(dir)) return false;
     const float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
@@ -3667,7 +3458,6 @@ bool esp_mem_aim_read_fire_dir(float& x, float& y, float& z) {
     x = dir.x / len; y = dir.y / len; z = dir.z / len;
     {
         const float d[3] = {x, y, z};
-        log_axis_chain(addr, d);
     }
     return true;
 }
@@ -3680,7 +3470,6 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     const float len = sqrtf(x * x + y * y + z * z);
     if (!std::isfinite(len) || len < 0.001F) return false;
     const float dir[3] = {x / len, y / len, z / len};
-    LogStage(kStageAimWrite);
     const bool ok = wr_buf(addr, dir, sizeof(dir));
     if (!ok) {
         // Отказ записи — редкость (доступ отобрали или адрес умер); пишем, но
@@ -3689,8 +3478,6 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
         const double now = memio::now_seconds();
         if (now - last > 1.0) {
             last = now;
-            LogLine("сайлент: запись оси не прошла, адрес=0x%llx errno=%d",
-                    (unsigned long long)addr, errno);
         }
     }
     return ok;
@@ -4705,7 +4492,6 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
         const double now = memio::now_seconds();
         if (now - s_layout_relearn_at >= 2.0) {
             s_layout_relearn_at = now;
-            LogLine("скелет: раскладка переучивается (4 отказа подряд, якорь тоже не читается)");
         }
     }
     if (g_transform_hierarchy_layout_valid &&
@@ -5555,25 +5341,6 @@ static bool player_mount_engaged(uint64_t player) {
     return found != g_mount_latch.end() && found->second.engaged;
 }
 
-// Диагностика «бокс отстаёт на транспорте»: переходы защёлки пишутся сразу,
-// состояние — не чаще раза в секунду на игрока и не больше 4 строк в секунду
-// всего. Строка показывает, какие источники позиции живы (трансформ камеры /
-// модель), кто выбран, и на сколько метров бокс отстаёт от свежего отсчёта —
-// удержанием защитой от мерцания или нечитаемостью источников.
-static bool mount_log_allow(uint64_t player) {
-    static std::unordered_map<uint64_t, double> at;
-    static double window = -1e9;
-    static int budget = 0;
-    const double now = mono_seconds();
-    if (now - window >= 1.0) { window = now; budget = 4; }
-    auto it = at.find(player);
-    if (it != at.end() && now - it->second < 1.0) return false;
-    if (budget <= 0) return false;
-    at[player] = now;
-    if (at.size() > 64) at.clear();
-    --budget;
-    return true;
-}
 
 static void apply_mounted_position(uint64_t player, Vec3& feet) {
     Vec3 saved{};
@@ -5673,10 +5440,9 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
         const uint32_t vid = rd<uint32_t>(player + PLAYER_VEHICLE_ID);
         const uint32_t sid = rd<uint32_t>(player + PLAYER_SEAT_ID);
         if (latch.engaged)
-            LogLine("транспорт: 0x%llx поехал (ид=%u сид=%u) — бокс переведён на трансформ/модель",
-                    (unsigned long long)player, vid, sid);
+            ;
         else
-            LogLine("транспорт: 0x%llx слез — бокс обратно на поле позиции", (unsigned long long)player);
+            ;
     }
     if (!latch.engaged) return;
 
@@ -5690,21 +5456,6 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
         if (latch.last_ok) feet = latch.last;
     }
 
-    // Отставание бокса от свежего отсчёта: удержание защитой (есть живой
-    // отсчёт, но бокс оставлен на прежнем) или нечитаемость источников
-    // (живого отсчёта нет вообще — тогда расстояние неизвестно, -1).
-    // «подряд» — сколько кадров защита держит бокс без перерыва: по нему видно,
-    // что удержание перестало быть фильтром одиночного щелчка.
-    if (mount_log_allow(player)) {
-        float lag_m = -1.0F;
-        if (held) lag_m = mountlatch::lag_meters(latch, live);
-        else if (!have_live) lag_m = -1.0F;
-        LogLine("транспорт: 0x%llx источник=%s камера=%d модель=%d отстал=%.1fм удержаний=%d подряд=%d пропусков=%d заморозка=%d",
-                (unsigned long long)player, source, (int)have_cam, (int)have_model,
-                (double)lag_m, latch.hold_count, latch.hold_streak, latch.miss_streak,
-                latch.saved_still);
-        latch.hold_count = 0;
-    }
 }
 
 static void prune_mount_latch(const std::vector<uint64_t>& players) {
@@ -5813,9 +5564,6 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, 
     if (now - s_filt_sec >= 1.0) {
         s_filt_sec = now;
         if (s_filt_obs.susp + s_filt_obs.conf > 0) {
-            LogLine("визуал: фильтр позиций за секунду: подозрений %d, подтверждений %d (последний 0x%llx на %.1fм)",
-                    s_filt_obs.susp, s_filt_obs.conf,
-                    (unsigned long long)s_filt_obs.last, (double)s_filt_obs.last_d);
             s_filt_obs.susp = 0; s_filt_obs.conf = 0;
         }
     }
@@ -6243,8 +5991,6 @@ bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, f
                 const double now = memio::now_seconds();
                 if (now - s_last >= 5.0) {
                     s_last = now;
-                    LogLine("аим: углы разошлись с экраном на %.1f/%.1f° — считаю по экрану",
-                            (double)dYaw, (double)dPitch);
                 }
                 yaw_deg = pix_yaw; pitch_deg = pix_pitch;
                 return true;
@@ -7738,15 +7484,11 @@ static void note_player_pipeline_health(bool player_data_ok) {
         g_player_esp_watchdog.observe(player_data_ok, mono_seconds());
     if (action.reset_resolvers) {
         reset_player_pipeline_resolvers(action.deep_recovery);
-        LogLine(action.deep_recovery
-                    ? "визуал: player pipeline не отвечает — глубокий reset resolver-якорей без удаления ESP-снапшота"
-                    : "визуал: player pipeline не отвечает — обновляю resolver-якорь без удаления ESP-снапшота");
     }
     if (action.deep_recovery) {
         // A live camera/local-memory pipeline proves that the process binding is
         // still valid. Reattaching here used to drop every memory feature and
         // the FOV circle in a loop. Keep retrying player-only resolvers instead.
-        LogStatus("визуал: player pipeline не восстановился — продолжаю локальный recovery без reattach");
     }
 }
 
@@ -7869,7 +7611,6 @@ static bool watch_allow() {
         s_watch_sec = now;
         s_watch_budget = 6;
         if (s_watch_hidden > 0) {
-            LogLine("визуал: ...и ещё %d событий скрыто бюджетом", s_watch_hidden);
             s_watch_hidden = 0;
             --s_watch_budget;
         }
@@ -7895,10 +7636,7 @@ static void watch_camera_and_local(const Mat4& view, const Vec3& local) {
         if (dt >= 0.0 && dt < 0.5 && std::isfinite(jump) && jump > 8.0F) {
             ++s_watch_summary_camera_jumps;
             if (watch_allow())
-                LogLine("ESP-ДИАГ: камера прыгнула на %.1fм за %.0fмс: (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)",
-                        (double)jump, dt * 1000.0,
-                        (double)previous_camera.x, (double)previous_camera.y, (double)previous_camera.z,
-                        (double)camera.x, (double)camera.y, (double)camera.z);
+                ;
         }
     }
     const float ldx = local.x - camera.x;
@@ -7908,10 +7646,7 @@ static void watch_camera_and_local(const Mat4& view, const Vec3& local) {
     if (std::isfinite(mismatch) && mismatch > 25.0F) {
         ++s_watch_summary_camera_mismatch;
         if (watch_allow())
-            LogLine("ESP-ДИАГ: камера и локальный игрок разошлись на %.1fм: camera=(%.1f %.1f %.1f), local=(%.1f %.1f %.1f)",
-                    (double)mismatch,
-                    (double)camera.x, (double)camera.y, (double)camera.z,
-                    (double)local.x, (double)local.y, (double)local.z);
+            ;
     }
     previous_camera = camera;
     previous_at = now;
@@ -8011,84 +7746,6 @@ static void format_projection_trace(const W2SProjectionTrace& trace, char* out, 
     }
 }
 
-static void log_esp_skip(const EspSkipLog& event) {
-    struct LastSkipLog { double at = 0.0; char reason = 0; };
-    static double window_at = -1e9;
-    static int window_count = 0;
-    static std::unordered_map<uint64_t, LastSkipLog> player_last_log;
-
-    const double now = memio::now_seconds();
-    if (now - window_at >= 1.0) {
-        window_at = now;
-        window_count = 0;
-    }
-    if (window_count >= 4) return;
-    auto previous = player_last_log.find(event.player);
-    if (previous != player_last_log.end() && previous->second.reason == event.reason &&
-        now - previous->second.at < 1.0) return;
-    if (player_last_log.size() > 1024) {
-        for (auto it = player_last_log.begin(); it != player_last_log.end();) {
-            if (now - it->second.at >= 5.0) it = player_last_log.erase(it);
-            else ++it;
-        }
-    }
-    player_last_log[event.player] = {now, event.reason};
-    ++window_count;
-
-    const char* reason = "unknown";
-    switch (event.reason) {
-        case 'P': reason = "position-unavailable"; break;
-        case 'D': reason = "nonfinite-distance"; break;
-        case 'S': reason = "duplicate-uid"; break;
-        case 'B': reason = "bottom-projection"; break;
-        case 'T': reason = "top-projection"; break;
-        case 'H': reason = "invalid-height"; break;
-        case 'O': reason = "offscreen"; break;
-        case 'X': reason = "dead"; break;
-    }
-    const char* source = "none";
-    switch (event.position_source) {
-        case 'D': source = "direct"; break;
-        case 'K': source = "kcc"; break;
-        case 'M': source = "model"; break;
-        case 'C': source = "cached"; break;
-    }
-    auto tracked = g_player_track.find(event.player);
-    const char* uid = (tracked != g_player_track.end() && tracked->second.uid[0])
-        ? tracked->second.uid : "—";
-    char position[64], position_reads[128], camera[64], right[64], up[64], forward[64], camera_rotation[96];
-    char bottom_world[64], top_world[64], bottom_projection[256], top_projection[256];
-    format_debug_vec3(event.has_position ? &event.position : nullptr, position, sizeof(position));
-    format_position_read_flags(event.position_read_flags, position_reads, sizeof(position_reads));
-    format_debug_vec3(&event.camera_position, camera, sizeof(camera));
-    format_debug_vec3(event.camera_basis_valid ? &event.camera_right : nullptr, right, sizeof(right));
-    format_debug_vec3(event.camera_basis_valid ? &event.camera_up : nullptr, up, sizeof(up));
-    format_debug_vec3(event.camera_basis_valid ? &event.camera_forward : nullptr, forward, sizeof(forward));
-    format_debug_vec3(event.has_bottom_world ? &event.bottom_world : nullptr, bottom_world, sizeof(bottom_world));
-    format_debug_vec3(event.has_top_world ? &event.top_world : nullptr, top_world, sizeof(top_world));
-    if (event.camera_rotation_valid) {
-        std::snprintf(camera_rotation, sizeof(camera_rotation), "(%.3f %.3f %.3f %.3f)",
-                      (double)event.camera_rotation.x, (double)event.camera_rotation.y,
-                      (double)event.camera_rotation.z, (double)event.camera_rotation.w);
-    } else {
-        std::snprintf(camera_rotation, sizeof(camera_rotation), "n/a");
-    }
-    format_projection_trace(event.bottom_projection, bottom_projection, sizeof(bottom_projection));
-    format_projection_trace(event.top_projection, top_projection, sizeof(top_projection));
-
-    LogLine("ESP-SKIP: id=0x%llx uid=%s reason=%s registry=%zu/%zu pos_src=%s pos=%s pos_reads={%s} dist=%.1f camera_src=%s camera=%s basis_valid=%d right=%s up=%s forward=%s cam_q=%s viewport=%.0fx%.0f read_fails=%llu bottom_world=%s bottom={%s} top_world=%s top={%s} body_h=%.2f body_clip=%d duplicate_of=0x%llx box_valid=%d box=(%.1f %.1f %.1f %.1f) margin=%.1f",
-            (unsigned long long)event.player, uid, reason,
-            event.index + 1, event.population, source, position, position_reads, (double)event.distance,
-            event.camera_from_transform ? "transform" : "view", camera,
-            (int)event.camera_basis_valid, right, up, forward, camera_rotation,
-            (double)event.screen_width, (double)event.screen_height,
-            event.read_fails_total, bottom_world, bottom_projection, top_world, top_projection,
-            (double)event.body_height, event.body_clipped,
-            (unsigned long long)event.duplicate_of,
-            (int)event.has_box_bounds, (double)event.box_cx, (double)event.box_cy,
-            (double)event.box_half_width, (double)event.box_half_height,
-            (double)event.screen_margin);
-}
 
 // tag: 0 = главный путь (боксы строились), иначе номер раннего выхода.
 static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
@@ -8118,10 +7775,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
             if (dt >= 0.0 && dt < 0.5 && std::isfinite(jump) && jump > 8.0F) {
                 ++s_watch_summary_local_jumps;
                 if (watch_allow())
-                    LogLine("ESP-ДИАГ: локальная позиция прыгнула на %.1fм за %.0fмс: (%.1f %.1f %.1f) -> (%.1f %.1f %.1f), выход=%d",
-                            (double)jump, dt * 1000.0,
-                            (double)s_watch_prev_local.x, (double)s_watch_prev_local.y, (double)s_watch_prev_local.z,
-                            (double)g_frame_local_pos.x, (double)g_frame_local_pos.y, (double)g_frame_local_pos.z, tag);
+                    ;
             }
         }
         s_watch_prev_local = g_frame_local_pos;
@@ -8149,10 +7803,6 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
                 auto it = g_player_track.find(addr);
                 return (it != g_player_track.end() && it->second.uid[0]) ? it->second.uid : "—";
             };
-            LogLine("визуал: состав %u: +%d -%d (первый +0x%llx uid=%s -0x%llx uid=%s)",
-                    (unsigned)g_frame_transforms.size(), added, gone,
-                    (unsigned long long)added_first, uid_of(added_first),
-                    (unsigned long long)gone_first, uid_of(gone_first));
         }
     }
 
@@ -8165,8 +7815,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
             if (s_watch_local_addr && addr) {
                 local_flipped = true;
                 if (watch_allow())
-                    LogLine("визуал: локальный сменился 0x%llx -> 0x%llx",
-                            (unsigned long long)s_watch_local_addr, (unsigned long long)addr);
+                    ;
             }
             s_watch_local_addr = addr;
         }
@@ -8192,11 +7841,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
                 (std::isfinite(screen_jump) && screen_jump > screen_limit)) {
                 ++s_watch_summary_jumps;
                 if (watch_allow())
-                    LogLine("ESP-ДИАГ: бокс 0x%llx прыгнул: dist %.1f->%.1fм (дельта %.1f), экран (%.0f %.0f)->(%.0f %.0f) (дельта %.0fpx), local-flip=%d",
-                            (unsigned long long)box.id,
-                            (double)pose->second.distance, (double)box.distance, (double)distance_jump,
-                            (double)pose->second.cx, (double)pose->second.cy,
-                            (double)cx, (double)cy, (double)screen_jump, (int)local_flipped);
+                    ;
             }
         }
         s_watch_box_pose[box.id] = {cx, cy, box.distance, s_watch_frame};
@@ -8204,9 +7849,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
         if (it != s_watch_gap.end() && it->second > 0) {
             ++s_watch_summary_returns;
             if (watch_allow())
-                LogLine("визуал: бокс 0x%llx ВЕРНУЛСЯ через %d кадр(а), отказов чтения за кадр %llu%s",
-                        (unsigned long long)box.id, it->second,
-                        fails_delta, local_flipped ? ", LOCAL-FLIP" : "");
+                ;
         }
     }
 
@@ -8237,9 +7880,6 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
                 case 'O': why = "offscreen"; break;
                 case 'X': why = "dead"; break;
             }
-            LogLine("визуал: бокс 0x%llx ПРОПАЛ: %s, отказов чтения за кадр %llu%s",
-                    (unsigned long long)player, why,
-                    fails_delta, local_flipped ? ", LOCAL-FLIP" : "");
         }
     }
 
@@ -8248,7 +7888,7 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
         bool had = false;
         for (const auto& kv : s_watch_gap) if (kv.second == 0) { had = true; break; }
         if (had && watch_allow())
-            LogLine("визуал: кадр БЕЗ боксов (выход %d), отказов чтения за кадр %llu", tag, fails_delta);
+            ;
     }
 
     // Состарить счётчики, отметить нарисованные, прибрать протухшие.
@@ -8270,14 +7910,6 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
             used += (size_t)snprintf(exits + used, sizeof(exits) - used,
                                      "%s%d:%d", used ? "," : "", i, s_watch_summary_early[i]);
         }
-        LogLine("ESP-ДИАГ: кадры=%d боксы=%d..%d пустых=%d возвратов=%d пропаж=%d скачков=%d local-jump=%d camera-jump=%d camera-local=%d read-fail=%llu early={%s}",
-                s_watch_summary_frames,
-                s_watch_summary_min == 1000000 ? 0 : s_watch_summary_min,
-                s_watch_summary_max, s_watch_summary_empty,
-                s_watch_summary_returns, s_watch_summary_losses,
-                s_watch_summary_jumps, s_watch_summary_local_jumps,
-                s_watch_summary_camera_jumps, s_watch_summary_camera_mismatch,
-                s_watch_summary_fails, exits);
         s_watch_summary_at = watch_now;
         s_watch_summary_frames = s_watch_summary_empty = 0;
         s_watch_summary_min = 1000000; s_watch_summary_max = 0;
@@ -8401,15 +8033,9 @@ static void revalidate_dead_direct_position(const std::vector<uint64_t>& players
         const double now = mono_seconds();
         if (now - s_fail_log_at >= 60.0) {
             s_fail_log_at = now;
-            LogLine("позиция: прямой путь мёртв — рабочего смещения нет ни среди %zu известных, ни в развёртке 0x%llx..0x%llx, остаюсь на фолбэке",
-                    sizeof(k_known_position_offsets) / sizeof(k_known_position_offsets[0]),
-                    (unsigned long long)k_position_scan_first, (unsigned long long)k_position_scan_last);
         }
         return;
     }
-    LogLine("позиция: прямой путь мёртв — рабочее смещение 0x%llx (профиль давал 0x%llx), сверка с kcc: %d из %d, переключил",
-            (unsigned long long)best_offset, (unsigned long long)g_player_position_offset,
-            best_matches, (int)reference_count);
     g_use_direct_player_position = true;
     g_player_position_offset = best_offset;
     g_player_position_validated = true;
@@ -8439,9 +8065,6 @@ static void note_direct_position_health(const std::vector<uint64_t>& players,
             else if (s == 'M') ++model_n;
             else if (s == 'C') ++cache_n;
         }
-        LogLine("позиция: прямой путь мёртв %.1f с — смещение 0x%llx не дало мировых координат ни у одного из %d игроков; держусь на kcc=%zu model=%zu cache=%zu",
-                dead_for, (unsigned long long)g_player_position_offset,
-                s_direct_dead_players, kcc_n, model_n, cache_n);
     }
     // Раз в ~5 c мертвого пути пробуем известные смещения: событие редкое,
     // а поиск читает позиции всех игроков на каждое смещение.
@@ -8451,17 +8074,6 @@ static void note_direct_position_health(const std::vector<uint64_t>& players,
     }
 }
 
-// Бюджет на строку про трупа, занявшего uid: одно событие на респавн, но на
-// потоке респавнов оно иначе затирает лог.
-static bool duplicate_uid_log_allow() {
-    static double at = -1e9;
-    static int left = 0;
-    const double now = mono_seconds();
-    if (now - at >= 1.0) { at = now; left = 2; }
-    if (left <= 0) return false;
-    --left;
-    return true;
-}
 
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
@@ -8857,7 +8469,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             skip_reason[i] = reason;
             diagnostic.reason = reason;
             diagnostic.read_fails_total = g_mem.read_fails_total();
-            log_esp_skip(diagnostic);
         };
         if (i == local_entity_index) { skip_reason[i] = 'L'; continue; }
         if (!s_transforms[i]) { skip_reason[i] = 'Z'; continue; }
@@ -8901,10 +8512,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                         mark_skip('S');
                         continue;
                     }
-                    if (pick_corpse && duplicate_uid_log_allow())
-                        LogLine("визуал: uid %s — объект 0x%llx труп, uid не удерживает; показываю свежий 0x%llx",
-                                track_it->second.uid, (unsigned long long)pick,
-                                (unsigned long long)s_transforms[i]);
                 }
                 pick = s_transforms[i];
             }
@@ -8913,7 +8520,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Counted before any screen-space checks: the pill counter must see
         // players behind us too (360 degrees), not only the ones on screen.
         ++g_frame_player_count;
-        crash_note("esp: player 0x%llx", (unsigned long long)s_transforms[i]);
 
         // Crouch-aware body height from the character controller.
         PlayerAux& aux = player_aux(s_transforms[i]);
@@ -9277,10 +8883,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (t3 >= s_pose_at) { s_pose_at = t3 + 8.0; s_pose_left = 3; }
             if (s_pose_left > 0 && box.skel_bones >= 6) {
                 --s_pose_left;
-                LogLine("аим: поза 0x%llx костей=%d высота=%.2f м ширина=%.2f м respawning=%d смерть=%d мёртв=%d здоровье=%.1f",
-                        (unsigned long long)box.id, (int)box.skel_bones, (double)box.skel_up,
-                        (double)box.skel_flat, (int)box.respawning, (int)box.death_flag,
-                        (int)box.dead, (double)box.health);
             }
         }
         // A confirmed corpse must disappear immediately. The five-second list
