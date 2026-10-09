@@ -11,6 +11,7 @@
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // выбранный Release/Beta профиль
 #include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
+#include "player_motion_prediction.h" // дорисовка сетевых позиций между тиками
 #include "mount_latch.h"           // удержание бокса на транспорте (хост-проверяемый)
 #include "body_clip.h"             // отсечение тела по ближней плоскости (хост-проверяемый)
 #include "Vector.h"
@@ -8321,8 +8322,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             source = 'C';
         } else {
             ++live_player_positions;
-            track_player(player, candidate);
+            PlayerTrack& track = track_player(player, candidate);
             tracked = g_player_track.find(player);
+
+            // lastSavedPosition у удалённых игроков обновляется сетевыми тиками,
+            // а оверлей рисуется 60 Гц. Между тиками продвигаем только обычный
+            // direct-сэмпл по измеренной скорости. KCC/model и транспорт уже
+            // дают живой Transform, поэтому повторная экстраполяция им навредит.
+            if (source == 'D' && player != g_local_player &&
+                !player_is_mounted(player) && !player_mount_engaged(player) &&
+                track.have_vel_ref) {
+                candidate = playermotion::predict(candidate, track.vel,
+                                                  track.vel_ref_t, mono_seconds());
+            }
         }
 
         position_read_flags[index] = read_flags;

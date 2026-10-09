@@ -176,10 +176,10 @@ inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m
 
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
-// Effective release-client lastSavedPosition. The generated dump reports
-// 0x1D4, but the shipped combat client stores this block four bytes earlier;
-// device validation and the previous live resolver both select 0x1D0.
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x260;  // было 0x1F4; лог 19:52 — перепроверка со сверкой по kcc подтвердила 0x260 (8 игроков из 9), 0x1F4 отдавал invalid-world каждому. Дальше по списку 0x1D0/0x1C8; после обновления игры поле уедет — тогда профиль снова отстанет, и его подхватит revalidate_dead_direct_position
+// PlayerManager.lastSavedPosition. Совпадает в release 11946 и beta 11943;
+// 0x260 в этих билдах — ссылка fz, поэтому чтение Vector3 оттуда всегда
+// сваливалось на более тяжёлый KCC/model path.
+inline constexpr std::uint64_t PLAYER_POSITION = 0x1F4;
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
 inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (class ij, was wK)
 // PlayerManager "uWc" (0x220, was LLI): the real human-readable display name (confirmed
