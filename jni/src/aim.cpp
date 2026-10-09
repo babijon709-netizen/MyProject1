@@ -676,13 +676,13 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     return true;
 }
 
-// ---- трасса аима: один CSV на сессию в Загрузках (см. aim_trace.h) ----------
+// ---- aim trace: one CSV per session in Downloads (see aim_trace.h) ---------
 static void AimTraceCommit(const aim_trace::Record& r) {
     if (aim_trace::writer().record(r) == aim_trace::Result::OpenFailed)
         ShowToast(XS("Лог аима: нет доступа к Загрузкам"));
 }
 
-// Пишет строку на выходе из функции, в том числе по ранним return.
+// Writes the row on scope exit, so early returns are logged too.
 struct AimTraceGuard {
     aim_trace::Record r;
     const float* fingerX = nullptr;
