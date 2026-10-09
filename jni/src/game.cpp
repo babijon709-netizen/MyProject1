@@ -4477,6 +4477,8 @@ static uint64_t g_skeleton_layout_anchor = 0;
 static int s_skelRagdollWhy = 0;
 static int s_skelNamesWhy = 0;
 
+static bool skeleton_transform_ptr_valid(uint64_t transform);
+
 static bool resolve_skeleton_layout(uint64_t sample_transform) {
     if (g_skeleton_layout_valid) {
         if (skeleton_layout_reads_plausible(g_skeleton_layout, sample_transform)) {
@@ -4529,6 +4531,17 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
                     }
                 }
             }
+        }
+    }
+    {
+        static unsigned long s_layoutFails = 0;
+        const unsigned long n = ++s_layoutFails;
+        if (n <= 10 || n % 300 == 0) {
+            const uint64_t go = sample_transform ? rd_ptr(sample_transform + COMPONENT_GAMEOBJECT) : 0;
+            DiagLog("layout fail#%lu sample=0x%llx ptrValid=%d go=0x%llx hierValid=%d missLimit=%d anchor=0x%llx",
+                    n, (unsigned long long)sample_transform, (int)skeleton_transform_ptr_valid(sample_transform),
+                    (unsigned long long)go, (int)g_transform_hierarchy_layout_valid,
+                    g_skeleton_layout_miss, (unsigned long long)g_skeleton_layout_anchor);
         }
     }
     return false;
