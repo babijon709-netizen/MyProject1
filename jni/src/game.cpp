@@ -8230,6 +8230,24 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
 
+    // Авто-поиск разметки иерархии: раньше не вызывался нигде. Идёт только когда
+    // ни выученная, ни статическая разметка скелетов не сошлись. Набор трансформов
+    // берём стабильный (16 наименьших адресов), иначе сигнатура обхода меняется
+    // каждый кадр и обход начинается заново.
+    if (want_bones && !g_skeleton_layout_valid && !g_transform_hierarchy_layout_valid &&
+        s_transforms.size() >= 2) {
+        std::vector<uint64_t> probe_set(s_transforms.begin(), s_transforms.end());
+        std::sort(probe_set.begin(), probe_set.end());
+        if (probe_set.size() > 16) probe_set.resize(16);
+        size_t disc_positions = 0, disc_candidates = 0;
+        const bool disc_found = discover_layout_from_native_transforms(probe_set, disc_positions, disc_candidates);
+        static unsigned long s_discCalls = 0;
+        const unsigned long dn = ++s_discCalls;
+        if (disc_found || dn <= 5 || dn % 120 == 0)
+            DiagLog("hierarchy discover#%lu found=%d positions=%zu candidates=%zu set=%zu",
+                    dn, (int)disc_found, disc_positions, disc_candidates, probe_set.size());
+    }
+
     // The selected build profile already contains the PlayerManager position
     // field. Use it directly; KCC/model below cover objects whose synced field
     // has not been initialized yet.
