@@ -5246,6 +5246,19 @@ struct PlayerTrack {
     Vec3   vel_ref{};       // position the current estimate was measured from
     double vel_ref_t = 0.0; // and when
     bool   have_vel_ref = false;
+    // Acceleration estimate: derivative of velocity between the last two
+    // measured velocity samples.  accel_valid is false until at least two
+    // distinct velocity measurements have been accepted (prevents a single
+    // direction change from producing a huge overshoot on the first frame).
+    Vec3   accel{};
+    Vec3   prev_vel{};      // velocity before the last accepted measurement
+    bool   accel_valid = false;
+    int    vel_samples = 0; // count of accepted measurements since reset
+    // Per-player network tick interval (seconds): time between successive
+    // position updates. Used as the adaptive aim-lead window instead of
+    // the fixed slider value when it is available.
+    float  net_tick_dt = 0.0F;
+    bool   have_net_tick = false;
     // Последняя ПРИНЯТАЯ позиция и состояние временного фильтра (см.
     // filter_player_position): бокс рисуется по ним, а не по сырому чтению.
     posfilter::State filt{};
@@ -5500,15 +5513,75 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
                 if (span > 0.02 && span < 0.5) {
                     const Vec3 v = { (float)(mx / span), (float)(my / span), (float)(mz / span) };
                     const float speed = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-                    if (std::isfinite(speed) && speed < 12.0F) {   // faster than a man can run: a teleport
-                        track.vel.x = track.vel.x * 0.5F + v.x * 0.5F;
-                        track.vel.y = track.vel.y * 0.5F + v.y * 0.5F;
-                        track.vel.z = track.vel.z * 0.5F + v.z * 0.5F;
+                    if (std::isfinite(speed) && speed < 12.0F) {
+                        // Adaptive EMA: weight towards new sample more
+                        // aggressively when the direction changed noticeably
+                        // (dot product < 0.7), conservatively when it agrees
+                        // with the current estimate.  This removes the harsh
+                        // 0.5/0.5 snap on each network tick while still
+                        // reacting quickly to direction changes.
+                        const float dot = track.vel.x * v.x + track.vel.y * v.y + track.vel.z * v.z;
+                        const float cur_speed = sqrtf(track.vel.x * track.vel.x +
+                                                      track.vel.y * track.vel.y +
+                                                      track.vel.z * track.vel.z);
+                        float alpha;
+                        if (cur_speed < 0.1F) {
+                            alpha = 0.80F;  // first real sample after standing still
+                        } else {
+                            const float cos_angle = (cur_speed > 0.f)
+                                ? dot / (cur_speed * speed + 1e-6F) : 0.f;
+                            // cos > 0.85: same direction → smooth (alpha 0.30)
+                            // cos < 0.0:  opposite direction → react fast (alpha 0.75)
+                            alpha = 0.30F + (1.0F - std::max(0.0F, cos_angle)) * 0.45F;
+                            if (alpha > 0.80F) alpha = 0.80F;
+                        }
+
+                        // Save previous velocity before updating for accel estimate.
+                        track.prev_vel = track.vel;
+
+                        track.vel.x = track.vel.x * (1.f - alpha) + v.x * alpha;
+                        track.vel.y = track.vel.y * (1.f - alpha) + v.y * alpha;
+                        track.vel.z = track.vel.z * (1.f - alpha) + v.z * alpha;
+
+                        // Acceleration: derivative of velocity over the network tick.
+                        // Only valid after at least 2 accepted measurements so the
+                        // first tick doesn't produce a massive accel from zero.
+                        if (track.vel_samples >= 1 && span > 0.02 && span < 0.5) {
+                            const float invSpan = 1.0F / (float)span;
+                            const Vec3 a = {
+                                (track.vel.x - track.prev_vel.x) * invSpan,
+                                (track.vel.y - track.prev_vel.y) * invSpan,
+                                (track.vel.z - track.prev_vel.z) * invSpan
+                            };
+                            const float amag = sqrtf(a.x*a.x + a.y*a.y + a.z*a.z);
+                            // Cap: 50 m/s² is a hard sprint turn; above that it's
+                            // likely a read glitch or a teleport that slipped through.
+                            if (std::isfinite(amag) && amag < 50.0F) {
+                                // Smooth accel with a fixed 0.4 weight: accel signal
+                                // is noisier than velocity and benefits more from smoothing.
+                                track.accel.x = track.accel.x * 0.6F + a.x * 0.4F;
+                                track.accel.y = track.accel.y * 0.6F + a.y * 0.4F;
+                                track.accel.z = track.accel.z * 0.6F + a.z * 0.4F;
+                                track.accel_valid = (track.vel_samples >= 2);
+                            }
+                        }
+
+                        // Record per-player network tick interval for adaptive lead.
+                        if (track.vel_samples >= 1) {
+                            const float dt_f = (float)span;
+                            track.net_tick_dt = track.have_net_tick
+                                ? track.net_tick_dt * 0.7F + dt_f * 0.3F
+                                : dt_f;
+                            track.have_net_tick = true;
+                        }
+
+                        ++track.vel_samples;
                     }
                 }
                 track.vel_ref = position; track.vel_ref_t = now;
             } else if (span > 0.3) {                   // stood still: stop leading
-                track.vel = {};
+                track.vel = {}; track.accel = {};
+                track.accel_valid = false; track.vel_samples = 0;
                 track.vel_ref = position; track.vel_ref_t = now;
             }
         }
@@ -5570,7 +5643,12 @@ static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, 
     }
 
     const bool ok = posfilter::filter(track.filt, read_ok, pos, track.vel, now, s_filt_obs);
-    if (s_filt_obs.vel_reset) { track.vel = {}; track.have_vel_ref = false; s_filt_obs.vel_reset = false; }
+    if (s_filt_obs.vel_reset) {
+        track.vel = {}; track.accel = {};
+        track.have_vel_ref = false; track.accel_valid = false;
+        track.vel_samples = 0;
+        s_filt_obs.vel_reset = false;
+    }
     if (ok && s_filt_obs.conf) s_filt_obs.last = player;
     return ok;
 }
@@ -8333,6 +8411,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 !player_is_mounted(player) && !player_mount_engaged(player) &&
                 track.have_vel_ref) {
                 candidate = playermotion::predict(candidate, track.vel,
+                                                  track.accel, track.accel_valid,
                                                   track.vel_ref_t, mono_seconds());
             }
         }
@@ -8613,12 +8692,29 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         };
         EspBox box{};
         // Lead for this player, used by every set_aim_point call below.
+        // If the player's network tick interval is known, use it as the lead
+        // window instead of (or in addition to) the manual slider value:
+        // it captures the actual latency of position updates for this specific
+        // player rather than a global guess.  The two are summed and clamped.
         {
             auto vt = g_player_track.find(s_transforms[i]);
             if (vt != g_player_track.end()) {
-                g_aim_lead.x = vt->second.vel.x * g_aim_lead_seconds;
-                g_aim_lead.y = vt->second.vel.y * g_aim_lead_seconds;
-                g_aim_lead.z = vt->second.vel.z * g_aim_lead_seconds;
+                const PlayerTrack& pt = vt->second;
+                float lead = g_aim_lead_seconds;
+                if (pt.have_net_tick && pt.net_tick_dt > 0.01F && pt.net_tick_dt < 0.20F)
+                    lead += pt.net_tick_dt * 0.5F; // half a tick of extra lead for network lag
+                if (lead > 0.15F) lead = 0.15F;
+                const float t  = lead;
+                const float t2 = t * t * 0.5F;
+                if (pt.accel_valid) {
+                    g_aim_lead.x = pt.vel.x * t + pt.accel.x * t2;
+                    g_aim_lead.y = pt.vel.y * t + pt.accel.y * t2;
+                    g_aim_lead.z = pt.vel.z * t + pt.accel.z * t2;
+                } else {
+                    g_aim_lead.x = pt.vel.x * t;
+                    g_aim_lead.y = pt.vel.y * t;
+                    g_aim_lead.z = pt.vel.z * t;
+                }
             } else {
                 g_aim_lead = {};
             }
