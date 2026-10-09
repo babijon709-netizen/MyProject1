@@ -188,7 +188,7 @@ bool heap_gate_allows(uint64_t address, size_t size) {
                     case object_data::Reject::SpansBoundary:reason = "write spans the mapping end"; break;
                     default: break;
                 }
-                LogLine("запись в кучу отклонена воротами: адрес 0x%llx, %zu байт — %s; карта: %s",
+                LogStatus("запись в кучу отклонена воротами: адрес 0x%llx, %zu байт — %s; карта: %s",
                         (unsigned long long)address, size, reason,
                         line[0] ? line : (text ? "(строка не найдена)" : "(карта не прочиталась)"));
             }
@@ -340,10 +340,10 @@ void log_fast_fire_transition() {
     const viewmodel::Status status = rapid_fire.status;
     if (stage == last_stage && status == last_status) return;
     if (last_status == viewmodel::Status::Active && status != viewmodel::Status::Active)
-        LogLine("fast fire: stopped — %s (status=%d stage=%d)",
+        LogStatus("fast fire: stopped — %s (status=%d stage=%d)",
                 fast_fire_stop_reason(status, stage), (int)status, stage);
     else
-        LogLine("fast fire: status=%d stage=%d (1 local,2 FPManager,3 slot,4 type,5 owner,6 mode/wait,7 timing,8 changed,9 restore,10 write,11 burst overlap guard)",
+        LogStatus("fast fire: status=%d stage=%d (1 local,2 FPManager,3 slot,4 type,5 owner,6 mode/wait,7 timing,8 changed,9 restore,10 write,11 burst overlap guard)",
                 (int)status, stage);
     last_stage = stage; last_status = status;
 }
@@ -371,10 +371,10 @@ void log_no_recoil_transition() {
     const viewmodel::Status status = no_recoil_ctl.status;
     if (stage == last_stage && status == last_status) return;
     if (last_status == viewmodel::Status::Active && status != viewmodel::Status::Active)
-        LogLine("no recoil: stopped — %s (status=%d stage=%d)",
+        LogStatus("no recoil: stopped — %s (status=%d stage=%d)",
                 no_recoil_stop_reason(status, stage), (int)status, stage);
     else
-        LogLine("no recoil: status=%d stage=%d (1-2 local,3-4 identity,5 FPManager,6 not hitscan,7 owner,8 config,9 recoil asset,10-14 write)",
+        LogStatus("no recoil: status=%d stage=%d (1-2 local,3-4 identity,5 FPManager,6 not hitscan,7 owner,8 config,9 recoil asset,10-14 write)",
                 (int)status, stage);
     last_stage = stage; last_status = status;
 }
@@ -465,7 +465,7 @@ void log_no_ballistics_transition() {
     describe(d.probe_config, config_name, sizeof(config_name), config_ns, sizeof(config_ns));
     describe(d.probe_profile, profile_name, sizeof(profile_name), profile_ns, sizeof(profile_ns));
     describe(d.probe_projectile, projectile_name, sizeof(projectile_name), projectile_ns, sizeof(projectile_ns));
-    LogLine("no ballistics: game=%s status=%s(%d) stage=%d reason=%s kind=%s probe_kind=%s "
+    LogStatus("no ballistics: game=%s status=%s(%d) stage=%d reason=%s kind=%s probe_kind=%s "
             "weapon=0x%llx config=0x%llx profile=0x%llx prefab=0x%llx "
             "types[weapon=%s.%s config=%s.%s profile=%s.%s prefab=%s.%s] "
             "probe[player=0x%llx fp=0x%llx weapon=0x%llx config=0x%llx profile=0x%llx prefab=0x%llx]",
@@ -478,7 +478,7 @@ void log_no_ballistics_transition() {
             (unsigned long long)d.probe_player, (unsigned long long)d.probe_fp,
             (unsigned long long)d.probe_weapon, (unsigned long long)d.probe_config,
             (unsigned long long)d.probe_profile, (unsigned long long)d.probe_projectile);
-    LogLine("no ballistics: fields target=%02x read=%02x zero=%02x wrote=%02x saved=%02x "
+    LogStatus("no ballistics: fields target=%02x read=%02x zero=%02x wrote=%02x saved=%02x "
             "restore_try=%02x restored=%02x skipped=%02x saved_values=[%.5g,%.5g,%.5g;%.5g,%.5g,%.5g] "
             "last=0x%llx %.5g->%.5g generations=context:%llu write:%llu restore:%llu "
             "(bits0-2=profile gravity/air/underwater, bits3-5=prefab gravity/air/underwater)",
@@ -492,7 +492,7 @@ void log_no_ballistics_transition() {
             (unsigned long long)d.context_generation, (unsigned long long)d.write_generation,
             (unsigned long long)d.restore_generation);
     if (d.error_stage) {
-        LogLine("no ballistics: error stage=%d reason=%s address=0x%llx value=%.7g",
+        LogStatus("no ballistics: error stage=%d reason=%s address=0x%llx value=%.7g",
                 d.error_stage, no_ballistics_stop_reason(viewmodel::Status::Failed, d.error_stage),
                 (unsigned long long)d.error_address, (double)d.error_value);
     }
@@ -556,7 +556,7 @@ uint64_t find_unity() {
             last_logged_build = id;
             last_logged_maps = count;
             if (id_read)
-                LogLine("fps: libunity не опознан, build id %016llx, mapped=%d (игра обновилась?)",
+                LogStatus("fps: libunity не опознан, build id %016llx, mapped=%d (игра обновилась?)",
                         (unsigned long long)id, count);
             else
                 LogLine("fps: libunity не опознан, build id не прочитан (+0x318), mapped=%d", count);
@@ -591,7 +591,7 @@ void tick_fps(uint64_t session, int requested_limit) {
     }
     if (changed || fps_last_log != fps_controller.status) {
         fps_last_log = fps_controller.status;
-        LogLine("fps: requested=%d target limit status=%d (0 off,1 waiting,2 set,4 memory error); actual FPS is device/pacing dependent",
+        LogStatus("fps: requested=%d target limit status=%d (0 off,1 waiting,2 set,4 memory error); actual FPS is device/pacing dependent",
                 limit, (int)fps_last_log);
     }
 }
@@ -609,15 +609,15 @@ void esp_viewmodel_reset(bool restore) {
     controller.reset(restore && g_mem.bound());
     fps_controller.reset(restore && g_mem.bound());
     if (!weapons.reset(restore && g_mem.bound()))
-        LogLine("weapon data: originals could not all be restored before disconnect; restart game");
+        LogStatus("weapon data: originals could not all be restored before disconnect; restart game");
     if (!rapid_fire.reset(restore && g_mem.bound()))
-        LogLine("fast fire: originals could not all be restored before disconnect; restart game");
+        LogStatus("fast fire: originals could not all be restored before disconnect; restart game");
     log_fast_fire_transition();
     if (!no_recoil_ctl.reset(restore && g_mem.bound()))
-        LogLine("no recoil: originals could not all be restored before disconnect; restart game");
+        LogStatus("no recoil: originals could not all be restored before disconnect; restart game");
     log_no_recoil_transition();
     if (!no_ballistics_ctl.reset(restore && g_mem.bound()))
-        LogLine("no ballistics: originals could not all be restored before disconnect; restart game");
+        LogStatus("no ballistics: originals could not all be restored before disconnect; restart game");
     log_no_ballistics_transition();
     loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
@@ -657,12 +657,12 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         const int loot_zeroed = loot_speed.tick(g_il2cpp_base, settings.fast_loot);
         if (loot_speed.state() != loot_last_state) {
             loot_last_state = loot_speed.state();
-            LogLine("fast loot: state=%d stage=%d (0 off,1 waiting,2 active,3 failed; stage: 1 helper slot,2 statics,3 promise classes)",
+            LogStatus("fast loot: state=%d stage=%d (0 off,1 waiting,2 active,3 failed; stage: 1 helper slot,2 statics,3 promise classes)",
                     (int)loot_last_state, loot_speed.stage());
         }
         if (loot_zeroed > 0 && !loot_announced) {
             loot_announced = true;
-            LogLine("fast loot: first zeroing — %d delay(s) of 0.35f completed early", loot_zeroed);
+            LogStatus("fast loot: first zeroing — %d delay(s) of 0.35f completed early", loot_zeroed);
         }
         if (!settings.fast_loot) loot_announced = false;
     }
@@ -699,7 +699,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         if (!player) {
             if (!local_source_failed) {
                 local_source_failed=true;
-                LogLine("viewmodel: local PlayerManager unavailable; cached=0x%llx class=0x%llx rva=0x%llx",
+                LogStatus("viewmodel: local PlayerManager unavailable; cached=0x%llx class=0x%llx rva=0x%llx",
                         (unsigned long long)g_local_player,
                         (unsigned long long)g_game_controller_class,
                         (unsigned long long)GAME_CONTROLLER_TYPEINFO_RVA);
@@ -749,7 +749,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         if (stage != last_stage) {
             last_stage = stage;
             if (stage)
-                LogLine("weapon no-spread chain failed at stage %d (1-13 resolve, 14-18 validate/write)", stage);
+                LogStatus("weapon no-spread chain failed at stage %d (1-13 resolve, 14-18 validate/write)", stage);
             else
                 LogLine("weapon no-spread chain resolved");
         }
@@ -771,7 +771,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     auto st = esp_viewmodel_diagnostics();
     if (st.fov != last_log.fov || st.hands != last_log.hands ||
         st.no_spread != last_log.no_spread) {
-        LogLine("viewmodel: fov=%d hands=%d; spread=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
+        LogStatus("viewmodel: fov=%d hands=%d; spread=%d (0 off,1 waiting,2 active,3 ADS,4 guard/memory error)",
                 (int)st.fov, (int)st.hands, (int)st.no_spread);
         last_log = st;
     }

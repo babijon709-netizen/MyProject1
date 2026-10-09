@@ -26,6 +26,13 @@ void LogClose();
 void LogStage(int stage);
 void LogFrameBeat(unsigned long frame);
 void LogWatchdogStart();
+// Единственный канал, пишущий в файл (помимо CRASH): статус-переходы фич
+// с причиной («фича X: ошибка, стадия 5 = FPManager»). Зовётся кодом,
+// который УЖЕ дедупит повторы (печатает только при смене состояния) — сам
+// LogStatus не фильтрует поток.
+void LogStatus(const char* format, ...) __attribute__((format(printf, 1, 2)));
+// Мёртвый кадровый канал: ~100 старых вызовов по проекту компилируются и
+// ничего не пишут (минимальный режим, см. logfile.cpp).
 void LogLine(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
 // Короткая заметка «что именно делаем» для crash_handler: stage отвечает «в

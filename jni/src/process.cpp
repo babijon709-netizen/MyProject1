@@ -1,5 +1,6 @@
 #include "process.h"
 #include "game.h"
+#include "logfile.h"
 
 #include <atomic>
 #include <chrono>
@@ -165,6 +166,9 @@ void start_attach_thread() {
                     g_target_pid = attached_pid;
                     g_esp_attached = true;
                     g_alive_check_failures = 0;
+                    LogStatus("привязка: игра найдена, pid=%d, режим=%d, %s", (int)attached_pid,
+                              esp_get_mem_backend(),
+                              g_target_by_package ? "по package" : "переименованное приложение");
                 }
             } else {
                 const bool same_process = pid_still_game(g_target_pid);
@@ -177,6 +181,9 @@ void start_attach_thread() {
                     }
                 }
                 if (!same_process || !memory_alive) {
+                    LogStatus("привязка: потеряна — %s",
+                              !same_process ? "процесс игры завершён"
+                                            : "серия отказов чтения памяти");
                     // Process death is immediate; isolated /proc/<pid>/mem EIO
                     // failures are tolerated. They are common under load and
                     // must not make every memory feature blink off together.
@@ -196,6 +203,7 @@ void stop_attach_thread() {
     if (g_attach_thread.joinable()) g_attach_thread.join();
 }
 void process_detach() {
+    LogStatus("привязка: снята");
     esp_reset();
     g_esp_attached = false;
     g_target_pid = -1;

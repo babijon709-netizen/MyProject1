@@ -1,5 +1,6 @@
 #include "silent_aim_core.h"
 #include "game.h"      // esp_silent_* — память игры через выбранный транспорт
+#include "logfile.h"   // LogStatus — причины отказов записи (5 с)
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -29,6 +30,7 @@ public:
     }
 };
 class Writer {
+    uint64_t silent_fail_at = 0;
     std::mutex mutex_;
     std::condition_variable wake_;
     std::thread thread_;
@@ -70,11 +72,21 @@ class Writer {
             // read/write was in flight; the next iteration uses the newest copy.
             if (stopping_ || session_ != command_session || revision_ != command_revision) continue;
             stats_.axis = result == Result::written;
-            if (result == Result::written) ++stats_.writes;
+            if (result == Result::written) { ++stats_.writes; silent_fail_at = 0; }
             else {
                 ++stats_.failures;
                 if (result == Result::guard_failed) ++stats_.guard_failures;
                 stats_.active = false; // нужен новый снимок кадра
+                // «Сайлент молчит»: отказ идёт на каждый кадр с целью —
+                // причина есть в Result, поэтому строка раз в 5 с.
+                const uint64_t fail_ms = now_ms();
+                if (fail_ms - silent_fail_at >= 5000) {
+                    silent_fail_at = fail_ms;
+                    LogStatus("сайлент: запись не прошла — %s",
+                        result == Result::invalid ? "команда вне допуска (цель/угол)" :
+                        result == Result::guard_failed ? "хранитель объекта не сошёлся (адреса устарели)" :
+                        "отказ памяти при записи направления");
+                }
             }
             const auto interval = std::chrono::microseconds(command_.recent_shot ? kHotUs : kTickUs);
             wake_.wait_for(lock, interval, [&] {

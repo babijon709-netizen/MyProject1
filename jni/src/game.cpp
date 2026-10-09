@@ -1011,7 +1011,7 @@ static uint64_t resolve_local_player() {
                 s_checked_at = now;
                 const uint64_t fresh = read_local_player_from_static();
                 if (fresh && fresh != cached) {
-                    LogLine("память: локальный игрок сменился 0x%llx -> 0x%llx (кеш был чужим)",
+                    LogStatus("память: локальный игрок сменился 0x%llx -> 0x%llx (кеш был чужим)",
                             (unsigned long long)cached, (unsigned long long)fresh);
                     g_local_player = fresh;
                     return fresh;
@@ -1477,15 +1477,15 @@ static void log_freecam_fail(int reason, uint64_t transform, float dist) {
     if (now - s_last < 2.0) return;
     s_last = now;
     if (dist >= 0.f) {
-        LogLine("фрикам: не включён — мировая позиция не совпала с камерой (трансформ 0x%llx, ближайшее расхождение %.1f м)",
+        LogStatus("фрикам: не включён — мировая позиция не совпала с камерой (трансформ 0x%llx, ближайшее расхождение %.1f м)",
                 (unsigned long long)transform, (double)dist);
         return;
     }
     switch (reason) {
-        case 0: LogLine("фрикам: не включён — камера ещё не найдена"); break;
-        case 1: LogLine("фрикам: не включён — нет трансформа камеры (0x%llx)", (unsigned long long)transform); break;
-        case 2: LogLine("фрикам: не включён — массивы Transform не читаются (0x%llx)", (unsigned long long)transform); break;
-        default: LogLine("фрикам: не включён — локальная матрица камеры не читается (0x%llx)", (unsigned long long)transform); break;
+        case 0: LogStatus("фрикам: не включён — камера ещё не найдена"); break;
+        case 1: LogStatus("фрикам: не включён — нет трансформа камеры (0x%llx)", (unsigned long long)transform); break;
+        case 2: LogStatus("фрикам: не включён — массивы Transform не читаются (0x%llx)", (unsigned long long)transform); break;
+        default: LogStatus("фрикам: не включён — локальная матрица камеры не читается (0x%llx)", (unsigned long long)transform); break;
     }
 }
 
@@ -2116,7 +2116,7 @@ bool esp_freecam_set(bool on) {
         g_freecam_on = false;
         g_freecam_saved_ok = false;
         g_freecam_has_yawpitch = false;
-        LogLine("фрикам: выключен, камера вернулась к телу");
+        LogStatus("фрикам: выключен, камера вернулась к телу");
         return false;
     }
     if (g_pid <= 0 || !g_il2cpp_base || !g_mem.bound()) return false;
@@ -2177,7 +2177,7 @@ bool esp_freecam_set(bool on) {
     g_freecam_fail = 0; g_freecam_fail_dist = dist;   // 0 = порядок
     // Сколько слотов ведём — по логу видно, один набор массивов у камеры или
     // два чередующихся (жалоба «мерицает»): при одном слоте второй записи нет.
-    LogLine("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx, слотов %d",
+    LogStatus("фрикам: включён, старт (%.1f, %.1f, %.1f), трансформ=0x%llx, слотов %d",
             (double)pos.x, (double)pos.y, (double)pos.z,
             (unsigned long long)transform, (int)g_fc_own_n);
     return true;
@@ -3033,17 +3033,17 @@ static void log_look_fail(LookFail f, uint64_t mouse_look, float sens) {
     s_last = now;
     switch (f) {
         case LookFail::noPlayer:
-            LogLine("память: MouseLook не найден — нет игрока");
+            LogStatus("память: MouseLook не найден — нет игрока");
             break;
         case LookFail::wrongPlayer:
-            LogLine("память: MouseLook не найден — адрес игрока не той структуры");
+            LogStatus("память: MouseLook не найден — адрес игрока не той структуры");
             break;
         case LookFail::noObject:
-            LogLine("память: MouseLook не найден — объекта нет (0x%llx)",
+            LogStatus("память: MouseLook не найден — объекта нет (0x%llx)",
                     (unsigned long long)mouse_look);
             break;
         case LookFail::badSens:
-            LogLine("память: MouseLook=0x%llx — чувствительность вне диапазона (%.3f)",
+            LogStatus("память: MouseLook=0x%llx — чувствительность вне диапазона (%.3f)",
                     (unsigned long long)mouse_look, (double)sens);
             break;
         default: break;
@@ -3058,7 +3058,7 @@ static void log_look_wrong_owner(uint64_t mouse_look, uint64_t owner, uint64_t p
     const double now = memio::now_seconds();
     if (now - s_last < 2.0) return;
     s_last = now;
-    LogLine("память: MouseLook=0x%llx чужой — владелец 0x%llx, а не игрок 0x%llx",
+    LogStatus("память: MouseLook=0x%llx чужой — владелец 0x%llx, а не игрок 0x%llx",
             (unsigned long long)mouse_look, (unsigned long long)owner, (unsigned long long)player);
 }
 
@@ -3071,7 +3071,7 @@ static void log_look_not_local(uint64_t player, uint64_t mouse_look) {
     const double now = memio::now_seconds();
     if (now - s_last < 2.0) return;
     s_last = now;
-    LogLine("память: игрок 0x%llx не локальный (isLocalPlayer=0) — MouseLook 0x%llx чужой",
+    LogStatus("память: игрок 0x%llx не локальный (isLocalPlayer=0) — MouseLook 0x%llx чужой",
             (unsigned long long)player, (unsigned long long)mouse_look);
 }
 
@@ -3082,7 +3082,7 @@ static void log_look_wrong_camera(uint64_t mouse_look, float dist) {
     const double now = memio::now_seconds();
     if (now - s_last < 2.0) return;
     s_last = now;
-    LogLine("память: MouseLook=0x%llx не у камеры — m_LookRoot в %.1f м от неё",
+    LogStatus("память: MouseLook=0x%llx не у камеры — m_LookRoot в %.1f м от неё",
             (unsigned long long)mouse_look, (double)dist);
 }
 
@@ -3315,13 +3315,13 @@ static void log_look_cached(int reason, uint64_t mouse_look) {
     if (now - s_last < 5.0 && reason == s_last_reason) return;
     s_last = now; s_last_reason = reason;
     switch (reason) {
-        case 0: LogLine("память: MouseLook=0x%llx взят из кеша — игрок не подтверждён", (unsigned long long)mouse_look); break;
-        case 1: LogLine("память: MouseLook=0x%llx взят из кеша — адрес игрока не той структуры", (unsigned long long)mouse_look); break;
-        case 2: LogLine("память: MouseLook=0x%llx взят из кеша — объект не читается", (unsigned long long)mouse_look); break;
-        case 4: LogLine("память: MouseLook=0x%llx взят из кеша — найденный объект чужой", (unsigned long long)mouse_look); break;
-        case 5: LogLine("память: MouseLook=0x%llx взят из кеша — игрок не локальный", (unsigned long long)mouse_look); break;
-        case 6: LogLine("память: MouseLook=0x%llx взят из кеша — объект не у камеры", (unsigned long long)mouse_look); break;
-        default: LogLine("память: MouseLook=0x%llx взят из кеша — объект чужого класса", (unsigned long long)mouse_look); break;
+        case 0: LogStatus("память: MouseLook=0x%llx взят из кеша — игрок не подтверждён", (unsigned long long)mouse_look); break;
+        case 1: LogStatus("память: MouseLook=0x%llx взят из кеша — адрес игрока не той структуры", (unsigned long long)mouse_look); break;
+        case 2: LogStatus("память: MouseLook=0x%llx взят из кеша — объект не читается", (unsigned long long)mouse_look); break;
+        case 4: LogStatus("память: MouseLook=0x%llx взят из кеша — найденный объект чужой", (unsigned long long)mouse_look); break;
+        case 5: LogStatus("память: MouseLook=0x%llx взят из кеша — игрок не локальный", (unsigned long long)mouse_look); break;
+        case 6: LogStatus("память: MouseLook=0x%llx взят из кеша — объект не у камеры", (unsigned long long)mouse_look); break;
+        default: LogStatus("память: MouseLook=0x%llx взят из кеша — объект чужого класса", (unsigned long long)mouse_look); break;
     }
 }
 
@@ -3518,7 +3518,7 @@ static void log_angles_out_of_range(uint64_t mouse_look, float x, float y) {
     const double now = memio::now_seconds();
     if (now - s_last < 2.0) return;
     s_last = now;
-    LogLine("память: MouseLook=0x%llx — накопитель не angles (%.1f, %.1f)",
+    LogStatus("память: MouseLook=0x%llx — накопитель не angles (%.1f, %.1f)",
             (unsigned long long)mouse_look, (double)x, (double)y);
 }
 
@@ -3577,7 +3577,7 @@ bool esp_mem_aim_read_angles(float& x_deg, float& y_deg) {
         }
     }
     if (mouse_look != g_look_addr_logged.exchange(mouse_look))
-        LogLine("память: MouseLook=0x%llx углы=(%.2f, %.2f) чувствительность=%.3f инверсия=%d гироскоп=%d источник=%d игрок=0x%llx локальный=%d до камеры=%.1f м",
+        LogStatus("память: MouseLook=0x%llx углы=(%.2f, %.2f) чувствительность=%.3f инверсия=%d гироскоп=%d источник=%d игрок=0x%llx локальный=%d до камеры=%.1f м",
                 (unsigned long long)mouse_look, angles[0], angles[1],
                 (double)rd<float>(mouse_look + MOUSE_LOOK_SENSITIVITY_OFFSET),
                 (int)(rd<uint8_t>(mouse_look + MOUSELOOK_INVERT) != 0),
@@ -7746,7 +7746,7 @@ static void note_player_pipeline_health(bool player_data_ok) {
         // A live camera/local-memory pipeline proves that the process binding is
         // still valid. Reattaching here used to drop every memory feature and
         // the FOV circle in a loop. Keep retrying player-only resolvers instead.
-        LogLine("визуал: player pipeline не восстановился — продолжаю локальный recovery без reattach");
+        LogStatus("визуал: player pipeline не восстановился — продолжаю локальный recovery без reattach");
     }
 }
 

@@ -400,7 +400,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                                     s_bot_noesp_skipped;
         if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
             s_at = now;
-            LogLine("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
+            LogStatus("аим: выбор — игроков %lu (ботов %lu, из них без есп %lu), пропущено: союзники %lu, мёртвые %lu, без костей %lu (нет скелета %lu, не спроецировались %lu), вне экрана %lu, вне круга %lu",
                     s_seen_boxes, s_seen_bots, s_bot_noesp_skipped, s_ally_skipped, s_dead_skipped,
                     s_no_skeleton + s_bones_not_projected, s_no_skeleton, s_bones_not_projected,
                     s_offscreen_skipped, s_out_of_fov);
@@ -654,7 +654,7 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
     // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
     if (best.id != pick.lastId)
-        LogLine("аим: цель 0x%llx здоровье=%.1f respawning=%d смерть=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
+        LogStatus("аим: цель 0x%llx здоровье=%.1f respawning=%d смерть=%d дистанция=%.1f м костей=%d высота=%.2f м ширина=%.2f м",
                 (unsigned long long)best.id, (double)best.health,
                 (int)best.respawning, (int)best.death_flag, (double)best.world_dist,
                 (int)best.skel_bones, (double)best.skel_up, (double)best.skel_flat);
