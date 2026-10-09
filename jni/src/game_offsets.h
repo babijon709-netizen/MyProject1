@@ -1,8 +1,8 @@
 #pragma once
 #include <cstdint>
 
-// Release profile, build 11946.
-// Source: dump11946.7z (dump.cs + libil2cpp.so), 31704 types.
+// Release profile, build 11949.
+// Source: dump11949.7z (dump.cs + libil2cpp.so), 31802 types.
 // Managed fields are resolved from dump.cs; TypeInfo RVAs are inner slots from
 // AArch64 adrp/ldr references and R_AARCH64_RELATIVE addends.
 
@@ -80,19 +80,19 @@ inline constexpr float MAX_PLAYER_DISTANCE    = 300.0F;
 // мусор 0xa000b409/0xa000b3fd (это «таблица типов v2» протектора S16 из
 // малых целых, НЕ слоты классов). Перекрёстное подтверждение: PM-PLH = 0x30,
 // как и в прошлом рабочем билде (0xD9C5310/0xD9C52E0).
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDCFACB8; // release 11946: outer 0xD9AB580 -> R_AARCH64_RELATIVE addend; PlayerManager self slot
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDD7A0B0; // release 11949: Oxide.PlayerManager TypeInfo slot
 // Cysharp.Threading.Tasks.PlayerLoopHelper; re-derived from this release ELF.
-inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDCFAC88; // release 11946: outer 0xD9AA3E0 -> addend
+inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDD7A078; // release 11949 TypeInfo slot
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_ACTIVE_LIST = 0x08; // activePlayerList
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = 0x10; // clientPlayerList
 
 
-// Managed-object layouts verified for release 11946.
+// Managed-object layouts verified for release 11949.
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS_OFFSET = 0xB8;
 inline constexpr std::uint64_t PLAYERLOOPHELPER_RUNNERS = 0x30;
 inline constexpr std::uint64_t LOOPRUNNER_ITEMS = 0x38;
 inline constexpr std::uint64_t LOOPRUNNER_TAIL = 0x30;
-// Две раскладки промисов UniTask.Delay, обе сверены с дампами 11946/11943
+// Две раскладки промисов UniTask.Delay, обе сверены с дампами 11949/11943
 // (поля в объекте: 0x10 nextNode, дальше тройка). Именование историческое:
 // «голый» набор полей — у DelayIgnoreTimeScalePromise (unscaled-таймер),
 // «SCALED» набор — у обычного DelayPromise (ждёт Time.deltaTime).
@@ -103,16 +103,15 @@ inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN = 0x1C;   // DelayPr
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED = 0x20;    // DelayPromise.elapsed
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = 0x18; // DelayPromise.initialFrame
 // TypeInfo-слоты классов промисов для быстрого подбора (см.
-// fast_loot_memory.h): release 11946, найдены по релокациям из
-// UniTask.DelayPromise.Create и сверены с TypeInfoPointers дампера.
+// fast_loot_memory.h): release 11949, сверены с TypeInfoPointers дампера.
 // _ALT — запасной слот: в бете пара классов опознаётся по имени в рантайме
 // из двух кандидатов (см. game_offsets_beta.h), в релизе запасной не нужен.
-inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA = 0xDD0AA68;     // Cysharp...UniTask.DelayPromise
+inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA = 0xDD893A8;     // Cysharp...UniTask.DelayPromise
 inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA_ALT = 0;
-inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA = 0xDD0AA60;      // Cysharp...UniTask.DelayIgnoreTimeScalePromise
+inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA = 0xDD893A0;      // Cysharp...UniTask.DelayIgnoreTimeScalePromise
 inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA_ALT = 0;
 inline constexpr std::uint64_t FPHITSCAN_CONFIG = 0x130;
-// Ballistic sources shared by release 11946 and beta 11943.
+// Ballistic sources shared by release 11949 and beta 11943.
 inline constexpr std::uint64_t FPBOW_PROJECTILE_PREFAB = 0x150;
 inline constexpr std::uint64_t FPCROSSBOW_CONFIG = 0x138;
 inline constexpr std::uint64_t FPCROSSBOW_PROJECTILE_PREFAB = 0x148;
@@ -162,24 +161,24 @@ inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 // HitscanWeaponConfig, рядом с dispersionConfig 0x68). Гасятся в ноль
 // вертикальные Мин/Макс (Vector2) и боковые дельты; оригиналы «нет отдачи»
 // хранит и возвращает при выключении/смене ствола (проверено по дампам
-// 11946 и 11943 — раскладка одна).
+// 11949 и 11943 — раскладка одна).
 inline constexpr std::uint64_t HITSCANCONFIG_RECOIL_CONFIG = 0x70;
 inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = 0x18;   // Vector2
 inline constexpr std::uint64_t RECOILCONFIG_MAX_RECOIL = 0x20;   // Vector2
 inline constexpr std::uint64_t RECOILCONFIG_MIN_SIDE = 0x28;
 inline constexpr std::uint64_t RECOILCONFIG_MAX_SIDE = 0x2C;
 
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDCF6068; // release 11946: outer 0xD9A96F8 -> addend
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDD753D8; // release 11949: Oxide.GameControllerBase TypeInfo slot
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
 
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
-// Effective release-client lastSavedPosition. The generated dump reports
-// 0x1D4, but the shipped combat client stores this block four bytes earlier;
-// device validation and the previous live resolver both select 0x1D0.
-inline constexpr std::uint64_t PLAYER_POSITION  = 0x260;  // было 0x1F4; лог 19:52 — перепроверка со сверкой по kcc подтвердила 0x260 (8 игроков из 9), 0x1F4 отдавал invalid-world каждому. Дальше по списку 0x1D0/0x1C8; после обновления игры поле уедет — тогда профиль снова отстанет, и его подхватит revalidate_dead_direct_position
+// PlayerManager.lastSavedPosition. Совпадает в release 11949 и beta 11943;
+// 0x260 в этих билдах — ссылка fz, поэтому чтение Vector3 оттуда всегда
+// сваливалось на более тяжёлый KCC/model path.
+inline constexpr std::uint64_t PLAYER_POSITION = 0x1F4;
 inline constexpr std::uint64_t PLAYER_CHARACTER_MODEL = 0x150; // characterModel (UnityEngine.GameObject)
 inline constexpr std::uint64_t PLAYER_NICKLABEL = 0x130; // nicklabel (class ij, was wK)
 // PlayerManager "uWc" (0x220, was LLI): the real human-readable display name (confirmed
@@ -319,9 +318,9 @@ inline constexpr std::uint64_t MODELINFO_HEAD                = 0x20;
 // 11946 and beta 11943 dumps; the class name at runtime is unqualified.
 inline constexpr std::uint64_t NPC_BRAIN_MODEL_INFO          = 0x148;
 // CharacterAnimation.playerModelInfo (0x30) and PlayerInventoryData
-// .playerModelInfo (0x20) are the two ways to reach PlayerModelInfo.
+// .playerModelInfo (0x18) are the two ways to reach PlayerModelInfo.
 inline constexpr std::uint64_t CHARANIM_PLAYER_MODEL_INFO = 0x30;
-inline constexpr std::uint64_t INVDATA_PLAYER_MODEL_INFO  = 0x20;
+inline constexpr std::uint64_t INVDATA_PLAYER_MODEL_INFO  = 0x18; // release 11949: PlayerInventoryData.playerModelInfo
 // Il2CppClass: name at 0x10, namespace at 0x18 (used to identify PlayerWeapon).
 inline constexpr std::uint64_t IL2CPP_CLASS_NAME      = 0x10;
 inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
@@ -476,7 +475,7 @@ inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = 0x20;
 // and the R_AARCH64_RELATIVE addend of that entry is the .data slot below.
 // Verified by the static-field access pattern in NetworkClient's own methods:
 //   ldr x0,[x19] ; ldr x8,[x0,#0xb8] (static_fields) ; ldr x0,[x8,#0x28] (spawned)
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDCF9F40; // release 11946: outer 0xD9A9638 -> addend
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDD79368; // release 11949: Mirror.NetworkClient TypeInfo slot
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED      = 0x30;  // было 0x28; перед spawned вставлен handlers(+0x28)
 
 // System.Collections.Generic.Dictionary<uint, NetworkIdentity> (this BCL has no
@@ -565,8 +564,8 @@ inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_
 // за ~16 шагов (~0.3 с @60fps). Остальное окно — запас на следующий билд:
 // сканер крутится циклично и валидирует кандидатов по полной структуре
 // (статик List<Self> + Cycle + sane-дата), так что ложных срабатываний нет.
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDD00000;
-inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDD20000; // release 11946 qY slot: 0xDD02158
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDD70000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_END   = 0xDD90000; // release 11949 eN slot: 0xDD80FE8
 inline constexpr std::uint64_t TOD_SKY_CYCLE      = 0x40; // TOD_Sky.Cycle
 inline constexpr std::uint64_t TOD_CYCLE_HOUR     = 0x10; // TOD_CycleParameters.Hour
 inline constexpr std::uint64_t TOD_CYCLE_DAY      = 0x14;
