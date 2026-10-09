@@ -16,6 +16,7 @@
 #include "process.h"
 #include "hud.h"
 #include "Android_touch/TouchHelperA.h"
+#include "manes_aim_source.h"
 #include <algorithm>
 #include <cmath>
 #include <time.h>
@@ -24,12 +25,13 @@ static constexpr float kAimTouchDefX = 0.74f;
 static constexpr float kAimTouchDefY = 0.50f;
 // +1: finger moving right turns the camera right. Flip to -1 if the view moves away from the target.
 static constexpr float kAimDirSign   = 1.f;
+// Speed slider (g_state.gun_str, 1..10, higher = faster): 1 = 25% of the error per frame at 60 fps, 10 = 100%.
+static constexpr float kAimFracMin   = 0.25f;
+static constexpr float kAimFracMax   = 1.00f;
 // Max finger travel from its origin before the finger is lifted and re-placed.
 static constexpr float kAimFingerRadiusPx = 220.f;
 // Error below this is ignored (px).
 static constexpr float kAimDeadbandPx     = 1.5f;
-// Min pull fraction per frame, so a high smoothness value still converges.
-static constexpr float kAimPullMin        = 0.05f;
 
 // Inactive reasons, decoded in AimMemoryDiag().inactive.
 enum : int {
@@ -127,8 +129,14 @@ static bool PickTarget(const std::vector<EspBox>& boxes, float sw, float sh,
     return found;
 }
 
+static float AimSpeedFraction() {
+    float sm = g_state.gun_str;
+    if (!(sm >= 1.f)) sm = 1.f;
+    if (sm > 10.f) sm = 10.f;
+    return kAimFracMin + (sm - 1.f) / 9.f * (kAimFracMax - kAimFracMin);
+}
+
 static void UpdateAimTouch(float dt) {
-    (void)dt;
     static float s_fx = 0.f, s_fy = 0.f;
     static float s_ox = 0.f, s_oy = 0.f;
 
@@ -184,7 +192,7 @@ static void UpdateAimTouch(float dt) {
         return;
     }
 
-    const float pull = std::clamp(1.f / std::max(1.f, cfg::aim::smoothness), kAimPullMin, 1.f);
+    const float pull = manes_aim_source::frame_gain(AimSpeedFraction(), dt);
     s_fx += errX * pull * kAimDirSign;
     s_fy += errY * pull * kAimDirSign;
 
