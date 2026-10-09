@@ -4287,6 +4287,10 @@ bool     g_go_name_offset_valid = false;
 static double   g_go_name_retry_at = 0.0;   // mono_seconds: не раньше этого момента
 static int      g_skeleton_builds_this_frame = 0; // heavy rescans: max 1 per frame
 
+// Сиды для широкого перебора раскладки (см. resolve_skeleton_layout): сэмпл и
+// его дети, набранные один раз, чтобы перебор не начинался заново каждый кадр.
+static std::vector<uint64_t> g_skeleton_layout_seeds;
+
 // Слот characterModel в PlayerManager: вшитое значение переезжает между
 // сборками игры. 0 — «ещё не искали»; найденное смещение запоминается на всю
 // сессию (раскладка полей одна для всех игроков и не меняется до обновления).
@@ -4299,7 +4303,6 @@ static bool     g_character_model_probing = false;
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
 void esp_set_aim_bones_enabled(bool enabled) { g_aim_bones_requested = enabled; }
 
-#include "logfile.h"             // файловый лог диагностики на устройстве
 // ---- Лог конвейера костей -------------------------------------------------
 // Отказы здесь повторяются каждый кадр на каждого игрока, поэтому в файл
 // уходит одна строка на правило не чаще раза в period секунд: лог читаем,
@@ -4404,16 +4407,30 @@ static uint64_t discover_character_model_offset(uint64_t player) {
     return 0;
 }
 
+// Когда вшитый слот перестал работать, перебор повторяется не чаще раза в
+// kModelProbePeriod: игроки появляются и исчезают, и у свежего объекта поля
+// могут быть ещё не заполнены.
+static double   g_character_model_retry_at = 0.0;
+static constexpr double kModelProbePeriod = 5.0;
+
 static uint64_t character_model_offset(uint64_t player) {
     if (!player) return go_active::PLAYER_CHARACTER_MODEL;
-    if (!g_character_model_probed && !g_character_model_probing && g_go_name_offset_valid) {
-        g_character_model_probing = true;
-        g_character_model_probed = true;      // пробуем ровно один раз
-        g_character_model_offset = model_root_at_offset(player, go_active::PLAYER_CHARACTER_MODEL)
-                                       ? go_active::PLAYER_CHARACTER_MODEL
-                                       : discover_character_model_offset(player);
-        g_character_model_probing = false;
-    }
+    // 1) вшитый слот: на своей сборке игры он работает у всех игроков.
+    if (model_root_at_offset(player, go_active::PLAYER_CHARACTER_MODEL))
+        return go_active::PLAYER_CHARACTER_MODEL;
+    // 2) найденный перебором для другой сборки.
+    if (g_character_model_offset && g_character_model_offset != go_active::PLAYER_CHARACTER_MODEL &&
+        model_root_at_offset(player, g_character_model_offset))
+        return g_character_model_offset;
+    // 3) перебор: только когда имена уже читаются (по именам костей и ищем).
+    if (g_character_model_probing || !g_go_name_offset_valid) return go_active::PLAYER_CHARACTER_MODEL;
+    const double now = mono_seconds();
+    if (now < g_character_model_retry_at) return go_active::PLAYER_CHARACTER_MODEL;
+    g_character_model_retry_at = now + kModelProbePeriod;
+    g_character_model_probing = true;
+    g_character_model_probed = true;
+    g_character_model_offset = discover_character_model_offset(player);
+    g_character_model_probing = false;
     return g_character_model_offset ? g_character_model_offset
                                     : go_active::PLAYER_CHARACTER_MODEL;
 }
@@ -4661,9 +4678,58 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
             }
         }
     }
-    skeleton_log(2, 10.0, "раскладка иерархии не резолвится (сэмпл 0x%llx, "
-                          "общая раскладка %d, перебор идёт %d)",
+    // Вшитые комбинации не сошлись: на части сборок данные иерархии лежат не
+    // по 0x38/0x40 и не по 0x18/0x20 (на одном из устройств имя GameObject
+    // тоже оказалось не на вшитом 0x48, а сырым указателем на 0x50 — того же
+    // порядка различие). Запускаем широкий перебор — тот самый, что учит
+    // раскладку по игрокам; он закрывает data 0x10..0x200 и все пары массивов
+    // 0x00..0x100 с обоими вариантами разыменования.
+    // Перебор дорогой, а вызываемся мы раз в кадр на каждого игрока: гоним его
+    // не чаще раза в 2 с. Заодно обновляем протухшие сиды — первый сэмпл мог
+    // быть рваным (игрок как раз вышел), и на нём перебор бы не сошёлся.
+    static double s_sweep_at = -1e9;
+    static double s_seeds_at = -1e9;
+    const double sweep_now = memio::now_seconds();
+    if (g_skeleton_layout_seeds.empty() || sweep_now - s_seeds_at >= 30.0) {
+        // Сид — сам сэмпл и его дети: перебору нужны минимум две точки на
+        // расстоянии, иначе оценка «несколько позиций с разбросом» не пройдёт.
+        g_skeleton_layout_seeds.clear();
+        s_seeds_at = sweep_now;
+        g_skeleton_layout_seeds.push_back(sample_transform);
+        uint64_t children[64];
+        const int count = read_transform_children(sample_transform, children, 64);
+        for (int i = 0; i < count && g_skeleton_layout_seeds.size() < 6; ++i)
+            if (children[i]) g_skeleton_layout_seeds.push_back(children[i]);
+    }
+    if (g_skeleton_layout_seeds.size() >= 2 && sweep_now >= s_sweep_at) {
+        s_sweep_at = sweep_now + 2.0;
+        size_t position_count = 0, candidate_count = 0;
+        const bool learned = discover_layout_from_native_transforms(g_skeleton_layout_seeds,
+                                                                   position_count, candidate_count);
+        skeleton_log(13, 10.0, "широкий перебор раскладки: сидов %d, найдено=%d, "
+                               "кандидатов %llu, позиций %llu, перебор идёт %d",
+                     (int)g_skeleton_layout_seeds.size(), (int)learned,
+                     (unsigned long long)candidate_count, (unsigned long long)position_count,
+                     (int)layout_scan_in_progress());
+        if (learned && g_transform_hierarchy_layout_valid) {
+            g_skeleton_layout = g_transform_hierarchy_layout;
+            g_skeleton_layout_valid = true;
+            g_skeleton_layout_anchor = sample_transform;
+            g_skeleton_layout_seeds.clear();
+            skeleton_log_layout("найдена широким перебором", g_skeleton_layout);
+            return true;
+        }
+    }
+    // И это не помогло — в лог сырые поля сэмпла: по ним видно, где на этой
+    // сборке лежат данные иерархии и индекс.
+    skeleton_log(14, 20.0, "раскладка не резолвится; сэмпл 0x%llx: "
+                           "[+0x38]=0x%llx [+0x40]=%d [+0x18]=0x%llx [+0x20]=%d; "
+                           "общая раскладка %d, перебор идёт %d",
                  (unsigned long long)sample_transform,
+                 (unsigned long long)rd_ptr(sample_transform + 0x38),
+                 rd<int32_t>(sample_transform + 0x40),
+                 (unsigned long long)rd_ptr(sample_transform + 0x18),
+                 rd<int32_t>(sample_transform + 0x20),
                  (int)g_transform_hierarchy_layout_valid, (int)layout_scan_in_progress());
     return false;
 }
@@ -4700,6 +4766,24 @@ uint64_t native_component_transform(uint64_t native_component) {
     uint64_t transform = rd_ptr(pairs + COMPONENT_PAIR_PTR);
     if (!transform || rd_ptr(transform + COMPONENT_GAMEOBJECT) != go) return 0;
     return transform;
+}
+
+// Мягкая проверка «это нативный Transform» в отличие от
+// skeleton_transform_ptr_valid(): Transform не обязан быть компонентом[0]
+// своего GameObject. Признак — GameObject действительно держит этот компонент
+// в первой четвёрке, а обратная ссылка компонента смотрит на него же.
+static bool transform_belongs_to_gameobject(uint64_t transform) {
+    if (!transform) return false;
+    const uint64_t go = rd_ptr(transform + COMPONENT_GAMEOBJECT);
+    if (!go) return false;
+    const uint64_t pairs = rd_ptr(go + GAMEOBJECT_COMPONENT_ARRAY);
+    if (!pairs) return false;
+    for (int i = 0; i < 4; ++i) {
+        if (rd_ptr(pairs + (uint64_t)i * GAMEOBJECT_COMPONENT_STRIDE + COMPONENT_PAIR_PTR) != transform)
+            continue;
+        return true;
+    }
+    return false;
 }
 
 // player -> KCC. kccReference (0xB0) may be an obfuscated wrapper, and its
@@ -4805,20 +4889,54 @@ static bool build_skeleton_from_ragdoll(uint64_t player, CachedSkeleton& skeleto
 
     // Collect the ragdoll bone transforms. Elements are BodyPart objects
     // (transform at +0x10) but tolerate a plain Component[] as well.
+    //
+    // Вшитое смещение поля transform в BodyPart переезжает между сборками: на
+    // одном из устройств все 11 элементов m_Bones дали ноль валидных
+    // трансформов при живом массиве. Тогда смещение ищется перебором полей
+    // первого элемента (у настоящего Transform компонент[0] его GameObject —
+    // он сам) и запоминается на сессию: раскладка класса одна для всех.
+    static uint64_t g_bodypart_transform_offset = RAGDOLL_BODYPART_TRANSFORM;
     constexpr int kMaxSet = 24;
     uint64_t set_transform[kMaxSet];
     int set_count = 0;
-    for (int32_t i = 0; i < element_count && set_count < kMaxSet; ++i) {
-        uint64_t element = rd_ptr(bones_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
-        if (!element) continue;
-        uint64_t transform = managed_object_native(rd_ptr(element + RAGDOLL_BODYPART_TRANSFORM));
-        if (!skeleton_transform_ptr_valid(transform))
-            transform = native_component_transform(managed_object_native(element));
-        if (!skeleton_transform_ptr_valid(transform)) continue;
-        bool duplicate = false;
-        for (int j = 0; j < set_count; ++j)
-            if (set_transform[j] == transform) { duplicate = true; break; }
-        if (!duplicate) set_transform[set_count++] = transform;
+    auto collect = [&](uint64_t transform_offset) {
+        set_count = 0;
+        for (int32_t i = 0; i < element_count && set_count < kMaxSet; ++i) {
+            uint64_t element = rd_ptr(bones_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
+            if (!element) continue;
+            uint64_t transform = managed_object_native(rd_ptr(element + transform_offset));
+            if (!skeleton_transform_ptr_valid(transform))
+                transform = native_component_transform(managed_object_native(element));
+            if (!skeleton_transform_ptr_valid(transform)) continue;
+            bool duplicate = false;
+            for (int j = 0; j < set_count; ++j)
+                if (set_transform[j] == transform) { duplicate = true; break; }
+            if (!duplicate) set_transform[set_count++] = transform;
+        }
+    };
+    collect(g_bodypart_transform_offset);
+    if (set_count == 0 && g_bodypart_transform_offset == RAGDOLL_BODYPART_TRANSFORM) {
+        // Перебором ищем поле transform в первом живом элементе.
+        uint64_t element = 0;
+        for (int32_t i = 0; i < element_count && !element; ++i)
+            element = rd_ptr(bones_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
+        for (uint64_t offset = 0x08; offset <= 0x40 && element; offset += 8) {
+            if (offset == RAGDOLL_BODYPART_TRANSFORM) continue;
+            uint64_t candidate = managed_object_native(rd_ptr(element + offset));
+            if (!transform_belongs_to_gameobject(candidate)) continue;
+            collect(offset);
+            if (set_count > 0) {
+                g_bodypart_transform_offset = offset;
+                LogLine("скелет: поле transform в BodyPart найдено перебором: +0x%llx "
+                        "(вшитый +0x%llx не дал ни одного трансформа)",
+                        (unsigned long long)offset,
+                        (unsigned long long)RAGDOLL_BODYPART_TRANSFORM);
+                break;
+            }
+        }
+        if (set_count == 0)
+            skeleton_log(15, 30.0, "рагдолл: ни в одном из 11 элементов нет трансформа "
+                                   "(перебор полей 0x08..0x40 тоже пуст)");
     }
     if (pelvis) {
         bool present = false;
@@ -7579,6 +7697,9 @@ void esp_reset() {
     // Смещение имени и слот модели переучиваются заново: они найдены по
     // живой памяти прошлого процесса и к новому не относятся.
     g_character_model_offset = 0; g_character_model_probed = false;
+    g_character_model_retry_at = 0.0;
+    // Сиды были набраны в прошлом процессе: их адреса в новом ничего не значат.
+    g_skeleton_layout_seeds.clear();
     g_frame_vp_valid = false; g_frame_local_valid = false;
     reset_marker_caches();
 }
@@ -9166,9 +9287,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     (int)g_skeleton_layout.indices_indirect,
                     g_go_name_offset_valid ? "найдено" : "НЕ НАЙДЕНО",
                     (unsigned long long)character_model_offset(0),
-                    g_character_model_probed
-                        ? (g_character_model_offset ? "перебор" : "перебор не дал")
-                        : "вшитый",
+                    g_character_model_offset ? "перебор" : "вшитый",
                     g_mem.reads_total(), g_mem.read_fails_total(), g_mem.cut_total(),
                     g_mem.junk_total(), g_mem.tagged_total());
         }
