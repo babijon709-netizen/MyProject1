@@ -24,8 +24,6 @@ void ConfigUpdate(int idx);
 void ConfigLoad(int idx, bool announce = true);
 void ConfigLoadLast();
 void ConfigDelete(int idx);
-// Строка в benzware.log (каталог CfgDir()): время, tid, текст. Редко — на смену состояния.
-void DiagLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // Восстановление из самого свежего конфига (при старте, до загрузки конфига).
 void RestoreLang();
 void RestoreAccent();

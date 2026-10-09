@@ -12,7 +12,6 @@
 #include "str.h"               // XS(): строки интерфейса зашифрованы в бинарнике
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
-#include "config.h"              // DiagLog
 #include "manes_aim_source.h"
 #include <algorithm>
 #include <cmath>
@@ -214,28 +213,6 @@ struct AimPick {
 static int  s_adsState  = -1;   // 1 в прицеле, 0 нет, -1 режим выключен
 static int  s_adsSource = 0;    // 1 Aim, 2 isAiming, 0 не подтвердилась
 
-static const char* AimReasonText(int r) {
-    switch (r) {
-        case 0: return "активен";
-        case 1: return "аим выключен в меню";
-        case 2: return "процесс не подключён";
-        case 4: return "калибровка зоны";
-        case 6: return "фрикам";
-        case 7: return "только в прицеле, не ADS";
-        case 8: return "неверный размер экрана";
-        default: return "?";
-    }
-}
-
-// Пишем в журнал только смену причины: на каждый кадр журнал не нужен.
-static int s_aimReasonLogged = -1;
-static void AimReasonSet(int r, int* why) {
-    if (why) *why = r;
-    if (r == s_aimReasonLogged) return;
-    s_aimReasonLogged = r;
-    DiagLog("аим: %s (причина %d)", AimReasonText(r), r);
-}
-
 static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     g_aimActive = false;
     // Calibration owns the physical touch used to select a screen point.
@@ -255,12 +232,13 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
         // Причину пишем по первому же невыполненному условию: в логе 15:57
         // «объект=0» шёл в 219 кадрах из 319, и без расшифровки это выглядело
         // как «потерялся MouseLook», хотя проверка объекта даже не запускалась.
-        int reason = 7;
-        if (!g_state.aim_touch)          reason = 1;
-        else if (!g_esp_attached)        reason = 2;
-        else if (g_calibMode != 0)       reason = 4;
-        else if (g_state.freecam_on)     reason = 6;
-        AimReasonSet(reason, why);
+        if (why) {
+            if (!g_state.aim_touch)                  *why = 1;
+            else if (!g_esp_attached)                *why = 2;
+            else if (g_calibMode != 0)               *why = 4;
+            else if (g_state.freecam_on)             *why = 6;
+            else                                     *why = 7;
+        }
         return false;
     }
 
@@ -275,10 +253,9 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
         sw = (float) displayInfo.height; sh = (float) displayInfo.width;
     }
     if (sw < 100.f || sh < 100.f) {
-        AimReasonSet(8, why);
+        if (why) *why = 8;
         return false;
     }
-    AimReasonSet(0, why);
     return true;
 }
 

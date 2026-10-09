@@ -1,6 +1,5 @@
 #include "process.h"
 #include "game.h"
-#include "config.h"              // DiagLog
 
 #include <atomic>
 #include <chrono>
@@ -166,25 +165,18 @@ void start_attach_thread() {
                     g_target_pid = attached_pid;
                     g_esp_attached = true;
                     g_alive_check_failures = 0;
-                    DiagLog("аттач: pid %d (%s)", (int)attached_pid,
-                            g_target_by_package ? "пакет" : "переименован");
                 }
             } else {
                 const bool same_process = pid_still_game(g_target_pid);
                 bool memory_alive = true;
                 if (same_process) {
-                    if (esp_alive_check()) {
-                        if (g_alive_check_failures) DiagLog("аттач: esp_alive_check снова ок (был сбой %d)", g_alive_check_failures);
-                        g_alive_check_failures = 0;
-                    } else {
+                    if (esp_alive_check()) g_alive_check_failures = 0;
+                    else {
                         ++g_alive_check_failures;
-                        DiagLog("аттач: esp_alive_check не прошёл (%d/%d)", g_alive_check_failures, kAliveCheckFailureLimit);
                         memory_alive = g_alive_check_failures < kAliveCheckFailureLimit;
                     }
                 }
                 if (!same_process || !memory_alive) {
-                    DiagLog("аттач: отцепляюсь от pid %d (%s)", (int)g_target_pid,
-                            same_process ? "память недоступна" : "процесс пропал");
                     // Process death is immediate; isolated /proc/<pid>/mem EIO
                     // failures are tolerated. They are common under load and
                     // must not make every memory feature blink off together.

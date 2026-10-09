@@ -20,8 +20,6 @@
 #include <fstream>
 #include <string>
 #include <sys/inotify.h>
-#include <sys/syscall.h>
-#include <cstdarg>
 #include <sys/stat.h>
 #include <time.h>
 #include <utime.h>
@@ -44,34 +42,6 @@ int         g_configToDelete = -1;
 char        g_loadedConfigName[64] = {};
 float       g_cfgLoadAnim[kMaxConfigs] = {};
 int         g_cfgLoadedIdx = -1;
-
-void DiagLog(const char* fmt, ...) {
-    static constexpr off_t kDiagMaxBytes = 8 * 1024 * 1024;
-    const std::string path = std::string(kCfgDir) + XS("benzware.log");
-    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
-    if (fd < 0) return;
-    struct stat st{};
-    if (fstat(fd, &st) == 0 && st.st_size > kDiagMaxBytes) { close(fd); return; }
-    char body[384];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(body, sizeof(body), fmt, ap);
-    va_end(ap);
-    struct timespec ts{};
-    clock_gettime(CLOCK_REALTIME, &ts);
-    struct tm tmv{};
-    localtime_r(&ts.tv_sec, &tmv);
-    char line[512];
-    int n = snprintf(line, sizeof(line), "%02d:%02d:%02d.%03ld [t%ld] %s\n",
-                     tmv.tm_hour, tmv.tm_min, tmv.tm_sec, ts.tv_nsec / 1000000,
-                     (long)syscall(SYS_gettid), body);
-    if (n > 0) {
-        if (n >= (int)sizeof(line)) n = (int)sizeof(line) - 1;
-        ssize_t w = write(fd, line, (size_t)n);
-        (void)w;
-    }
-    close(fd);
-}
 
 static std::string CfgPath(const char* name) {
     return std::string(kCfgDir) + name + XS(".cfg");
@@ -624,9 +594,6 @@ static void LoadCfgByName(const char* name, bool announce) {
     for (int i = 0; i < g_configCount; i++)
         if (strcmp(g_configs[i].name, name) == 0) { g_cfgLoadedIdx = i; break; }
     for (int i = 0; i < kMaxConfigs; i++) g_cfgLoadAnim[i] = 0.f;
-    DiagLog("конфиг: загружен %s, аим=%d режим=%d тач=(%.3f,%.3f) зона=%d",
-            name, (int)g_state.aim_touch, g_state.aim_mode,
-            g_state.aim_tx, g_state.aim_ty, (int)g_state.aim_scope_only);
     if (announce) {
         ShowToast(XS("Конфиг загружен"));
         PlaySound(SND_SUCCESS);
@@ -640,8 +607,7 @@ void ConfigLoad(int idx, bool announce) {
 
 void ConfigLoadLast() {
     std::string name;
-    if (!CfgPickNewest(kCfgDir, name)) { DiagLog("конфиг: .cfg в каталоге нет"); return; }
-    DiagLog("конфиг: старт, загружаю %s", name.c_str());
+    if (!CfgPickNewest(kCfgDir, name)) return;
     LoadCfgByName(name.c_str(), false);
 }
 
