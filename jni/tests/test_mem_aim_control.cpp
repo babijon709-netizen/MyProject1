@@ -75,5 +75,26 @@ int main() {
     assert(pending_part(0.f, 1.f) == 0.f);
     assert(pending_part(std::numeric_limits<float>::infinity(), 0.f) == 0.f);
 
+    // Квантователь пальца: среднее совпадает с желаемым, остаток ограничен.
+    {
+        float carry = 0.f;
+        float sum = 0.f;
+        for (int i = 0; i < 1000; ++i) sum += quantize_units(0.3f, carry);
+        assert(std::fabs(sum - 300.f) <= 1.f);
+        assert(carry >= -0.5f && carry <= 0.5f);
+    }
+    {
+        float carry = 0.f;
+        float sum = 0.f;
+        for (int i = 0; i < 1000; ++i) sum += quantize_units(-0.7f, carry);
+        assert(std::fabs(sum + 700.f) <= 1.f);
+    }
+    {
+        float carry = 0.f;
+        assert(quantize_units(0.f, carry) == 0.f && carry == 0.f);
+        assert(quantize_units(3.f, carry) == 3.f && carry == 0.f);
+        assert(quantize_units(std::numeric_limits<float>::quiet_NaN(), carry) == 0.f);
+    }
+
     return 0;
 }

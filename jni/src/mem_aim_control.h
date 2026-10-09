@@ -51,4 +51,18 @@ inline float pending_part(float applied, float observed) {
     return p;
 }
 
+// Error-diffusion quantiser for the touch finger. The finger moves in whole
+// device units; a sub-unit remainder is carried into the next tick instead of
+// being rounded away. Plain rounding turns a 0.3-unit/tick wish into a stall
+// followed by a 1-unit jump, which is the choppy look.
+inline float quantize_units(float wantUnits, float& carry) {
+    if (!std::isfinite(wantUnits) || !std::isfinite(carry)) { carry = 0.f; return 0.f; }
+    const float total = wantUnits + carry;
+    const float whole = std::round(total);
+    carry = total - whole;
+    if (carry >  0.5f) carry =  0.5f;
+    if (carry < -0.5f) carry = -0.5f;
+    return whole;
+}
+
 }  // namespace mem_aim_control

@@ -280,6 +280,11 @@ static constexpr int   kAimBoneSlot = 1;
 // упреждать нечего, а сдвиг точки вперёд по ходу цели выглядел бы как
 // «прицел убегает от головы» (жалоба 19.09). 0.055 — просьба 24.09.
 static constexpr float kAimVelocityLead = 0.055f;
+// Touch: постоянная времени фильтра цели (короче мемори — упреждение уже есть)
+// и порог «камера ответила», град. 0.02 прятал мелкие шаги и вешал ack-такт
+// на 0.25 с — отсюда рывки.
+static constexpr float kTouchTargetTau = 0.04f;
+static constexpr float kTouchCamMovedDeg = 0.005f;
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
 static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
 static unsigned long s_bones_not_projected = 0; // скелет есть, кости не легли на экран
@@ -705,11 +710,20 @@ static void UpdateAimTouch(float dt) {
     // Счётчики однонаправленного остатка в полосе дрожи (см. константы выше).
     static int s_streakYaw = 0, s_streakPitch = 0;
     static AimPick pick;
+    // Sub-unit finger remainder carried between ticks (see quantize_units).
+    static float s_carryX = 0.f, s_carryY = 0.f;
+    // Smoothed absolute target angle (see mem_aim_control.h).
+    static mem_aim_control::AngleFilter s_touchFilt;
+    // Camera angle integrated from the box flow; used only when there is no
+    // real camera axis (the flight model path).
+    static float s_flowCamYaw = 0.f, s_flowCamPitch = 0.f;
 
     float sw = 0.f, sh = 0.f;
     if (!AimBegin(dt, sw, sh)) {
         AimReleaseFinger(s_fingerDown);
         s_haveLast = false; pick.reset();
+        s_touchFilt.reset(); s_carryX = s_carryY = 0.f;
+        s_flowCamYaw = s_flowCamPitch = 0.f;
         s_lostFrames = 0; s_holdFrames = 0;
         s_trackYaw.reset(); s_trackPitch.reset();
         s_flight.clear();
@@ -733,6 +747,7 @@ static void UpdateAimTouch(float dt) {
         if (++s_lostFrames > 6) {
             AimReleaseFinger(s_fingerDown);
             s_haveLast = false; pick.reset();
+            s_touchFilt.reset(); s_carryX = s_carryY = 0.f;
             s_trackYaw.reset(); s_trackPitch.reset();
             // Палец отпущен — заказанное игра уже не отработает. Обнуляем
             // полёт, иначе возврат цели начнётся со старой оценкой.
@@ -746,6 +761,7 @@ static void UpdateAimTouch(float dt) {
     }
     s_lostFrames = 0;
     if (pick.switched) {
+        s_touchFilt.reset(); s_carryX = s_carryY = 0.f;
         s_haveLast = false;                      // do not learn gain across a target switch
         s_trackYaw.reset(); s_trackPitch.reset();  // и оценку коэффициента тоже
         // Заказы «в полёте» и их поглощение принадлежат прошлой цели.
@@ -754,6 +770,39 @@ static void UpdateAimTouch(float dt) {
         s_stallYaw = s_stallPitch = 0.f;
         s_havePrevRaw = false;
         s_streakYaw = s_streakPitch = 0;
+    }
+
+    // Camera angles for this tick. Read before the target filter, which needs
+    // them to turn the relative offset into an absolute angle.
+    float camYaw = 0.f, camPitch = 0.f;
+    const bool haveCam = esp_aim_camera_angles(camYaw, camPitch);
+
+    // ---- target filter ----
+    // The bone point jitters every tick (breathing, animation). Without
+    // smoothing that jitter goes straight into the finger, which then moves
+    // back and forth. Filter the ABSOLUTE angle (camera + offset): a relative
+    // offset would lag behind every camera move we make.
+    {
+        bool  filtOk = false;
+        float refYaw = 0.f, refPitch = 0.f;   // camera angle the offset is relative to
+        if (haveCam) {
+            refYaw = camYaw; refPitch = camPitch; filtOk = true;
+        } else {
+            float fy = 0.f, fp = 0.f;
+            if (aim_camera_flow(fy, fp)) {
+                s_flowCamYaw   = WrapDeg180(s_flowCamYaw + fy);
+                s_flowCamPitch += fp;
+                refYaw = s_flowCamYaw; refPitch = s_flowCamPitch; filtOk = true;
+            }
+        }
+        if (filtOk) {
+            s_touchFilt.update(WrapDeg180(refYaw + best.yaw), refPitch + best.pitch,
+                               dt, kTouchTargetTau);
+            best.yaw   = WrapDeg180(s_touchFilt.yaw - refYaw);
+            best.pitch = s_touchFilt.pitch - refPitch;
+        } else {
+            s_touchFilt.reset();
+        }
     }
 
     // ---- оценка коэффициента по реакции прицела ----
@@ -774,14 +823,12 @@ static void UpdateAimTouch(float dt) {
     // 0.072 -> 0.347 -> -0.072 (лог 15.09.2026, со сменой знака) и слал палец на
     // 160 px в край экрана. Нет настоящей оси — аим идёт запасным коэффициентом
     // без обучения, ровно как в сборке, где он вёл идеально.
-    float camYaw = 0.f, camPitch = 0.f;
-    const bool haveCam = esp_aim_camera_angles(camYaw, camPitch);
     float camYawDelta = 0.f, camPitchDelta = 0.f;
     bool camMoved = false;
     if (haveCam && s_haveLast) {
         camYawDelta = WrapDeg180(camYaw - s_lastCamYaw);
         camPitchDelta = camPitch - s_lastCamPitch;
-        camMoved = fabsf(camYawDelta) > 0.02f || fabsf(camPitchDelta) > 0.02f;
+        camMoved = fabsf(camYawDelta) > kTouchCamMovedDeg || fabsf(camPitchDelta) > kTouchCamMovedDeg;
     }
     if (haveCam && s_haveLast && s_fingerDown && camMoved) {
         // Signed gains: a negative value simply means the game inverts that
@@ -1179,6 +1226,7 @@ static void UpdateAimTouch(float dt) {
     if (!s_fingerDown) {
         s_fx = snapGrid(ptX);
         s_fy = snapGrid(ptY);
+        s_carryX = s_carryY = 0.f;
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
@@ -1313,7 +1361,12 @@ static void UpdateAimTouch(float dt) {
     // Move in whole device units so the applied delta is exactly what we
     // measure next frame (gain learning) and the finger never accumulates a
     // hidden sub-unit remainder that later pops out as an unplanned step.
-    float nx = snapGrid(s_fx + dx), ny = snapGrid(s_fy + dy);
+    // Whole device units with the sub-unit remainder carried forward: the
+    // average speed is kept, and slow tracking no longer stalls then jumps.
+    const float stepUnitsX = mem_aim_control::quantize_units(dx * unitsPerPx, s_carryX);
+    const float stepUnitsY = mem_aim_control::quantize_units(dy * unitsPerPx, s_carryY);
+    const float nx = s_fx + stepUnitsX / unitsPerPx;
+    const float ny = s_fy + stepUnitsY / unitsPerPx;
     dx = nx - s_fx; dy = ny - s_fy;
     if (dx == 0.f && dy == 0.f) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
