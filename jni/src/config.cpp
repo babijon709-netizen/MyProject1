@@ -8,6 +8,7 @@
 #include "audio.h"
 #include "lang.h"
 #include "game.h"
+#include "cfg_pick.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -231,30 +232,11 @@ static bool ReadUiTrailer(std::istream& f, CfgUiTrailer& t) {
     return t.magic == kCfgUiMagic && t.version == 1;
 }
 
-// Newest .cfg by mtime, same rule as the ConfigLoadLast() fallback.
+// Единственный источник «текущего» конфига: тот же селектор, что у ConfigLoadLast().
 static std::string NewestCfgPath() {
-    std::vector<std::string> names;
-    if (DIR* d = opendir(kCfgDir)) {
-        while (struct dirent* e = readdir(d)) {
-            std::string fn = e->d_name;
-            if (fn.size() > 4 && fn.substr(fn.size() - 4) == XS(".cfg"))
-                names.push_back(fn);
-        }
-        closedir(d);
-    }
-    std::sort(names.begin(), names.end());
-    std::string best;
-    time_t best_mtime = 0;
-    for (auto& fn : names) {
-        const std::string p = std::string(kCfgDir) + fn;
-        struct stat st{};
-        if (stat(p.c_str(), &st) != 0) continue;
-        if (best.empty() || st.st_mtime >= best_mtime) {
-            best_mtime = st.st_mtime;
-            best = p;
-        }
-    }
-    return best;
+    std::string name;
+    if (!CfgPickNewest(kCfgDir, name)) return {};
+    return CfgPath(name.c_str());
 }
 
 static bool ReadNewestBlob(CfgBlob& s) {
@@ -374,7 +356,10 @@ static void ConfigSaveToPath(const std::string& path) {
     uint8_t buf[sizeof(s)];
     memcpy(buf, &s, sizeof(s));
     XorBuf(buf, sizeof(s));
-    std::ofstream f(path, std::ios::binary);
+    // Пишем во временный файл и переименовываем: прерванная запись не должна
+    // оставить обрезанный .cfg с самым свежим mtime (он бы тихо обнулил аим).
+    const std::string tmp = path + XS(".tmp");
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
     if (f) {
         f.write((char*)buf, sizeof(buf));
         auto extension = viewmodel::encode(g_state.viewmodel);
@@ -390,6 +375,8 @@ static void ConfigSaveToPath(const std::string& path) {
         f.write((char*)extra, sizeof(extra));
         WriteUiTrailer(f);
         f.close();
+        if (f.fail()) remove(tmp.c_str());
+        else rename(tmp.c_str(), path.c_str());
     }
 }
 
@@ -416,9 +403,8 @@ void ConfigUpdate(int idx) {
     PlaySound(SND_SUCCESS);
 }
 
-void ConfigLoad(int idx, bool announce) {
-    if (idx < 0 || idx >= g_configCount) return;
-    std::string path = CfgPath(g_configs[idx].name);
+static void LoadCfgByName(const char* name, bool announce) {
+    std::string path = CfgPath(name);
     std::ifstream f(path, std::ios::binary);
     if (!f) { if (announce) ShowToast(XS("Файл не найден")); return; }
 
@@ -603,8 +589,10 @@ void ConfigLoad(int idx, bool announce) {
         b01(g_state.esp_team); b01(g_state.ui_dark_mode);
     }
     g_darkTheme = g_state.ui_dark_mode;
-    snprintf(g_loadedConfigName, sizeof(g_loadedConfigName), "%s", g_configs[idx].name);
-    g_cfgLoadedIdx = idx;
+    snprintf(g_loadedConfigName, sizeof(g_loadedConfigName), "%s", name);
+    g_cfgLoadedIdx = -1;
+    for (int i = 0; i < g_configCount; i++)
+        if (strcmp(g_configs[i].name, name) == 0) { g_cfgLoadedIdx = i; break; }
     for (int i = 0; i < kMaxConfigs; i++) g_cfgLoadAnim[i] = 0.f;
     if (announce) {
         ShowToast(XS("Конфиг загружен"));
@@ -612,18 +600,15 @@ void ConfigLoad(int idx, bool announce) {
     }
 }
 
+void ConfigLoad(int idx, bool announce) {
+    if (idx < 0 || idx >= g_configCount) return;
+    LoadCfgByName(g_configs[idx].name, announce);
+}
+
 void ConfigLoadLast() {
-    time_t best_mtime = 0;
-    int best = -1;
-    for (int i = 0; i < g_configCount; i++) {
-        struct stat st{};
-        if (stat(CfgPath(g_configs[i].name).c_str(), &st) != 0) continue;
-        if (best < 0 || st.st_mtime >= best_mtime) {
-            best_mtime = st.st_mtime;
-            best = i;
-        }
-    }
-    if (best >= 0) ConfigLoad(best, false);
+    std::string name;
+    if (!CfgPickNewest(kCfgDir, name)) return;
+    LoadCfgByName(name.c_str(), false);
 }
 
 void ConfigDelete(int idx) {
