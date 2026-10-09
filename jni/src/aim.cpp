@@ -13,6 +13,7 @@
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
+#include "aim_priority.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -197,6 +198,9 @@ struct AimPick {
     // — решение «цель потеряна» принимает режим (палец ждёт шесть кадров,
     // память пишет перестаёт сразу).
     bool  switched   = false;
+    // Правило, с которым выбрана цель (-1 = ещё не выбирали). Смена правила
+    // сбрасывает прилипание; reset() его не трогает.
+    int   prioRule   = -1;
 
     void reset() { lastId = 0; lastBone = -1; havePrev = false; switched = false;
                    velYaw = 0.f; velPitch = 0.f; }
@@ -425,6 +429,15 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     if (wantBone < 0 || wantBone > 2) wantBone = 1;
 
     // ---- choose target ----
+    // Смена правила в меню должна работать сразу: иначе залипший на цель
+    // (особенно мемори-лок, который игнорирует score) делает все три правила
+    // одинаковыми до смерти цели. Сбрасываем прилипание один раз на смену.
+    const int rule = aim_priority::valid_rule(g_state.aim_priority) ? g_state.aim_priority : 0;
+    if (pick.prioRule != rule) {
+        if (pick.prioRule >= 0) { pick.lastId = 0; pick.lastBone = -1; }
+        pick.prioRule = rule;
+    }
+
     float bestScore = 1e18f;
     for (const EspBox& b : boxes) {
         // На союзников аим не работает НИКОГДА, а не только пока в визуалах
@@ -529,17 +542,13 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         const float aimTerm = memoryAim ? angleTerm : pixelTerm;
         const bool  haveRange = (t.world_dist >= 0.f) && std::isfinite(t.world_dist);
         const float rangeTerm = haveRange ? (t.world_dist / 120.f) : 1.f;
-        float score;
-        switch (g_state.aim_priority) {
-            case 1:  score = aimTerm; break;
-            case 2:  score = rangeTerm * 4.f + aimTerm * 0.05f; break;
-            default: score = aimTerm + rangeTerm * 0.8f; break;
-        }
+        float score = aim_priority::raw_score(rule, aimTerm, rangeTerm);
         // A memory lock is target-sticky as well as bone-sticky: while its
         // exact selected bone is valid, no newly closer target may steal it.
-        // The lock is released only by an invalid/dead/out-of-range target.
+        // The lock is released only by an invalid/dead/out-of-range target
+        // or by a priority change (see the rule check above the loop).
         if (strictBoneLock && sticky) score = -1.f;
-        else if (sticky) score *= 0.35f;
+        else score = aim_priority::apply_sticky(rule, score, sticky);
         if (score < bestScore) { bestScore = score; best = t; }
     }
 
