@@ -19,6 +19,11 @@ inline float wrap_degrees(float value) {
     return value - 360.0f * std::floor((value + 180.0f) / 360.0f);
 }
 
+// The configured bone is exact; an unavailable slot is not substituted.
+inline int configured_bone_slot(int requested, const bool valid[3]) {
+    return requested >= 0 && requested < 3 && valid[requested] ? requested : -1;
+}
+
 struct AngleFilter {
     float yaw = 0.0f;
     float pitch = 0.0f;

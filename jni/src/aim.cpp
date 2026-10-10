@@ -175,8 +175,8 @@ float AimSensitivityGain(bool& from_game) {
 //
 // The three modes are touch (synthetic camera input), memory (write view input
 // to game memory), and silent (write the shot axis). Touch and memory share FOV,
-// priority, bone lock, and angle filtering; game.cpp predicts with world velocity
-// and weapon ballistics.
+// priority, and angle filtering; all modes use the exact bone selected in the menu.
+// game.cpp predicts with world velocity and weapon ballistics.
 
 // Состояние выбора цели. Держится каждым режимом своим экземпляром: у сайлента
 // и у памяти другая петля (нет пальца, который живёт между кадрами), и мешать
@@ -273,15 +273,10 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
 
 // Select and filter a target angle. A false result means no target; each mode
 // decides when to release its lock. degPerPx lets touch set a pixel-based deadband.
-// Кость, в которую аим ведёт огонь: 0 голова, 1 шея, 2 грудь.
-// Шея — просьба 19.09: попадание по кости головы уходит в нижнюю часть
-// черепа, а шея даёт крупную и устойчивую зону. Переключателя в меню нет,
-// поэтому цель задана константой.
-static constexpr int   kAimBoneSlot = 1;
 
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
 static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
-static unsigned long s_bones_not_projected = 0; // скелет есть, кости не легли на экран
+static unsigned long s_bones_not_projected = 0; // configured bone is unavailable/unprojected
 static unsigned long s_ally_skipped = 0;        // союзников не берём никогда
 static unsigned long s_offscreen_skipped = 0;   // есть кости, но точка вне экрана
 static unsigned long s_out_of_fov = 0;          // точка дальше круга обзора
@@ -420,11 +415,8 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
     // камера крутит и союзников, и трупы, и для оценки поворота они годятся.
     AimUpdateFlow(boxes, sw, sh, camFov);
 
-    // Цель — ШЕЯ (просьба 19.09: «пусть аим стреляет в шею, а не в голову»).
-    // Слоты: 0 голова, 1 шея, 2 грудь. Голова — это сустав у основания черепа,
-    // и попадание в неё «по кости» уходит в нижнюю часть головы; шея даёт
-    // более крупную и устойчивую зону. Переключателя в меню нет, поэтому
-    // значение задано константой: поменять её — поменяется цель аима.
+    // Read the current menu/config selection on every target-selection pass.
+    // Slots are [0] head, [1] neck, and [2] chest.
     int wantBone = g_state.aim_bone;
     if (wantBone < 0 || wantBone > 2) wantBone = 1;
 
@@ -446,26 +438,9 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         // игроков с корректным скелетом, и прицел уезжал на него (19.09).
         if (b.dead) { ++s_dead_skipped; continue; }
         AimTarget t;
-        // Camera-driving modes keep the configured bone exactly. Substituting
-        // another joint moves the target point enough to create visible chatter.
-        const bool strictBoneLock = g_state.aim_mode == AIM_MODE_MEMORY ||
-                                    g_state.aim_mode == AIM_MODE_TOUCH;
-        // Silent mode retains the graceful fallback order.
-        static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
-        int usedBone = -1;
-        if (strictBoneLock) {
-            if (b.aim_valid[wantBone]) usedBone = wantBone;
-        } else if (b.id != 0 && b.id == pick.lastId && pick.lastBone >= 0 && pick.lastBone < 3 &&
-                   b.aim_valid[pick.lastBone]) {
-            // Keep the readable point while this target remains selected: rig
-            // points are sampled independently and switching them causes jitter.
-            usedBone = pick.lastBone;
-        } else {
-            for (int k = 0; k < 3; ++k) {
-                int bi = order[wantBone][k];
-                if (b.aim_valid[bi]) { usedBone = bi; break; }
-            }
-        }
+        const bool holdCurrentTarget = g_state.aim_mode == AIM_MODE_MEMORY ||
+                                       g_state.aim_mode == AIM_MODE_TOUCH;
+        const int usedBone = aim_control::configured_bone_slot(wantBone, b.aim_valid);
         if (usedBone >= 0) {
             t.bone = usedBone;
             t.yaw = b.aim_yaw[usedBone];  t.pitch = b.aim_pitch[usedBone];
@@ -478,11 +453,8 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
                 t.world_valid = t.world_valid && std::isfinite(t.world[i]);
             }
         } else {
-            // По костям цель не нашлась — по просьбе 19.09 («аим полностью по
-            // скелету») в цель такие игроки не идут вовсе: запасная точка от
-            // габаритов бокса давала прицел выше/ниже настоящей головы.
-            // Считаем и РАЗДЕЛЯЕМ причины: «скелета нет вообще» и «скелет есть,
-            // но кости не спроецировались» — лечится это по-разному.
+            // Do not substitute another joint or a box estimate when the
+            // configured bone is unavailable.
             if (b.has_skeleton) ++s_bones_not_projected; else ++s_no_skeleton;
             continue;
         }
@@ -541,7 +513,7 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         // Keep the current target until its exact bone becomes invalid or it
         // leaves the release FOV. This prevents nearby candidates from stealing
         // the lock during ADS/FOV changes.
-        if (strictBoneLock && sticky) score = -1.f;
+        if (holdCurrentTarget && sticky) score = -1.f;
         else if (sticky) score *= 0.35f;
         if (score < bestScore) { bestScore = score; best = t; }
     }

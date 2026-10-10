@@ -7,6 +7,16 @@
 int main() {
     using namespace aim_control;
 
+    const bool all_bones[] = {true, true, true};
+    assert(configured_bone_slot(0, all_bones) == 0);
+    assert(configured_bone_slot(1, all_bones) == 1);
+    assert(configured_bone_slot(2, all_bones) == 2);
+    const bool head_unavailable[] = {false, true, true};
+    assert(configured_bone_slot(0, head_unavailable) == -1);
+    assert(configured_bone_slot(1, head_unavailable) == 1);
+    assert(configured_bone_slot(-1, all_bones) == -1);
+    assert(configured_bone_slot(3, all_bones) == -1);
+
     AngleFilter filter;
     float yaw = 179.0f, pitch = 0.0f;
     filter.update(yaw, pitch, 1.0f / 60.0f, 0.02f);

@@ -8096,7 +8096,7 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
             g_aim_velocity = {};
             g_aim_lead = {};
         }
-        // Цель — шея (как у игроков); голова и грудь — запасные слоты.
+        // Keep bot slots aligned with player slots: [0] head, [1] neck, [2] chest.
         Vec3 head, neck, chest;
         if (src.head_valid) {
             // Точная кость головы модели: без оценки по росту от ног.
@@ -8109,8 +8109,9 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
             chest = feet; chest.y += kBotChestH;
         }
         set_aim_point(box, 0, head, g_frame_vp, g_frame_sw, g_frame_sh);
-        if (!set_aim_point(box, 1, neck, g_frame_vp, g_frame_sw, g_frame_sh)) continue;
+        set_aim_point(box, 1, neck, g_frame_vp, g_frame_sw, g_frame_sh);
         set_aim_point(box, 2, chest, g_frame_vp, g_frame_sw, g_frame_sh);
+        if (!box.aim_valid[0] && !box.aim_valid[1] && !box.aim_valid[2]) continue;
         box.aim_source = src.head_valid ? 1 : 3; // 1 — кость, 3 — оценка от ног
         // Габариты для приличия: ноги и макушка в экранных координатах.
         Vec3 top = feet; top.y += 1.8F;
