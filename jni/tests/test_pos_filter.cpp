@@ -147,6 +147,20 @@ int main() {
         CHECK(o.conf >= 1, "resume confirmed");
         CHECK(dist(m, {319.9F, 64, 11.8F}) < 1e-4F, "resume follows real pos");
     }
+    // 9) Холд не дрейфует: дорисовка по скорости ограничена dt<=0.25 с и
+    //    лимитом 1.5 м, поэтому после 0.25 с позиция стоит на месте.
+    {
+        State s; Obs o;
+        Vec3 p{10, 64, 10};
+        CHECK(step(s, o, p, true, 0.0), "drift seed");
+        Obs o2;
+        Vec3 h{};
+        CHECK(posfilter::filter(s, false, h, Vec3{6, 0, 0}, 0.25, o2), "drift hold 0.25");
+        const float at025 = h.x;
+        CHECK(posfilter::filter(s, false, h, Vec3{6, 0, 0}, 3.0, o2), "drift hold 3s");
+        CHECK(std::fabs(h.x - at025) < 1e-4F, "hold does not drift past 0.25s");
+        CHECK(h.x - 10.F <= posfilter::kPosExtrapolateLimit + 1e-4F, "hold within extrapolate limit");
+    }
     if (failures) { printf("%d FAILURES\n", failures); return 1; }
     printf("ALL POS-FILTER TESTS PASS\n");
     return 0;
