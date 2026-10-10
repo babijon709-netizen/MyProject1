@@ -1,0 +1,37 @@
+name: Global Clear Artifacts
+on: workflow_dispatch
+
+# Удаление артефактов — запись в Actions, дефолтного read-only мало.
+permissions:
+  actions: write
+
+jobs:
+  clear-all-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // Артефакты всего репозитория (все ветки вместе). За один вызов
+            // отдаётся не больше 100 штук, поэтому идём по страницам: иначе
+            // хвост старше первой сотни остаётся лежать и квоту не освобождает.
+            for (let page = 1; ; ++page) {
+              const res = await github.rest.actions.listArtifactsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+                page
+              });
+              const artifacts = res.data.artifacts;
+              if (!artifacts.length) break;
+              console.log(`страница ${page}: артефактов ${artifacts.length}`);
+              for (const art of artifacts) {
+                console.log(`удаляю "${art.name}", ветка ${art.workflow_run.head_branch}, id ${art.id}`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: art.id
+                });
+              }
+              if (artifacts.length < 100) break;
+            }
