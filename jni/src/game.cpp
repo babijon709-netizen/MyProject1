@@ -4243,6 +4243,11 @@ struct CachedSkeleton {
 };
 
 static std::unordered_map<uint64_t, CachedSkeleton> g_skeletons;
+// Сколько чтений съедает каждая фаза конвейера костей. Между двумя сводками
+// накапливается, печатается и обнуляется: видно, где уходят чтения.
+static unsigned long long g_skel_reads_bones = 0;    // данные+индекс каждой кости
+static unsigned long long g_skel_reads_bulk = 0;     // пакетные TRS и родители
+static unsigned long long g_skel_reads_walk = 0;     // обход цепочек и дочитывание
 static bool g_skeleton_enabled = false;
 // The aimbot needs bone positions regardless of the skeleton ESP toggle. Bone
 // resolution is therefore driven by (skeleton ESP || aim requested).
@@ -4299,6 +4304,7 @@ static bool     g_character_model_probed = false;
 // Защита от рекурсии: поиск модели читает имена, а поиск смещения имени сам
 // зовёт skeleton_model_root().
 static bool     g_character_model_probing = false;
+static int      g_character_model_probe_fail = 0;   // промахи перебора: отступ
 
 void esp_set_skeleton_enabled(bool enabled) { g_skeleton_enabled = enabled; }
 void esp_set_aim_bones_enabled(bool enabled) { g_aim_bones_requested = enabled; }
@@ -4426,11 +4432,24 @@ static uint64_t character_model_offset(uint64_t player) {
     if (g_character_model_probing || !g_go_name_offset_valid) return go_active::PLAYER_CHARACTER_MODEL;
     const double now = mono_seconds();
     if (now < g_character_model_retry_at) return go_active::PLAYER_CHARACTER_MODEL;
-    g_character_model_retry_at = now + kModelProbePeriod;
     g_character_model_probing = true;
     g_character_model_probed = true;
     g_character_model_offset = discover_character_model_offset(player);
     g_character_model_probing = false;
+    // Неудача — это не «смещение не там», а «у этого игрока модели нет» (труп,
+    // спектейтор, недосозданный PlayerManager). Перебор читает до 90 полей с
+    // обходом поддерева на каждом, поэтому после промаха отступаем всё дальше:
+    // 5 с -> 20 -> 60 -> 300. Без отступа такие игроки сжирали кадр целиком
+    // (лог 03.10: 500–600 мс на кадре, 783 чтений).
+    const double period = g_character_model_probe_fail == 0 ? kModelProbePeriod
+                        : g_character_model_probe_fail == 1 ? 20.0
+                        : g_character_model_probe_fail == 2 ? 60.0 : 300.0;
+    if (g_character_model_offset) {
+        g_character_model_probe_fail = 0;
+    } else if (g_character_model_probe_fail < 3) {
+        ++g_character_model_probe_fail;
+    }
+    g_character_model_retry_at = now + period;
     return g_character_model_offset ? g_character_model_offset
                                     : go_active::PLAYER_CHARACTER_MODEL;
 }
@@ -4654,7 +4673,10 @@ static bool resolve_skeleton_layout(uint64_t sample_transform) {
         skeleton_log_layout("взята из общего перебора", g_skeleton_layout);
         return true;
     }
-    const uint64_t base_offsets[][2] = {{0x38, 0x40}, {0x18, 0x20}};
+    // 0x38/0x40 — основная пара, 0x18/0x20 — старая, 0x28/0x30 — вариант, на
+    // котором TransformHierarchy лежит в запасном слоте Transform (её подобрал
+    // широкий перебор на сборке из лога 03.10: +0x28 данные, +0x30 индекс).
+    const uint64_t base_offsets[][2] = {{0x38, 0x40}, {0x18, 0x20}, {0x28, 0x30}};
     const uint64_t data_offsets[][2] = {{0x18, 0x20}, {0x08, 0x10}};
     for (const auto& base : base_offsets) {
         for (const auto& offsets : data_offsets) {
@@ -6439,6 +6461,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     // re-parents bones at runtime (Ragdoll.m_BonesToReparent, aim rigs, foot
     // IK), which moves them into a different hierarchy. Never drop a bone for
     // that — group bones by hierarchy data and bulk-read every group.
+    const unsigned long long reads_before_bones = g_mem.reads_total();
     constexpr int kMaxGroups = 4;
     uint64_t group_data[kMaxGroups] = {};
     int32_t  group_max[kMaxGroups] = {};
@@ -6467,6 +6490,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         bone_group[bone] = group;
         if (index > group_max[group]) group_max[group] = index;
     }
+    g_skel_reads_bones += g_mem.reads_total() - reads_before_bones;
     // Liveness: the hips transform no longer resolves => model despawned.
     if (group_count == 0 || bone_index[BONE_HIPS] < 0) {
         if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
@@ -6480,6 +6504,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     uint64_t group_indices[kMaxGroups] = {};
     bool     group_ok[kMaxGroups] = {};
     int      group_read_failed = 0;
+    const unsigned long long reads_before_bulk = g_mem.reads_total();
     for (int g = 0; g < group_count; ++g) {
         int32_t needed = group_max[g] + 1;
         if (needed <= 0 || needed > 8192) continue;
@@ -6503,6 +6528,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         group_indices[g] = indices;
         group_ok[g] = true;
     }
+    g_skel_reads_bulk += g_mem.reads_total() - reads_before_bulk;
     if (group_read_failed) {
         skeleton_log(11, 10.0, "пакетное чтение массивов не удалось: групп %d из %d "
                                "(нужно %d байт TRS, слоты +0x%llx/+0x%llx, косвенно %d/%d)",
@@ -6516,6 +6542,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
 
     int projected = 0;
     int remote_fallbacks = 0;
+    const unsigned long long reads_before_walk = g_mem.reads_total();
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
         Vec3 world{};
         bool have_world = false;
@@ -6558,6 +6585,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         box.bone_valid[bone] = true;
         ++projected;
     }
+    g_skel_reads_walk += g_mem.reads_total() - reads_before_walk;
     if (!projected) {
         skeleton_log(12, 10.0, "ни одна кость не спроецировалась: костей в кэше %d, "
                                "групп %d, отказов чтения массивов %d",
@@ -7698,6 +7726,7 @@ void esp_reset() {
     // живой памяти прошлого процесса и к новому не относятся.
     g_character_model_offset = 0; g_character_model_probed = false;
     g_character_model_retry_at = 0.0;
+    g_character_model_probe_fail = 0;
     // Сиды были набраны в прошлом процессе: их адреса в новом ничего не значат.
     g_skeleton_layout_seeds.clear();
     g_frame_vp_valid = false; g_frame_local_valid = false;
@@ -9269,15 +9298,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     // скольких кости сошлись, плюс счётчики чтений (отказы, метки TBI, мусор).
     {
         static double last_summary = -1e9;
+        static unsigned long long reads_mark = 0;
         const double now = mono_seconds();
+        const double span = (last_summary < -1e8) ? 0.0 : now - last_summary;
         if (now - last_summary >= 10.0) {
             last_summary = now;
             int with_bones = 0;
             for (const EspBox& box : result) if (box.has_skeleton) ++with_bones;
+            const unsigned long long reads_delta = g_mem.reads_total() - reads_mark;
+            const unsigned long long reads_phases =
+                    g_skel_reads_bones + g_skel_reads_bulk + g_skel_reads_walk;
+            const unsigned long long reads_other =
+                    reads_delta > reads_phases ? reads_delta - reads_phases : 0;
             LogLine("скелет: сводка — игроков %d, со скелетом %d; "
                     "раскладка данные +0x%llx индекс +0x%llx матрицы +0x%llx индексы +0x%llx"
                     " косвенно %d/%d; имя GameObject %s; модель +0x%llx (%s); "
-                    "чтений %llu отказов %llu обрывов %llu мусора %llu меток %llu",
+                    "за %.0f с чтений %llu (кости %llu массивы %llu обход %llu прочее %llu) "
+                    "отказов %llu обрывов %llu мусора %llu меток %llu",
                     (int)result.size(), with_bones,
                     (unsigned long long)g_skeleton_layout.data_offset,
                     (unsigned long long)g_skeleton_layout.index_offset,
@@ -9288,8 +9325,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     g_go_name_offset_valid ? "найдено" : "НЕ НАЙДЕНО",
                     (unsigned long long)character_model_offset(0),
                     g_character_model_offset ? "перебор" : "вшитый",
-                    g_mem.reads_total(), g_mem.read_fails_total(), g_mem.cut_total(),
+                    span,
+                    reads_delta, g_skel_reads_bones, g_skel_reads_bulk,
+                    g_skel_reads_walk, reads_other,
+                    g_mem.read_fails_total(), g_mem.cut_total(),
                     g_mem.junk_total(), g_mem.tagged_total());
+            reads_mark = g_mem.reads_total();
+            g_skel_reads_bones = g_skel_reads_bulk = g_skel_reads_walk = 0;
         }
     }
 
