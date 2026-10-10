@@ -1071,25 +1071,13 @@ static void UpdateAimTouch(float dt) {
     const float qYaw   = gainKnownYaw   ? fabsf(gy) * gridPx : 0.f; // deg per device unit
     const float qPitch = gainKnownPitch ? fabsf(gp) * gridPx : 0.f;
 
-    // ---- dead zone ----
-    // Target: ~3 cm at the target's range (well inside a head), but never
-    // tighter than what the input grid can actually reach (0.55 step), and
-    // never wider than 1.5 screen px.
-    float deadBase = degPerPx * 1.5f;
-    if (best.world_dist > 1.f && std::isfinite(best.world_dist)) {
-        float d = atanf(0.03f / best.world_dist) * 180.f / (float)M_PI;
-        if (d < deadBase) deadBase = d;
-    }
-    // Пол мёртвой зоны — ДВА кванта ввода, а не половина. Точка прицела (кость
-    // головы) читается каждый кадр чуть по-разному: дрожь в 1-2 кванта — это
-    // нормальный шум замера, а не движение цели. С полом в половину кванта
-    // контроллер выходил за мёртвую зону на этот шум и гнал палец то влево, то
-    // вправо с частотой кадров («трясёт в разные стороны»). Стенд с шумом замера
-    // +-0.25 град: реверсов пальца 12 -> 2 при мёртвой зоне 0.2 град (два
-    // кванта) и 6 при 0.15.
-    float deadYaw = deadBase, deadPitch = deadBase;
-    if (gainKnownYaw   && deadYaw   < qYaw   * 2.0f) deadYaw   = qYaw   * 2.0f;
-    if (gainKnownPitch && deadPitch < qPitch * 2.0f) deadPitch = qPitch * 2.0f;
+    // Stop inside the tighter of half a screen pixel and a 5 mm target error.
+    // Quantization sets the true lower limit: the nearest representable input is
+    // at most half one touch step away from the bone.
+    const float deadYaw = aim_control::touch_lock_deadband(
+        degPerPx, best.world_dist, gainKnownYaw ? qYaw : 0.0f);
+    const float deadPitch = aim_control::touch_lock_deadband(
+        degPerPx, best.world_dist, gainKnownPitch ? qPitch : 0.0f);
     if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
         // Orders from previous frames continue resolving without new input;

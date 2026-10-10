@@ -54,6 +54,10 @@ int main() {
     assert(touch_response_window(1.0f / 60.0f) == 0.55f);
     assert(touch_response_window(0.1f) == 0.75f);
     assert(touch_response_window(std::numeric_limits<float>::quiet_NaN()) == 0.55f);
+    const float quantum_limited = touch_lock_deadband(0.06f, 100.0f, 0.04f);
+    assert(std::fabs(quantum_limited - 0.02f) < 0.00001f);
+    const float geometry_limited = touch_lock_deadband(0.06f, 100.0f, 0.0f);
+    assert(geometry_limited > 0.0028f && geometry_limited < 0.003f);
     assert(memory_step(0.02f, 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
     assert(memory_step(0.04f, 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
     assert(memory_step(0.08f, 1.0f / 60.0f, 10.0f, 5.0f) > 0.0f);

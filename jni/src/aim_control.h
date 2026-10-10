@@ -80,6 +80,20 @@ inline float touch_response_window(float dt) {
     return std::min(0.75f, std::max(0.55f, dt * 8.0f));
 }
 
+inline float touch_lock_deadband(float degrees_per_pixel, float range_metres,
+                                 float input_quantum_degrees) {
+    float deadband = finite(degrees_per_pixel)
+        ? std::fabs(degrees_per_pixel) * 0.5f
+        : 0.0f;
+    if (range_metres > 1.0f && finite(range_metres)) {
+        const float range_deadband = std::atan(0.005f / range_metres) * 57.2957795f;
+        deadband = deadband > 0.0f ? std::min(deadband, range_deadband) : range_deadband;
+    }
+    if (input_quantum_degrees > 0.0f && finite(input_quantum_degrees))
+        deadband = std::max(deadband, input_quantum_degrees * 0.5f);
+    return deadband;
+}
+
 inline float memory_step(float error_degrees, float dt, float speed,
                          float range_metres) {
     if (!finite(error_degrees)) return 0.0f;
