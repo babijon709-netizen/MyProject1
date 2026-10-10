@@ -5689,10 +5689,8 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
                 if (span > 0.02 && span < 0.5) {
                     const Vec3 v = { (float)(mx / span), (float)(my / span), (float)(mz / span) };
                     const float speed = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-                    if (std::isfinite(speed) && speed < 12.0F) {   // faster than a man can run: a teleport
-                        track.vel.x = track.vel.x * 0.5F + v.x * 0.5F;
-                        track.vel.y = track.vel.y * 0.5F + v.y * 0.5F;
-                        track.vel.z = track.vel.z * 0.5F + v.z * 0.5F;
+                    if (std::isfinite(speed) && speed < 12.0F) {
+                        track.vel = playermotion::blend_velocity(track.vel, v);
                     }
                 }
                 track.vel_ref = position; track.vel_ref_t = now;
@@ -6593,9 +6591,9 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
         }
     }
 
-    if (!ballisticSolved && haveOrigin) {
-        // Legacy drop correction is retained only when weapon ballistics are
-        // unavailable or the target is outside the projectile's reachable arc.
+    // Camera aim must stay on the selected bone when weapon data is missing;
+    // the legacy range-only drop has no velocity or weapon model to justify it.
+    if (!ballisticSolved && haveOrigin && g_state.aim_mode == AIM_MODE_SILENT) {
         const float range = aim_ballistics::length(aim_ballistics::sub(world_in, origin));
         if (aim_ballistics::finite(range) && range > 0.0f)
             world.y -= 0.05F * (range / 20.0F);

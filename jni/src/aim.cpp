@@ -317,6 +317,21 @@ struct AimFlowPrev { unsigned long long id; float cx, cy; };
 static std::vector<AimFlowPrev> s_flowPrev;
 
 static void AimUpdateFlow(const std::vector<EspBox>& boxes, float sw, float sh, float camFov) {
+    static float s_lastVisualYaw = 0.f, s_lastVisualPitch = 0.f;
+    static bool s_haveVisualAngles = false;
+    float visualYaw = 0.f, visualPitch = 0.f;
+    float visualFlowYaw = 0.f, visualFlowPitch = 0.f;
+    const bool haveVisualAngles = esp_camera_angles(visualYaw, visualPitch) &&
+                                  std::isfinite(visualYaw) && std::isfinite(visualPitch);
+    const bool haveVisualFlow = haveVisualAngles && s_haveVisualAngles &&
+        aim_control::camera_flow_delta(visualYaw, visualPitch, s_lastVisualYaw,
+                                       s_lastVisualPitch, visualFlowYaw, visualFlowPitch);
+    if (haveVisualAngles) {
+        s_lastVisualYaw = visualYaw;
+        s_lastVisualPitch = visualPitch;
+    }
+    s_haveVisualAngles = haveVisualAngles;
+
     s_flowValid = false;
     s_flowYawDeg = s_flowPitchDeg = 0.f;
     std::vector<AimFlowPrev> cur;
@@ -363,11 +378,18 @@ static void AimUpdateFlow(const std::vector<EspBox>& boxes, float sw, float sh, 
             }
         }
     }
+    // A frame-angle delta works for input acknowledgement in duels, where box
+    // flow has fewer than three tracks; it is not used to learn touch gain.
+    if (!s_flowValid && haveVisualFlow) {
+        s_flowYawDeg = visualFlowYaw;
+        s_flowPitchDeg = visualFlowPitch;
+        s_flowValid = true;
+    }
     s_flowPrev = std::move(cur);
 }
 
-// Поток этого такта (в градусах). Ложь — оценить не вышло: меньше трёх боксов
-// совпало по id (дуэль 1 на 1, первая пара кадров, все боксы мусорные).
+// Поток этого такта (в градусах). Ложь — не удалось получить сдвиг боксов
+// или угол камеры из кадра.
 static bool aim_camera_flow(float& yawDeg, float& pitchDeg) {
     yawDeg = s_flowYawDeg; pitchDeg = s_flowPitchDeg;
     return s_flowValid;
@@ -582,7 +604,7 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
             pick.filterUsesCamera = haveCamera;
             pick.filterModeSet = true;
         }
-        float timeConstant = g_state.aim_mode == AIM_MODE_MEMORY ? 0.050f : 0.045f;
+        float timeConstant = g_state.aim_mode == AIM_MODE_MEMORY ? 0.050f : 0.060f;
         if (best.world_dist > 0.0f && best.world_dist < 12.0f) timeConstant *= 0.75f;
         if (haveCamera) {
             filteredYaw = WrapDeg180(cameraYaw + filteredYaw);
@@ -692,10 +714,10 @@ static void UpdateAimTouch(float dt) {
         resetRuntime();
         s_wasActive = true;
     }
-    // dt is the overlay cadence, not the game's input cadence; keep enough
-    // time for up to eight slow game frames before issuing another command.
-    const float responseWindow = std::min(0.75f, std::max(0.55f, dt * 8.0f));
-    const float ackWait = std::min(0.75f, std::max(0.55f, dt * 8.0f));
+    // Scale with the observed frame cadence, but do not retain commands for
+    // half a second at normal refresh rates; camera-flow feedback covers duels.
+    const float responseWindow = std::min(0.75f, std::max(0.12f, dt * 8.0f));
+    const float ackWait = std::min(0.75f, std::max(0.10f, dt * 8.0f));
 
     // Точка, из которой аим водит палец: выбирается в меню тапом по экрану
     // (вкладка «Аим», см. g_calibMode == 3). Пока не задана — прежняя позиция
@@ -1372,6 +1394,7 @@ static float mem_axis_step(float err, float dt, float range) {
 
 static void UpdateAimMemory(float dt) {
     static AimPick pick;
+    static int s_missFrames = 0;
     static float s_lastCamYaw = 0.f, s_lastCamPitch = 0.f;
     static bool  s_haveLast = false;
     // Последняя запись в накопитель (в тех же завёрнутых координатах, что
@@ -1384,7 +1407,7 @@ static void UpdateAimMemory(float dt) {
         s_memDiag = AimMemDiag{};
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
-        pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        pick.reset(); s_missFrames = 0; s_haveLast = false; s_haveLastWrite = false;
         return;
     }
     s_memDiag.inactive = 0;
@@ -1397,8 +1420,8 @@ static void UpdateAimMemory(float dt) {
     const bool haveParams = esp_mem_aim_look_params(sens, invert, gyro);
     s_memDiag.params = haveParams;
     if (!haveParams) {
-        // Писать некуда: объекта нет (нет игрока, респавн, смена мира). На тач
-        // НЕ падаем — режим либо работает, либо молчит.
+        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; }
+        s_haveLastWrite = false;
         return;
     }
     s_memDiag.gyro = gyro;
@@ -1411,7 +1434,8 @@ static void UpdateAimMemory(float dt) {
         // Самый молчаливый путь: цель есть, писать нечем, а ни один счётчик
         // не растёт. Без отметки здесь кадр не отличить от «цели не было».
         ++s_memDiag.read_fail;
-        pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; }
+        s_haveLastWrite = false;
         return;
     }
 
@@ -1420,9 +1444,11 @@ static void UpdateAimMemory(float dt) {
     int noTgtWhy = 0;
     if (!AimSelectTarget(sw, sh, dt, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
-        pick.reset(); s_haveLast = false; s_haveLastWrite = false;
+        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; }
+        s_haveLastWrite = false;
         return;
     }
+    s_missFrames = 0;
     s_memDiag.no_target = 0;
     if (pick.switched) {
         // Другая цель: подтверждение прошлой записи и дрейф по прежней кости

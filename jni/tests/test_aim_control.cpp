@@ -42,7 +42,13 @@ int main() {
                           command_yaw, command_pitch);
     assert(command_yaw == 11.0f && command_pitch == 18.0f);
     assert(memory_step(0.02f, 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
-    assert(memory_step(0.2f, 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
+    assert(memory_step(0.04f, 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
+    assert(memory_step(0.08f, 1.0f / 60.0f, 10.0f, 5.0f) > 0.0f);
+
+    float flow_yaw = 0.0f, flow_pitch = 0.0f;
+    assert(camera_flow_delta(-179.0f, 2.0f, 179.0f, 1.0f, flow_yaw, flow_pitch));
+    assert(std::fabs(flow_yaw - 2.0f) < 0.001f && flow_pitch == 1.0f);
+    assert(!camera_flow_delta(90.0f, 0.0f, 0.0f, 0.0f, flow_yaw, flow_pitch));
     const float gentle = memory_step(30.0f, 1.0f / 60.0f, 1.0f, 30.0f);
     const float fast = memory_step(30.0f, 1.0f / 60.0f, 10.0f, 30.0f);
     const float close = memory_step(30.0f, 1.0f / 60.0f, 10.0f, 5.0f);

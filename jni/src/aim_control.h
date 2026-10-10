@@ -69,6 +69,21 @@ inline void memory_command_angles(float accumulator_yaw, float accumulator_pitch
     out_pitch = wrap_degrees(base_pitch - delta_pitch);
 }
 
+inline bool camera_flow_delta(float yaw, float pitch, float previous_yaw,
+                               float previous_pitch, float& out_yaw, float& out_pitch) {
+    out_yaw = out_pitch = 0.0f;
+    if (!finite(yaw) || !finite(pitch) || !finite(previous_yaw) ||
+        !finite(previous_pitch)) return false;
+    const float yaw_delta = wrap_degrees(yaw - previous_yaw);
+    const float pitch_delta = pitch - previous_pitch;
+    if (std::fabs(yaw_delta) > 30.0f || std::fabs(pitch_delta) > 30.0f ||
+        (std::fabs(yaw_delta) <= 0.02f && std::fabs(pitch_delta) <= 0.02f))
+        return false;
+    out_yaw = yaw_delta;
+    out_pitch = pitch_delta;
+    return true;
+}
+
 inline float memory_step(float error_degrees, float dt, float speed,
                          float range_metres) {
     if (!finite(error_degrees)) return 0.0f;
@@ -76,10 +91,10 @@ inline float memory_step(float error_degrees, float dt, float speed,
     if (dt > 0.1f) dt = 0.1f;
     if (!(speed >= 1.0f)) speed = 1.0f;
     if (speed > 10.0f) speed = 10.0f;
-    float deadband = 0.08f;
+    float deadband = 0.015f;
     if (range_metres > 0.0f && finite(range_metres)) {
-        const float bone_noise = std::atan(0.025f / range_metres) * 57.2957795f;
-        deadband = std::max(deadband, bone_noise);
+        const float bone_tolerance = std::atan(0.004f / range_metres) * 57.2957795f;
+        deadband = std::max(deadband, bone_tolerance);
     }
     if (std::fabs(error_degrees) <= deadband) return 0.0f;
 

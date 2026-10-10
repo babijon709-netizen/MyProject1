@@ -22,6 +22,9 @@ int main() {
     assert(solve(origin, {0.0f, 1.5f, 100.0f}, {5.0f, 0.0f, 0.0f}, {},
                  params, solution));
     assert(solution.direction.x > 0.04f && solution.direction.x < 0.06f);
+    assert(solve(origin, {0.0f, 1.5f, 100.0f}, {-5.0f, 0.0f, 0.0f}, {},
+                 params, solution));
+    assert(solution.direction.x < -0.04f && solution.direction.x > -0.06f);
 
     params.gravity = 1.0f;
     assert(solve(origin, {0.0f, 1.5f, 100.0f}, {}, {}, params, solution));
