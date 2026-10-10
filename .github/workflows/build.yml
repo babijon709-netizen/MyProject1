@@ -1,4 +1,4 @@
-name: Build xvcen
+name: Build benzware.sh
 
 on:
   push:
@@ -63,19 +63,20 @@ jobs:
           test -f "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen"
 
           mkdir -p dist
-          cp "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen" \
-             dist/xvcen-arm64-v8a
+          cp "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen" dist/benzware.sh
+          cp "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen" dist/xvcen-arm64-v8a
+          chmod 755 dist/benzware.sh dist/xvcen-arm64-v8a
 
-          file dist/xvcen-arm64-v8a
-          sha256sum dist/xvcen-arm64-v8a
+          file dist/benzware.sh
+          sha256sum dist/benzware.sh dist/xvcen-arm64-v8a
 
       - name: Release binary
         id: release
-        if: always() && hashFiles('dist/xvcen-arm64-v8a') != ''
+        if: always() && hashFiles('dist/benzware.sh') != ''
         # Бинарник уходит в релиз, а не в артефакт Actions: ассет релиза лежит
         # в хранилище репозитория, которое не зависит от квоты артефактов (она
         # забита и пересчитывается 6-12 ч, отсюда «Failed to CreateArtifact»).
-        # Тег один и тот же, файл перезаписывается --clobber.
+        # Тег один и тот же, файлы перезаписываются --clobber.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -86,12 +87,12 @@ jobs:
               --title "nightly (${GITHUB_REF_NAME})" \
               --notes "Автосборка ветки ${GITHUB_REF_NAME}, коммит ${GITHUB_SHA}" \
               --prerelease
-          gh release upload nightly dist/xvcen-arm64-v8a --clobber
+          gh release upload nightly dist/benzware.sh dist/xvcen-arm64-v8a --clobber
           echo "url=https://github.com/${GITHUB_REPOSITORY}/releases/tag/nightly" >> "$GITHUB_OUTPUT"
-          echo "file=https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/xvcen-arm64-v8a" >> "$GITHUB_OUTPUT"
+          echo "file=https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/benzware.sh" >> "$GITHUB_OUTPUT"
 
       - name: Итог сборки
-        if: always() && hashFiles('dist/xvcen-arm64-v8a') != ''
+        if: always() && hashFiles('dist/benzware.sh') != ''
         run: |
           if [ "${{ steps.release.outcome }}" = "success" ]; then
             echo "релиз  : ${{ steps.release.outputs.url }}"
@@ -99,5 +100,5 @@ jobs:
           else
             echo "::error::релиз nightly не залился — смотри лог шага выше"
           fi
-          sha256sum dist/xvcen-arm64-v8a
-          file dist/xvcen-arm64-v8a
+          sha256sum dist/benzware.sh dist/xvcen-arm64-v8a
+          file dist/benzware.sh
