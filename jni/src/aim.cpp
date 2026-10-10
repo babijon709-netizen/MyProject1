@@ -1466,6 +1466,7 @@ static void UpdateAimMemory(float dt) {
     const bool haveParams = esp_mem_aim_look_params(sens, invert, gyro);
     s_memDiag.params = haveParams;
     if (!haveParams) {
+        if (aimdbg::Enabled()) aimdbg::Line("mem skip reason=no_look_params");
         // Писать некуда: объекта нет (нет игрока, респавн, смена мира). На тач
         // НЕ падаем — режим либо работает, либо молчит.
         return;
@@ -1480,6 +1481,7 @@ static void UpdateAimMemory(float dt) {
         // Самый молчаливый путь: цель есть, писать нечем, а ни один счётчик
         // не растёт. Без отметки здесь кадр не отличить от «цели не было».
         ++s_memDiag.read_fail;
+        if (aimdbg::Enabled()) aimdbg::Line("mem skip reason=read_angles_failed");
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
         return;
     }
@@ -1489,6 +1491,7 @@ static void UpdateAimMemory(float dt) {
     int noTgtWhy = 0;
     if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
+        if (aimdbg::Enabled()) aimdbg::Line("mem skip reason=no_target why=%d", noTgtWhy);
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
         return;
     }
@@ -1537,6 +1540,9 @@ static void UpdateAimMemory(float dt) {
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         ++s_memDiag.on_target;
+        if (aimdbg::Enabled())
+            aimdbg::Line("mem ontarget id=%llu yaw=%.3f pitch=%.3f camYaw=%.3f camPitch=%.3f accX=%.3f accY=%.3f",
+                         (unsigned long long)best.id, best.yaw, best.pitch, camYaw, camPitch, accX, accY);
         return;
     }
 
@@ -1547,8 +1553,16 @@ static void UpdateAimMemory(float dt) {
 
     // Градусы -> накопитель игры: X — «наклон вниз» (вверх — меньше),
     // Y — рысканье (вправо — больше).
+    if (aimdbg::Enabled())
+        aimdbg::Line("mem write id=%llu bone=%d yaw=%.3f pitch=%.3f offYaw=%.4f offPitch=%.4f "
+                     "accX=%.3f accY=%.3f camYaw=%.3f camPitch=%.3f haveCam=%d mismatch=%.3f "
+                     "ack=%d responded=%d switched=%d",
+                     (unsigned long long)best.id, best.bone, best.yaw, best.pitch, offYaw, offPitch,
+                     accX, accY, camYaw, camPitch, (int)haveCam, s_memDiag.mismatch,
+                     (int)s_haveLastWrite, (int)s_memDiag.responded, (int)pick.switched);
     if (!esp_mem_aim_write_angles(writeX, writeY)) {
         ++s_memDiag.fails;
+        if (aimdbg::Enabled()) aimdbg::Line("mem write_failed writeX=%.3f writeY=%.3f", writeX, writeY);
         return;
     }
     ++s_memDiag.writes;
