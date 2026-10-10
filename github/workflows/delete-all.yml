@@ -1,50 +1,14 @@
-name: Global Clear Artifacts
+name: clean artifacts
+
 on:
-  workflow_dispatch:
-  push:
+  schedule:
+    - cron: '0 0 * * *'
 
 jobs:
-  clear-all:
+  clean:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/github-script@v7
+      - name: cleanup
+        uses: glassechidna/artifact-cleaner@master
         with:
-          # Принудительно передаем администраторский токен в библиотеку скрипта
-          github-token: \${{ secrets.API_TOKEN }}
-          script: |
-            let page = 1;
-            let hasMore = true;
-            let totalDeleted = 0;
-
-            console.log("Запуск тотальной очистки через администраторский PAT...");
-
-            while (hasMore) {
-              const res = await github.rest.actions.listArtifactsForRepo({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                per_page: 100,
-                page: page
-              });
-
-              const artifacts = res.data.artifacts;
-              if (artifacts.length === 0) { break; }
-
-              for (const art of artifacts) {
-                try {
-                  console.log(`Удаляю артефакт: ID ${art.id} ("${art.name}")`);
-                  await github.rest.actions.deleteArtifact({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    artifact_id: art.id
-                  });
-                  totalDeleted++;
-                } catch (err) {
-                  console.log(`Ошибка удаления ID ${art.id}: ${err.message}`);
-                }
-              }
-
-              if (artifacts.length === 100) page++;
-              else hasMore = false;
-            }
-            console.log(`Процесс завершен. Удалено объектов: ${totalDeleted}`);
-            
+          minimumAge: 86400 # all artifacts at least one day old
