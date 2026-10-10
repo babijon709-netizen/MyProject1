@@ -574,7 +574,7 @@ class BulletTpWorker {
     bool stopping_ = false;
     std::thread thread_;
     Clock::time_point last_summary_{};
-    uint64_t last_reported_target_id_ = UINT64_MAX;
+    Clock::time_point last_rate_sample_{};
     uint64_t last_scan_bytes_reported_ = 0;
     uint64_t maps_refreshes_ = 0, maps_refresh_failures_ = 0;
 
@@ -592,8 +592,8 @@ class BulletTpWorker {
         const Clock::time_point now = Clock::now();
         if (last_summary_ != Clock::time_point{} && now - last_summary_ < std::chrono::seconds(5))
             return;
-        const double elapsed = last_summary_ == Clock::time_point{} ? 0.0 :
-            std::chrono::duration<double>(now - last_summary_).count();
+        const double elapsed = last_rate_sample_ == Clock::time_point{} ? 0.0 :
+            std::chrono::duration<double>(now - last_rate_sample_).count();
         const bullet_tp::Diagnostics scan = controller_.diagnostics();
         const BulletMemory::Diagnostics memory = memory_.diagnostics();
         const uint64_t scanned_delta = scan.scan_bytes >= last_scan_bytes_reported_
@@ -601,6 +601,7 @@ class BulletTpWorker {
         const double scan_mib_s = elapsed > 0.0
             ? static_cast<double>(scanned_delta) / elapsed / (1024.0 * 1024.0) : 0.0;
         last_summary_ = now;
+        last_rate_sample_ = now;
         last_scan_bytes_reported_ = scan.scan_bytes;
         const long long target_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - request.published_at).count();
@@ -627,7 +628,7 @@ class BulletTpWorker {
             request.frame.enemies, request.frame.bot_candidates,
             request.frame.human_candidates, request.frame.distance_candidates,
             request.frame.world_position_candidates);
-        bullet_tp_log("summary scan maps_ok=%d maps_bytes=%zu refresh=%llu refresh_fail=%llu lines=%zu parse_fail=%zu rw_p=%zu accepted=%zu heap_bytes=%llu file=%zu perms=%zu file_tail=%zu named=%zu size=%zu labels=%s errno=%d cycles=%llu chunks=%llu chunk_fail=%llu bytes=%llu mib_s=%.1f fields=%llu class_ptr=%llu bad_class=%llu identity_checks=%llu identity_accept=%llu identity_reject=%llu unreadable_names=%llu class_mismatch=%llu identity_bad=%llu added=%llu tracked=%zu class=0x%llx active=%d last_candidate=0x%llx",
+        bullet_tp_log("summary scan maps_ok=%d maps_bytes=%zu refresh=%llu refresh_fail=%llu lines=%zu parse_fail=%zu rw_p=%zu accepted=%zu heap_bytes=%llu file=%zu perms=%zu file_tail=%zu named=%zu size=%zu labels=%s errno=%d cycles=%llu chunks=%llu chunk_fail=%llu bytes=%llu mib_s=%.1f fields=%llu class_ptr=%llu bad_class=%llu identity_checks=%llu identity_accept=%llu identity_reject=%llu unreadable_names=%llu class_mismatch=%llu identity_bad=%llu added=%llu tracked=%zu projectile_class=0x%llx last_candidate_class=0x%llx active=%d last_candidate=0x%llx",
             maps_available ? 1 : 0, maps_bytes,
             static_cast<unsigned long long>(maps_refreshes_),
             static_cast<unsigned long long>(maps_refresh_failures_), scan.maps.lines,
@@ -649,7 +650,9 @@ class BulletTpWorker {
             static_cast<unsigned long long>(memory.class_names_mismatch),
             static_cast<unsigned long long>(memory.class_identity_invalid),
             static_cast<unsigned long long>(scan.projectiles_added),
-            scan.tracked_projectiles, static_cast<unsigned long long>(scan.last_class),
+            scan.tracked_projectiles,
+            static_cast<unsigned long long>(scan.projectile_class),
+            static_cast<unsigned long long>(scan.last_class),
             scan.scan_active ? 1 : 0,
             static_cast<unsigned long long>(scan.last_candidate));
         bullet_tp_log("summary apply candidates=%llu class_bad=%llu read_fail=%llu fields_bad=%llu already=%llu write_pairs=%llu current=%llu/%llu previous=%llu/%llu calls=%llu ok=%llu session_reject=%llu gate_reject=%llu transport_fail=%llu last_addr=0x%llx last_reason=%s gate_reason=%s maps_ok=%d map='%s'",
@@ -698,7 +701,7 @@ class BulletTpWorker {
                 maps_refreshes_ = 0;
                 maps_refresh_failures_ = 0;
                 last_summary_ = {};
-                last_reported_target_id_ = UINT64_MAX;
+                last_rate_sample_ = {};
                 last_scan_bytes_reported_ = 0;
                 lock.lock();
                 continue;
@@ -711,10 +714,6 @@ class BulletTpWorker {
 
             const Request request = request_;
             const uint64_t revision = revision_;
-            if (request.target_id != last_reported_target_id_) {
-                last_reported_target_id_ = request.target_id;
-                last_summary_ = {};
-            }
             if (!request.target_id || Clock::now() - request.published_at >
                     std::chrono::milliseconds(150)) {
                 lock.unlock();

@@ -37,7 +37,7 @@ struct Diagnostics {
     uint64_t current_write_attempts = 0, previous_write_attempts = 0;
     uint64_t current_writes_ok = 0, previous_writes_ok = 0, write_pairs_ok = 0;
     uint64_t current_write_failures = 0, previous_write_failures = 0;
-    uint64_t last_candidate = 0, last_class = 0;
+    uint64_t last_candidate = 0, last_class = 0, projectile_class = 0;
     size_t heap_ranges = 0, tracked_projectiles = 0;
     bool scan_active = false, class_known = false;
 };
@@ -356,6 +356,7 @@ public:
         Diagnostics result = diagnostics_;
         result.heap_ranges = scan_ranges_.size();
         result.tracked_projectiles = projectiles_.size();
+        result.projectile_class = projectile_class_;
         result.scan_active = scan_active_;
         result.class_known = projectile_class_ != 0;
         return result;
