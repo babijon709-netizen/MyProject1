@@ -13,6 +13,7 @@
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
+#include "aim_lead.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -624,8 +625,10 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
                     // в тач и поднять его до 0.055 кадра: оно компенсирует трубу
                     // касания и уход цели за время догонки. Кэп 1.5 кадра
                     // оставлен, чтобы не уезжать далеко вперёд по ходу цели.
-                    float k = kAimVelocityLead * (1.f - leadMin / vMag);
-                    if (k > 1.5f) k = 1.5f;
+                    // Разворот цели (сырой прирост против сглаженной скорости)
+                    // режет упреждение вдвое: см. aim_lead.h.
+                    const float rawDot = vYaw * pick.velYaw + vPitch * pick.velPitch;
+                    const float k = aimlead::LeadFrames(kAimVelocityLead, leadMin, vMag, rawDot);
                     best.yaw   += pick.velYaw   * k;
                     best.pitch += pick.velPitch * k;
                 }
