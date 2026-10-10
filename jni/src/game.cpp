@@ -6421,7 +6421,7 @@ void update_aim_ballistics(uint64_t player) {
         projectile_ok = aim_read_projectile(weapon, projectile_offset, false, projectile_read);
 
     if (kind == Kind::None) {
-        static constexpr uint64_t config_candidates[] = {
+        const uint64_t config_candidates[] = {
             FPHITSCAN_CONFIG, FPCROSSBOW_CONFIG, FPROCKETLAUNCHER_CONFIG
         };
         for (uint64_t offset : config_candidates) {
@@ -6429,7 +6429,7 @@ void update_aim_ballistics(uint64_t player) {
                 config_read.params.valid) { config_ok = true; break; }
             config_read = {};
         }
-        static constexpr uint64_t projectile_candidates[] = {
+        const uint64_t projectile_candidates[] = {
             FPBOW_PROJECTILE_PREFAB, FPCROSSBOW_PROJECTILE_PREFAB,
             FPROCKETLAUNCHER_PROJECTILE_PREFAB, FPEXPLOSIVECHARGE_PROJECTILE_PREFAB,
             FPSPEAR_PROJECTILE_PREFAB
