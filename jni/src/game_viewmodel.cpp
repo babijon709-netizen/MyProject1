@@ -10,9 +10,14 @@
 #include "app_state.h"
 #include "farm.h"
 #include "maps_lookup.h"
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cerrno>
 #include <limits>
+#include <mutex>
+#include <thread>
+#include <sys/resource.h>
 #include <cstdio>
 #include <fcntl.h>
 #include <fstream>
@@ -23,10 +28,11 @@
 namespace {
 struct Memory {
     template<class T> bool read(uint64_t address, T& value) {
-        return address >= 0x10000 && g_mem.read_quiet(address, &value, sizeof(value));
+        return address >= 0x10000 && esp_silent_read(address, &value, sizeof(value));
     }
     template<class T> bool write(uint64_t address, const T& value) {
-        return address >= 0x10000 && g_mem.write(address, &value, sizeof(value));
+        return address >= 0x10000 && esp_silent_target(g_pid) &&
+            esp_silent_write(address, &value, sizeof(value));
     }
     uint64_t ptr(uint64_t address) {
         uint64_t p = 0;
@@ -44,7 +50,7 @@ struct Memory {
         // прецедент структурного допуска). Не прочиталось — верим структуре:
         // объект уже пришёл по проверенной цепочке (свой пайплайн игрока или
         // TypeInfo-слот этого релиза). Прочиталось — только точное имя.
-        if (!g_mem.read_quiet(np, n, sizeof(n)) || !g_mem.read_quiet(sp, ns, sizeof(ns))) return true;
+        if (!esp_silent_read(np, n, sizeof(n)) || !esp_silent_read(sp, ns, sizeof(ns))) return true;
         n[63] = ns[63] = 0;
         return std::strcmp(n, name) == 0 && std::strcmp(ns, "Oxide") == 0;
     }
@@ -124,6 +130,16 @@ const std::string* maps_snapshot(bool force) {
     maps_text_at = now;
     if (!maps_text_ok) { maps_text_cache.clear(); return nullptr; }
     return &maps_text_cache;
+}
+
+bool copy_maps_snapshot(pid_t pid, uint64_t module_base, std::string& out) {
+    std::lock_guard<std::recursive_mutex> session_guard(viewmodel_session_mutex());
+    if (pid <= 0 || !module_base || g_pid != pid || g_il2cpp_base != module_base ||
+        !esp_silent_target(pid)) return false;
+    const std::string* snapshot = maps_snapshot(false);
+    if (!snapshot) return false;
+    out = *snapshot;
+    return true;
 }
 
 // Единственные ворота записи в кучу игры: адрес обязан лежать в анонимном
@@ -208,7 +224,7 @@ struct HeapMemory {
     // Диапазонное чтение (пакетные обходы плеер-лупа быстрого подбора):
     // один запрос на непрерывный кусок вместо чтения по элементу.
     bool read_range(uint64_t address, void* out, std::size_t size) {
-        return address >= 0x10000 && size > 0 && g_mem.read_quiet(address, out, size);
+        return address >= 0x10000 && size > 0 && esp_silent_read(address, out, size);
     }
     bool named_klass(uint64_t klass, const char* name, const char* namespaze) {
         if (klass < 0x10000) return false;
@@ -224,7 +240,7 @@ struct HeapMemory {
         // ронял всю цепочку оружия («не применено», «ожидание») — теперь
         // нечитаемое имя допускает объект ПО СТРУКТУРЕ (прецедент —
         // class_identity в game.cpp), а прочитанное сверяется как раньше.
-        if (!g_mem.read_quiet(np,n,nl) || !g_mem.read_quiet(sp,ns,sl)) return true;
+        if (!esp_silent_read(np,n,nl) || !esp_silent_read(sp,ns,sl)) return true;
         if (std::memcmp(ns,namespaze,sl)!=0) return false;
         if (std::memcmp(n,name,nl)==0) return true;
         // Читаемое, но другое имя: принимаем класс-НАСЛЕДНИК (имя содержит
@@ -246,7 +262,7 @@ struct HeapMemory {
         // Type-specific timing offsets must never use the permissive
         // metadata-read fallback used by the legacy object-data chain.
         return np>=0x10000 && sp>=0x10000 && nl<=sizeof(n) && sl<=sizeof(ns) &&
-            g_mem.read_quiet(np,n,nl) && g_mem.read_quiet(sp,ns,sl) &&
+            esp_silent_read(np,n,nl) && esp_silent_read(sp,ns,sl) &&
             std::memcmp(n,name,nl)==0 && std::memcmp(ns,namespaze,sl)==0;
     }
     bool named(uint64_t object, const char* name, const char* namespaze) {
@@ -281,8 +297,8 @@ struct HeapMemory {
         const uint64_t np=memory.ptr(klass+go_active::IL2CPP_CLASS_NAME);
         const uint64_t sp=memory.ptr(klass+go_active::IL2CPP_CLASS_NAMESPACE);
         char ns=1, name[33]{};
-        if (!np || !sp || !g_mem.read_quiet(sp,&ns,1) || ns ||
-            !g_mem.read_quiet(np,name,sizeof(name))) return false;
+        if (!np || !sp || !esp_silent_read(sp,&ns,1) || ns ||
+            !esp_silent_read(np,name,sizeof(name))) return false;
         for (unsigned i=0;i<sizeof(name);++i) {
             if (!name[i]) return i>0;
             const unsigned char c=(unsigned char)name[i];
@@ -292,18 +308,255 @@ struct HeapMemory {
         return false;
     }
     template<class T> bool write_heap(uint64_t address, const T& value) {
-        if (!g_mem.bound() || g_pid<=0) return false;
+        std::lock_guard<std::recursive_mutex> session_guard(viewmodel_session_mutex());
+        if (!g_mem.bound() || g_pid<=0 || g_mem.pid() != g_pid) return false;
         // Чтение и разбор всей /proc/<pid>/maps на КАЖДУЮ запись (а быстрая
         // стрельба и перезарядка пишут до семи полей в кадре) — это сотни
         // килобайт текста и миллисекунды на запись: оверлей вместе с гуи и
         // визуалами вставал именно на этом. Ворота не ослаблены — просто
         // подтверждение отображения кэшируется на kMapsSnapshotTtl, а всё
         // неподтверждённое проверяется по свежесчитанной карте.
-        return heap_gate_allows(address,sizeof(T)) && g_mem.write(address,&value,sizeof(T));
+        return heap_gate_allows(address,sizeof(T)) && esp_silent_write(address,&value,sizeof(T));
     }
 };
 HeapMemory heap_memory;
-bullet_tp::Controller<HeapMemory> bullet_tp_controller(heap_memory);
+
+class BulletMemory {
+    HeapMemory& heap_;
+    std::atomic<bool> enabled_{false}, target_valid_{false};
+    std::atomic<int> desired_pid_{-1}, work_pid_{-1};
+    std::atomic<uint64_t> desired_base_{0}, work_base_{0};
+    std::atomic<uint64_t> desired_generation_{0}, work_generation_{0};
+
+    bool session_valid_locked() const {
+        const int pid = work_pid_.load(std::memory_order_relaxed);
+        const uint64_t base = work_base_.load(std::memory_order_relaxed);
+        const uint64_t generation = work_generation_.load(std::memory_order_relaxed);
+        return enabled_.load(std::memory_order_acquire) &&
+            target_valid_.load(std::memory_order_acquire) && pid > 0 &&
+            pid == desired_pid_.load(std::memory_order_relaxed) &&
+            base == desired_base_.load(std::memory_order_relaxed) &&
+            generation == desired_generation_.load(std::memory_order_relaxed) &&
+            g_pid == pid && g_il2cpp_base == base && esp_silent_target(pid);
+    }
+    bool session_valid() const {
+        if (!enabled_.load(std::memory_order_acquire)) return false;
+        const int pid = work_pid_.load(std::memory_order_relaxed);
+        const uint64_t base = work_base_.load(std::memory_order_relaxed);
+        return target_valid_.load(std::memory_order_acquire) && pid > 0 &&
+            pid == desired_pid_.load(std::memory_order_relaxed) &&
+            base == desired_base_.load(std::memory_order_relaxed) &&
+            work_generation_.load(std::memory_order_relaxed) ==
+                desired_generation_.load(std::memory_order_relaxed) &&
+            esp_silent_target(pid);
+    }
+
+public:
+    explicit BulletMemory(HeapMemory& heap) : heap_(heap) {}
+
+    void set_desired(bool enabled, bool target_valid, int pid, uint64_t base, uint64_t generation) {
+        const bool changed = desired_pid_.load(std::memory_order_relaxed) != pid ||
+            desired_base_.load(std::memory_order_relaxed) != base ||
+            desired_generation_.load(std::memory_order_relaxed) != generation;
+        if (!enabled || changed) enabled_.store(false, std::memory_order_release);
+        desired_pid_.store(pid, std::memory_order_relaxed);
+        desired_base_.store(base, std::memory_order_relaxed);
+        desired_generation_.store(generation, std::memory_order_relaxed);
+        target_valid_.store(enabled && target_valid, std::memory_order_release);
+        if (enabled) enabled_.store(true, std::memory_order_release);
+    }
+
+    void begin_work(int pid, uint64_t base, uint64_t generation) {
+        work_pid_.store(pid, std::memory_order_relaxed);
+        work_base_.store(base, std::memory_order_relaxed);
+        work_generation_.store(generation, std::memory_order_relaxed);
+    }
+
+    bool bound() const { return session_valid(); }
+
+    bool read_range(uint64_t address, void* out, size_t size) {
+        return session_valid() && heap_.read_range(address, out, size);
+    }
+
+    uint64_t object_class(uint64_t object) {
+        return session_valid() ? heap_.object_class(object) : 0;
+    }
+
+    bool exact(uint64_t object, const char* name, const char* namespaze) {
+        std::lock_guard<std::recursive_mutex> session_guard(viewmodel_session_mutex());
+        return session_valid_locked() && heap_.exact(object, name, namespaze);
+    }
+
+    template<class T> bool write_heap(uint64_t address, const T& value) {
+        std::lock_guard<std::recursive_mutex> session_guard(viewmodel_session_mutex());
+        if (!session_valid_locked()) return false;
+        return heap_.write_heap(address, value);
+    }
+};
+
+class BulletTpWorker {
+    using Clock = std::chrono::steady_clock;
+    struct Request {
+        bool enabled = false;
+        int pid = -1;
+        uint64_t module_base = 0;
+        uint64_t target_id = 0;
+        uint64_t generation = 0;
+        bullet_tp::Vec3 target{};
+        Clock::time_point published_at{};
+    };
+
+    BulletMemory memory_;
+    bullet_tp::Controller<BulletMemory> controller_;
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    Request request_{};
+    uint64_t generation_ = 0;
+    uint64_t revision_ = 0;
+    bool stopping_ = false;
+    std::thread thread_;
+
+    bool start_locked() {
+        if (thread_.joinable()) return true;
+        try {
+            thread_ = std::thread([this] { run(); });
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    void run() {
+        // Keep the heap scanner below the render thread's scheduling priority.
+        ::setpriority(PRIO_PROCESS, 0, 10);
+        std::string maps_cache;
+        int maps_pid = -1;
+        uint64_t maps_base = 0;
+        double maps_at = -1e9;
+        uint64_t handled_generation = std::numeric_limits<uint64_t>::max();
+        std::unique_lock<std::mutex> lock(mutex_);
+
+        while (!stopping_) {
+            if (request_.generation != handled_generation) {
+                handled_generation = request_.generation;
+                lock.unlock();
+                controller_.reset();
+                maps_cache.clear();
+                maps_pid = -1;
+                maps_base = 0;
+                maps_at = -1e9;
+                lock.lock();
+                continue;
+            }
+            if (!request_.enabled) {
+                const uint64_t revision = revision_;
+                wake_.wait(lock, [&] { return stopping_ || revision_ != revision; });
+                continue;
+            }
+
+            const Request request = request_;
+            const uint64_t revision = revision_;
+            if (!request.target_id || Clock::now() - request.published_at >
+                    std::chrono::milliseconds(150)) {
+                wake_.wait_for(lock, std::chrono::milliseconds(100), [&] {
+                    return stopping_ || revision_ != revision || !request_.enabled;
+                });
+                continue;
+            }
+            lock.unlock();
+
+            memory_.begin_work(request.pid, request.module_base, request.generation);
+            const double now = memio::now_seconds();
+            if (maps_pid != request.pid || maps_base != request.module_base ||
+                maps_cache.empty() || now < maps_at || now - maps_at >= 1.0) {
+                std::string fresh_maps;
+                if (copy_maps_snapshot(request.pid, request.module_base, fresh_maps)) {
+                    maps_cache.swap(fresh_maps);
+                    maps_pid = request.pid;
+                    maps_base = request.module_base;
+                } else {
+                    maps_cache.clear();
+                    maps_pid = -1;
+                    maps_base = 0;
+                }
+                maps_at = now;
+            }
+            if (!maps_cache.empty()) {
+                controller_.tick(true, request.pid, request.module_base,
+                                 request.target_id, request.target, &maps_cache, now);
+            }
+
+            lock.lock();
+            wake_.wait_for(lock, std::chrono::milliseconds(16), [&] {
+                return stopping_ || !request_.enabled || request_.generation != request.generation ||
+                       revision_ != revision;
+            });
+        }
+
+        lock.unlock();
+        controller_.reset();
+    }
+
+public:
+    explicit BulletTpWorker(HeapMemory& heap) : memory_(heap), controller_(memory_) {}
+
+    ~BulletTpWorker() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+            memory_.set_desired(false, false, -1, 0, ++generation_);
+        }
+        wake_.notify_one();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    void publish(int pid, uint64_t module_base, const EspBulletTpTarget& target) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_ || !start_locked()) return;
+        const bool generation_changed = !request_.enabled || request_.pid != pid ||
+            request_.module_base != module_base;
+        const bool target_changed = request_.target_id != target.id;
+        if (generation_changed) ++generation_;
+        request_.enabled = true;
+        request_.pid = pid;
+        request_.module_base = module_base;
+        request_.target_id = target.id;
+        request_.target = {target.x, target.y, target.z};
+        request_.generation = generation_;
+        request_.published_at = Clock::now();
+        memory_.set_desired(true, target.id != 0, pid, module_base, generation_);
+        if (generation_changed || target_changed) {
+            ++revision_;
+            wake_.notify_one();
+        }
+    }
+
+    void disable() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_ || (!request_.enabled && request_.pid <= 0)) return;
+        ++generation_;
+        request_ = {};
+        request_.pid = -1;
+        request_.generation = generation_;
+        memory_.set_desired(false, false, -1, 0, generation_);
+        ++revision_;
+        wake_.notify_one();
+    }
+
+    void reset() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) return;
+        ++generation_;
+        request_ = {};
+        request_.pid = -1;
+        request_.generation = generation_;
+        memory_.set_desired(false, false, -1, 0, generation_);
+        ++revision_;
+        wake_.notify_one();
+    }
+};
+
+BulletTpWorker bullet_tp_worker(heap_memory);
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
 fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
@@ -488,20 +741,22 @@ std::recursive_mutex& viewmodel_session_mutex() {
 }
 
 void esp_bullet_tp_tick(bool enabled, const EspBulletTpTarget& target) {
-    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     if (!enabled) {
-        bullet_tp_controller.reset();
+        bullet_tp_worker.disable();
         return;
     }
-    if (!g_mem.bound() || g_pid <= 0 || g_mem.pid() != g_pid) {
-        bullet_tp_controller.reset();
-        return;
+    int pid = -1;
+    uint64_t module_base = 0;
+    {
+        std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
+        if (!g_mem.bound() || g_pid <= 0 || g_mem.pid() != g_pid || !g_il2cpp_base) {
+            bullet_tp_worker.disable();
+            return;
+        }
+        pid = g_pid;
+        module_base = g_il2cpp_base;
     }
-    if (!g_il2cpp_base || !target.id) return;
-    const std::string* maps = maps_snapshot(false);
-    if (!maps) return;
-    bullet_tp_controller.tick(true, g_pid, g_il2cpp_base, target.id,
-                              {target.x, target.y, target.z}, maps, memio::now_seconds());
+    bullet_tp_worker.publish(pid, module_base, target);
 }
 
 void esp_viewmodel_reset(bool restore) {
@@ -516,7 +771,7 @@ void esp_viewmodel_reset(bool restore) {
         ;
     if (!no_ballistics_ctl.reset(restore && g_mem.bound()))
         ;
-    bullet_tp_controller.reset();
+    bullet_tp_worker.reset();
     loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
@@ -528,10 +783,10 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     const bool want_fast_fire = g_state.fast_fire;
-    if (!settings.bullet_tp) bullet_tp_controller.reset();
+    if (!settings.bullet_tp) bullet_tp_worker.disable();
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
-        bullet_tp_controller.reset();
+        bullet_tp_worker.disable();
         rapid_fire.reset(false);
         rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         no_recoil_ctl.reset(false);

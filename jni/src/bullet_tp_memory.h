@@ -24,7 +24,7 @@ inline constexpr size_t kChunkSize = 1u << 20;
 inline constexpr size_t kChunkOverlap = (kObjectSpan + 7u) & ~size_t(7u);
 inline constexpr double kScanStepIntervalSeconds = 0.05;
 inline constexpr double kFullScanIntervalSeconds = 0.25;
-inline constexpr size_t kScanChunksPerStep = 2;
+inline constexpr size_t kScanChunksPerStep = 1;
 
 inline bool finite_vec(Vec3 p) {
     return viewmodel::finite(p.x) && viewmodel::finite(p.y) && viewmodel::finite(p.z);

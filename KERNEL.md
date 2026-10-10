@@ -190,7 +190,7 @@ memio::Transport (интерфейс: open/close/read_once/write_once)
 | `jni/src/silent_aim.cpp` | образец фонового потока с доступом через транспорт |
 | `jni/src/fast_loot_memory.h` | быстрый подбор: обход раннеров плеер-лупа UniTask, обнуление 0.35f задержек «Забрать все» (тик из `esp_viewmodel_tick`, память через `HeapMemory`/`g_mem`) |
 | `jni/src/no_recoil_memory.h` | «без отдачи»: гашение амплитуды в ассете `RecoilConfig` хитскан-ствола в руках (6 скаляр), сохранение/возврат оригиналов как у «нет разброса» (тик из `esp_viewmodel_tick`) |
-| `jni/src/bullet_tp_memory.h` | телепорт снарядов: поиск `BulletProjectile` только в ограниченных анонимных `rw-p` heap-регионах из `/proc/<pid>/maps`, по бюджету чанков на существующем пути `esp_get_boxes`; чтение через `g_mem`, запись только через `HeapMemory` и подтверждённые короткоживущие ворота анонимной кучи; кандидат повторно проверяется по классу и полям перед каждой записью |
+| `jni/src/bullet_tp_memory.h`, `game_viewmodel.cpp` | телепорт снарядов: поиск `BulletProjectile` только в ограниченных анонимных `rw-p` heap-регионах из `/proc/<pid>/maps`, по бюджету чанков в worker-потоке; доступ к памяти worker — через `esp_silent_target/read/write`, запись дополнительно проходит `HeapMemory` и короткоживущие ворота анонимной кучи; кандидат повторно проверяется по классу и полям перед каждой записью |
 | `jni/src/stealth.h` | маскировка процесса, unlink/restore бинарника, ptrace-слот |
 | `jni/src/metadata_dump.h` | one-shot CLI `dump`: дамп global-metadata, назначение транспорта + явный pre-bind шаг |
 | `jni/src/skeleton_diag.h` | one-shot CLI `skel`: диагностика скелетов, назначение транспорта + явный pre-bind шаг |

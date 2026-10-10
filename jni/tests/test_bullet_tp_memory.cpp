@@ -135,12 +135,12 @@ void test_scan_is_incremental() {
 
     assert(controller.tick(true, static_cast<int>(kPid), kModuleBase, 0x90000,
                            {10.f, 3.f, 20.f}, &maps, 2.0) == 1);
-    assert(io.range_reads == 3); // two scan chunks and one candidate revalidation
+    assert(io.range_reads == 2); // one scan chunk and one candidate revalidation
     assert(io.exact_calls == 1 && io.writes == 2);
 
     controller.tick(true, static_cast<int>(kPid), kModuleBase, 0x90000,
                     {11.f, 4.f, 21.f}, &maps, 2.016);
-    assert(io.range_reads == 4); // no new scan step before the 50 ms interval
+    assert(io.range_reads == 3); // no new scan step before the 50 ms interval
     assert(io.writes == 4);
 }
 
