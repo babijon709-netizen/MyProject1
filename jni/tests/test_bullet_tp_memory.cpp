@@ -11,6 +11,7 @@ struct FakeIO {
     std::vector<uint8_t> memory = std::vector<uint8_t>(0x10000);
     unsigned writes = 0;
     unsigned exact_calls = 0;
+    uint64_t last_exact_address = 0;
     unsigned range_reads = 0;
     bool is_bound = true;
 
@@ -34,6 +35,7 @@ struct FakeIO {
     uint64_t object_class(uint64_t address) { return get<uint64_t>(address); }
     bool exact(uint64_t address, const char* name, const char* namespaze) {
         ++exact_calls;
+        last_exact_address = address;
         return address == projectile &&
             std::strcmp(name, bullet_tp::kClassName) == 0 &&
             std::strcmp(namespaze, bullet_tp::kNamespace) == 0;
@@ -137,6 +139,18 @@ void test_controller_uses_io_and_tracks_candidates() {
     assert(io.writes == 4);
 }
 
+void test_rejects_unaligned_class_pointer() {
+    FakeIO io;
+    install_projectile(io, io.projectile, 0x70003, {1.f, 2.f, 3.f}, {0.5f, 2.f, 3.f});
+    bullet_tp::Controller<FakeIO> controller(io);
+    controller.tick(true, static_cast<int>(kPid), kModuleBase, 0x90000,
+                    {10.f, 3.f, 20.f}, &kMaps, 1.5);
+    const auto diagnostics = controller.diagnostics();
+    assert(io.last_exact_address != io.projectile && io.writes == 0);
+    assert(diagnostics.invalid_class_pointers >= 1);
+    assert(diagnostics.projectiles_added == 0 && diagnostics.tracked_projectiles == 0);
+}
+
 void test_scan_is_incremental() {
     FakeIO io;
     io.memory.resize(0x500000);
@@ -206,6 +220,7 @@ int main() {
     test_offsets_and_samples();
     test_heap_range_filter();
     test_controller_uses_io_and_tracks_candidates();
+    test_rejects_unaligned_class_pointer();
     test_scan_is_incremental();
     test_scan_budget_caps_small_ranges();
     test_config_v7_compatibility();

@@ -316,7 +316,8 @@ struct HeapMemory {
     ClassIdentityResult exact_result(uint64_t object, const char* name, const char* namespaze) {
         if (object < 0x10000) return ClassIdentityResult::Invalid;
         const uint64_t klass = memory.ptr(object);
-        if (klass < 0x10000) return ClassIdentityResult::Invalid;
+        if (klass < 0x10000 || (klass & (alignof(void*) - 1)) != 0)
+            return ClassIdentityResult::Invalid;
         const uint64_t np = memory.ptr(klass + go_active::IL2CPP_CLASS_NAME);
         const uint64_t sp = memory.ptr(klass + go_active::IL2CPP_CLASS_NAMESPACE);
         char n[96]{}, ns[96]{};

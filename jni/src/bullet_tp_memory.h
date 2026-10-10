@@ -238,7 +238,7 @@ template<class IO> class Controller {
             if (seen_.find(address) != seen_.end()) continue;
 
             const uint64_t klass = io_.object_class(address);
-            if (klass < 0x10000) {
+            if (klass < 0x10000 || (klass & (alignof(void*) - 1)) != 0) {
                 ++diagnostics_.invalid_class_pointers;
                 continue;
             }
