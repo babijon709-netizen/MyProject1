@@ -69,27 +69,13 @@ jobs:
           file dist/xvcen-arm64-v8a
           sha256sum dist/xvcen-arm64-v8a
 
-      - name: Upload binary
-        id: upload
-        uses: actions/upload-artifact@v4
-        # Квота хранилища артефактов — не причина ронять сборку: бинарник уже
-        # собран и проверен (test -f + sha256 выше), заливка только его
-        # выгружает. Перезапись и короткий срок держат расход квоты в одном
-        # артефакте: каждая сборка не копится поверх предыдущих.
-        continue-on-error: true
-        with:
-          name: xvcen-arm64-v8a
-          path: dist/xvcen-arm64-v8a
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 3
-
       - name: Release binary
         id: release
         if: always() && hashFiles('dist/xvcen-arm64-v8a') != ''
-        # Ассеты релиза лежат в другом хранилище, а не в квоте артефактов
-        # Actions, — то есть доступны сразу, не дожидаясь пересчёта раз в
-        # 6-12 ч. Тег один и тот же, файл перезаписывается --clobber.
+        # Бинарник уходит в релиз, а не в артефакт Actions: ассет релиза лежит
+        # в хранилище репозитория, которое не зависит от квоты артефактов (она
+        # забита и пересчитывается 6-12 ч, отсюда «Failed to CreateArtifact»).
+        # Тег один и тот же, файл перезаписывается --clobber.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -102,22 +88,16 @@ jobs:
               --prerelease
           gh release upload nightly dist/xvcen-arm64-v8a --clobber
           echo "url=https://github.com/${GITHUB_REPOSITORY}/releases/tag/nightly" >> "$GITHUB_OUTPUT"
+          echo "file=https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/xvcen-arm64-v8a" >> "$GITHUB_OUTPUT"
 
       - name: Итог сборки
         if: always() && hashFiles('dist/xvcen-arm64-v8a') != ''
         run: |
-          if [ "${{ steps.upload.outcome }}" = "success" ]; then
-            echo "артефакт залит: xvcen-arm64-v8a"
-          else
-            # continue-on-error не красит джоб, но строка CreateArtifact в логе
-            # остаётся и читается как провал сборки. Пишем прямо: бинарник
-            # собран, не залит только артефакт, и это квота, а не код.
-            echo "::warning::артефакт Actions не залит (квота, пересчёт 6-12 ч) —"
-            echo "::warning::бинарник берём из релиза, ссылка ниже."
-          fi
           if [ "${{ steps.release.outcome }}" = "success" ]; then
-            echo "релиз: ${{ steps.release.outputs.url }}"
+            echo "релиз  : ${{ steps.release.outputs.url }}"
+            echo "скачать: ${{ steps.release.outputs.file }}"
           else
             echo "::error::релиз nightly не залился — смотри лог шага выше"
           fi
           sha256sum dist/xvcen-arm64-v8a
+          file dist/xvcen-arm64-v8a
