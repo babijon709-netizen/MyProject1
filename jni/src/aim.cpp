@@ -14,6 +14,7 @@
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
 #include "aim_lead.h"
+#include "aim_debug.h"         // отладочный лог: флаг aim_debug в каталоге конфигов
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -659,6 +660,13 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         g_aim_pulse_at.store(now, std::memory_order_relaxed);
     }
     g_aim_hold_at.store(now, std::memory_order_relaxed);
+    if (aimdbg::Enabled()) {
+        aimdbg::Line("pick id=%llu bone=%d switched=%d yaw=%.3f pitch=%.3f dist=%.1f "
+                     "velYaw=%.4f velPitch=%.4f degPerPx=%.4f havePrev=%d",
+                     (unsigned long long)best.id, best.bone, (int)pick.switched,
+                     best.yaw, best.pitch, best.dist, pick.velYaw, pick.velPitch,
+                     degPerPx, (int)pick.havePrev);
+    }
     pick.lastId = best.id; pick.lastBone = best.bone;
     return true;
 }
@@ -892,6 +900,19 @@ static void UpdateAimTouch(float dt) {
     s_camMovedPrev = camMoved;
     if (s_ackDisabled > 0.f) s_ackDisabled -= dt;
     const bool ackGate = (s_ackDisabled <= 0.f);
+    if (aimdbg::Enabled()) {
+        // err — то, что контроллер хочет догнать; finger — текущая позиция пальца;
+        // gy/gp — коэффициенты, которыми делится err. Если err растёт при
+        // постоянном знаке шагов, коэффициент занижен или знак инвертирован.
+        aimdbg::Line("ctl id=%llu errYaw=%.3f errPitch=%.3f fx=%.1f fy=%.1f "
+                     "gy=%.4f gp=%.4f lsYaw=%d lsPitch=%d trimY=%.3f trimP=%.3f "
+                     "camMoved=%d camAnswered=%d pendDx=%.2f pendDy=%.2f "
+                     "ackTimeouts=%d ackDisabled=%.2f fingerDown=%d",
+                     (unsigned long long)g_aim_pulse_target.load(std::memory_order_relaxed),
+                     best.yaw, best.pitch, s_fx, s_fy, gy, gp, (int)lsYaw, (int)lsPitch,
+                     s_trimYaw, s_trimPitch, (int)camMoved, (int)camAnswered,
+                     s_pendDx, s_pendDy, s_ackTimeouts, s_ackDisabled, (int)s_fingerDown);
+    }
     if (ackGate && s_fingerDown && !camAnswered &&
         (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
         s_pendTime += dt;
