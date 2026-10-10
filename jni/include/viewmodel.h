@@ -20,6 +20,7 @@ struct ViewmodelSettings {
     // DelayPromise, на которых игра ждёт между предметами при сборе лута.
     // Реализация: fast_loot_memory.h, тик из esp_viewmodel_tick.
     bool fast_loot = false;
+    bool bullet_tp = false;
 };
 
 namespace viewmodel {
@@ -46,9 +47,9 @@ inline ViewmodelSettings sanitize(ViewmodelSettings s) {
 // missing/truncated/unknown trailers load disabled defaults, never stale state.
 struct ConfigExtension {
     uint32_t magic = 0x31574d56u; // VMW1
-    // v4 added aim lead, v5 kept the 36-byte layout, and v6 assigns bit 11
-    // to no-ballistics. Bit 10 remains retired. v1–v3 were 32 bytes.
-    uint32_t version = 6;
+    // v4 added aim lead, v5 kept the 36-byte layout, v6 assigns bit 11 to
+    // no-ballistics, and v7 assigns bit 12 to bullet teleport. v1–v3 were 32 bytes.
+    uint32_t version = 7;
     uint32_t size = 36;
     uint32_t flags = 0;
     float fov = 90.f, x = 0.f, y = 0.f, z = 0.f;
@@ -62,7 +63,8 @@ inline ConfigExtension encode(ViewmodelSettings s) {
     const uint32_t fps_mode = s.fps_limit == 144 ? 1u : s.fps_limit == 90 ? 2u : s.fps_limit == 120 ? 3u : 0u;
     e.flags = (s.fov_enabled ? 1u : 0u) | (s.hands_enabled ? 2u : 0u) | (fps_mode << 2) |
               (s.fast_loot ? 16u : 0u) | (s.no_recoil_button ? 32u : 0u) |
-              (s.no_spread ? 64u : 0u) | (s.no_ballistics ? 2048u : 0u);
+              (s.no_spread ? 64u : 0u) | (s.no_ballistics ? 2048u : 0u) |
+              (s.bullet_tp ? 4096u : 0u);
     e.fov = s.fov; e.x = s.x; e.y = s.y; e.z = s.z;
     return e;
 }
@@ -75,8 +77,8 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     // v1: discard retired flags 4..6. v2 keeps bit 5 as the UI-only recoil
     // toggle and bit 6 for no-spread. v3 assigns bit 4 to fast pickup; an
     // older v1/v2 profile carrying retired bit 4 must not enable it.
-    const uint32_t allowed_flags = e.version >= 6 ? 4095u : 2047u;
-    if (e.magic != 0x31574d56u || (e.version < 1 || e.version > 6) ||
+    const uint32_t allowed_flags = e.version >= 7 ? 8191u : e.version >= 6 ? 4095u : 2047u;
+    if (e.magic != 0x31574d56u || (e.version < 1 || e.version > 7) ||
         e.size != size || (e.flags & ~allowed_flags)) return s;
     s.fov_enabled = (e.flags & 1u) != 0;
     s.hands_enabled = (e.flags & 2u) != 0;
@@ -85,6 +87,7 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
     s.no_recoil_button = e.version >= 2 && (e.flags & 32u) != 0;
     s.no_spread = e.version >= 2 && (e.flags & 64u) != 0;
     s.no_ballistics = e.version >= 6 && (e.flags & 2048u) != 0;
+    s.bullet_tp = e.version >= 7 && (e.flags & 4096u) != 0;
     s.fast_loot = e.version >= 3 && (e.flags & 16u) != 0;
     s.fov = e.fov; s.x = e.x; s.y = e.y; s.z = e.z;
     return sanitize(s);
@@ -94,7 +97,7 @@ inline ViewmodelSettings decode(const void* bytes, size_t size) {
 inline float decode_aim_lead_ms(const void* bytes, size_t size) {
     if (size != sizeof(ConfigExtension)) return 0.f;
     ConfigExtension e; std::memcpy(&e, bytes, sizeof(e));
-    if (e.magic != 0x31574d56u || (e.version < 4 || e.version > 6) || e.size != sizeof(e)) return 0.f;
+    if (e.magic != 0x31574d56u || (e.version < 4 || e.version > 7) || e.size != sizeof(e)) return 0.f;
     return (e.aim_lead_ms >= 0.f && e.aim_lead_ms <= 150.f) ? e.aim_lead_ms : 0.f;
 }
 enum class Status { Off, Waiting, Active, ADS, Failed };

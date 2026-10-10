@@ -483,7 +483,7 @@ static void LoadCfgByName(const char* name, bool announce) {
     g_state.viewmodel = viewmodel::decode(extra, extraGot);
     g_state.esp_turrets = g_state.esp_backpacks = g_state.esp_sleepers = false;
     g_state.esp_cupboards = false;
-    // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4–v6 могут
+    // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4–v7 могут
     // вернуть своё значение. Сам прицеп 36 байт с v4; прицеп v3 был 32 —
     // обрабатываем оба размера, иначе старые конфиги потеряли бы турели,
     // рюкзаки и спящих.
@@ -492,7 +492,8 @@ static void LoadCfgByName(const char* name, bool announce) {
         viewmodel::ConfigExtension extension;
         memcpy(&extension, extra, extraGot);   // v3: 32 байта, хвост — дефолты
         if (extension.magic == 0x31574d56u &&
-            (extension.version == 3 || extension.version == 4 || extension.version == 5 || extension.version == 6) &&
+            (extension.version == 3 || extension.version == 4 || extension.version == 5 ||
+             extension.version == 6 || extension.version == 7) &&
             extension.size == extraGot) {
             g_state.esp_turrets = (extension.flags & 128u) != 0;
             g_state.esp_backpacks = (extension.flags & 256u) != 0;

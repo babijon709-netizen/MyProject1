@@ -8648,7 +8648,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_aim_inherited_velocity = {};
     g_aim_ballistic_params = {};
     std::vector<EspBox> result;
+    const bool bullet_tp_enabled = g_state.viewmodel.bullet_tp;
     auto transient_return = [&](int tag) {
+        esp_bullet_tp_tick(bullet_tp_enabled, {});
         watch_boxes(result, (size_t)-1, nullptr, tag);
         return result;
     };
@@ -8680,7 +8682,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_player_count = 0;
 
     if (g_pid <= 0 || !g_il2cpp_base) {
-            return result;
+        esp_bullet_tp_tick(false, {});
+        return result;
     }
 
     // Фрикам — до всех ранних выходов: сводки и покадровая запись нужны и в
@@ -9039,6 +9042,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             g_state.aim_mode != AIM_MODE_SILENT)
             update_aim_ballistics(local_player);
     }
+
+    EspBulletTpTarget bullet_tp_target{};
+    float bullet_tp_best_distance = 1e9F;
 
     // Draw every remote PlayerManager returned by the player registry.
     // No UID, name, mount-point or movement heuristic is allowed to hide one.
@@ -9504,6 +9510,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             continue;
         }
+        if (bullet_tp_enabled && box.id && !box.dead && box.health > 0.f &&
+            !box.ally && !box.is_bot && distance > 0.5F &&
+            distance < bullet_tp_best_distance &&
+            position_looks_like_world_space(feet)) {
+            bullet_tp_best_distance = distance;
+            bullet_tp_target.id = box.id;
+            bullet_tp_target.x = feet.x;
+            bullet_tp_target.y = feet.y + 0.8F;
+            bullet_tp_target.z = feet.z;
+        }
         result.push_back(box);
         auto live_track = g_player_track.find(s_transforms[i]);
         if (live_track != g_player_track.end()) {
@@ -9515,6 +9531,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     append_bot_boxes(result);
     g_box_frame_transient = false;
     watch_boxes(result, local_entity_index, &skip_reason, 0);
+    esp_bullet_tp_tick(bullet_tp_enabled, bullet_tp_target);
 
     return result;
 }

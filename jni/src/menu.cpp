@@ -967,8 +967,9 @@ float TabContent(int tab, float dt, float cW) {
                 const int fps = vm.fps_limit;
                 const bool recoilButton = vm.no_recoil_button, ns = vm.no_spread;
                 const bool ballistics = vm.no_ballistics, fl = vm.fast_loot;
+                const bool bulletTp = vm.bullet_tp;
                 vm = {}; vm.fps_limit = fps; vm.no_recoil_button = recoilButton; vm.no_spread = ns;
-                vm.no_ballistics = ballistics; vm.fast_loot = fl;
+                vm.no_ballistics = ballistics; vm.fast_loot = fl; vm.bullet_tp = bulletTp;
                 g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
                 g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
                 esp_viewmodel_tick(vm);
@@ -985,16 +986,20 @@ float TabContent(int tab, float dt, float cW) {
         }
 
         SHdr(XS("Оружие"));
-        CardBg(Layout::RowH * 3.f);
+        CardBg(Layout::RowH * 4.f);
         const bool oldRecoil = vm.no_recoil_button;
         const bool oldSpread = vm.no_spread;
         const bool oldBallistics = vm.no_ballistics;
+        const bool oldBulletTp = vm.bullet_tp;
         ToggleRow("##norecoil", XS("Без отдачи"), &vm.no_recoil_button, g_state.a_no_recoil, false, true);
         ToggleRow("##nospread", XS("Без разброса"), &vm.no_spread, g_state.a_no_spread, false, false);
         ToggleRow("##noballistics", XS("Без баллистики"), &vm.no_ballistics,
-                  g_state.a_no_ballistics, true, false);
+                  g_state.a_no_ballistics, false, false);
+        ToggleRow("##bullettp", XS("Телепорт пуль"), &vm.bullet_tp,
+                  g_state.a_bullet_tp, true, false);
         if (oldSpread != vm.no_spread || oldRecoil != vm.no_recoil_button ||
-            oldBallistics != vm.no_ballistics) esp_viewmodel_tick(vm);
+            oldBallistics != vm.no_ballistics || oldBulletTp != vm.bullet_tp)
+            esp_viewmodel_tick(vm);
         // Диагностические строки («не применено» / «ожидание») убраны по
         // просьбе пользователя: применение видно в игре, подробности — в журнале.
         SHdr(XS("Темп оружия"));
@@ -1820,6 +1825,7 @@ void RenderMenu() {
     Tick(g_state.a_no_spread, g_state.viewmodel.no_spread, dt);
     Tick(g_state.a_no_ballistics, g_state.viewmodel.no_ballistics, dt);
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
+    Tick(g_state.a_bullet_tp, g_state.viewmodel.bullet_tp, dt);
     Tick(g_state.a_fast_fire, g_state.fast_fire, dt);
     Tick(g_state.a_fast_reload, g_state.fast_reload, dt);
     Tick(g_state.a_fake_lag, g_state.fake_lag, dt);

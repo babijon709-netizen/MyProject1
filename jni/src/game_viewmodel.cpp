@@ -1,4 +1,5 @@
 #include "fps_memory.h"
+#include "bullet_tp_memory.h"
 #include "game.h"
 #include "weapon_tuning_memory.h"
 #include "fast_fire_memory.h"
@@ -201,6 +202,8 @@ viewmodel::FpsController<Memory> fps_controller(memory);
 // Deliberately do not inherit Memory::write: these controllers can only write
 // through the fresh anonymous-heap mapping gate.
 struct HeapMemory {
+    bool bound() const { return g_mem.bound() && g_pid > 0 && g_mem.pid() == g_pid; }
+    uint64_t object_class(uint64_t object) { return memory.ptr(object); }
     template<class T> bool read(uint64_t address, T& value) { return memory.read(address,value); }
     // Диапазонное чтение (пакетные обходы плеер-лупа быстрого подбора):
     // один запрос на непрерывный кусок вместо чтения по элементу.
@@ -300,6 +303,7 @@ struct HeapMemory {
     }
 };
 HeapMemory heap_memory;
+bullet_tp::Controller<HeapMemory> bullet_tp_controller(heap_memory);
 weapon_tuning::Controller<HeapMemory> weapons(heap_memory);
 fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
 fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
@@ -483,6 +487,23 @@ std::recursive_mutex& viewmodel_session_mutex() {
     return mutex;
 }
 
+void esp_bullet_tp_tick(bool enabled, const EspBulletTpTarget& target) {
+    std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
+    if (!enabled) {
+        bullet_tp_controller.reset();
+        return;
+    }
+    if (!g_mem.bound() || g_pid <= 0 || g_mem.pid() != g_pid) {
+        bullet_tp_controller.reset();
+        return;
+    }
+    if (!g_il2cpp_base || !target.id) return;
+    const std::string* maps = maps_snapshot(false);
+    if (!maps) return;
+    bullet_tp_controller.tick(true, g_pid, g_il2cpp_base, target.id,
+                              {target.x, target.y, target.z}, maps, memio::now_seconds());
+}
+
 void esp_viewmodel_reset(bool restore) {
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     controller.reset(restore && g_mem.bound());
@@ -495,6 +516,7 @@ void esp_viewmodel_reset(bool restore) {
         ;
     if (!no_ballistics_ctl.reset(restore && g_mem.bound()))
         ;
+    bullet_tp_controller.reset();
     loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
@@ -506,8 +528,10 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     const bool want_fast_fire = g_state.fast_fire;
+    if (!settings.bullet_tp) bullet_tp_controller.reset();
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
+        bullet_tp_controller.reset();
         rapid_fire.reset(false);
         rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         no_recoil_ctl.reset(false);

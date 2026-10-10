@@ -161,6 +161,12 @@ inline constexpr std::uint64_t SHAFTEDPROJECTILE_LAUNCH_SPEED = 0xA8;
 inline constexpr std::uint64_t SHAFTEDPROJECTILE_GRAVITY = 0xAC;
 inline constexpr std::uint64_t SHAFTEDPROJECTILE_AIR_DRAG = 0xB0;
 inline constexpr std::uint64_t SHAFTEDPROJECTILE_UNDERWATER_DRAG = 0xB4;
+// BulletProjectile layout is identical in dump11949 and dumpbeta11957.
+inline constexpr std::uint64_t BULLET_PROJECTILE_SLOWDOWN = 0x20;
+inline constexpr std::uint64_t BULLET_PROJECTILE_MINSPEED = 0x24;
+inline constexpr std::uint64_t BULLET_PROJECTILE_TRACESIZE = 0x30;
+inline constexpr std::uint64_t BULLET_PROJECTILE_POSITION = 0x54;          // Vector3: release awz / beta lER
+inline constexpr std::uint64_t BULLET_PROJECTILE_PREVIOUS_POSITION = 0x60; // Vector3: release awi / beta lEQ
 inline constexpr std::uint64_t DISPERSIONCONFIG_MIN_DISPERSION = 0x20;
 inline constexpr std::uint64_t DISPERSIONCONFIG_MAX_DISPERSION = 0x24;
 // Отдача («без отдачи»): конфиг-ассет хитскана (поле 0x70 в

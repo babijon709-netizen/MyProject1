@@ -144,17 +144,18 @@ void test_config_extension() {
     settings.no_ballistics = true;
     settings.no_spread = true;
     settings.fast_loot = true;
+    settings.bullet_tp = true;
     auto encoded = viewmodel::encode(settings);
-    assert(encoded.version == 6 && encoded.size == sizeof(encoded));
-    assert((encoded.flags & 2048u) != 0);
+    assert(encoded.version == 7 && encoded.size == sizeof(encoded));
+    assert((encoded.flags & 2048u) != 0 && (encoded.flags & 4096u) != 0);
     auto decoded = viewmodel::decode(&encoded, sizeof(encoded));
-    assert(decoded.no_ballistics && decoded.no_spread && decoded.fast_loot);
+    assert(decoded.no_ballistics && decoded.no_spread && decoded.fast_loot && decoded.bullet_tp);
 
     encoded.aim_lead_ms = 75.f;
     assert(viewmodel::decode_aim_lead_ms(&encoded, sizeof(encoded)) == 75.f);
     auto v5 = encoded;
     v5.version = 5;
-    v5.flags &= ~2048u;
+    v5.flags &= ~(2048u | 4096u);
     decoded = viewmodel::decode(&v5, sizeof(v5));
     assert(!decoded.no_ballistics);
     assert(viewmodel::decode_aim_lead_ms(&v5, sizeof(v5)) == 75.f);
@@ -165,9 +166,10 @@ void test_config_extension() {
     assert(!decoded.no_ballistics && !decoded.no_spread && !decoded.fast_loot);
 
     auto corrupt = encoded;
+    corrupt.version = 6;
     corrupt.flags |= 4096u;
     decoded = viewmodel::decode(&corrupt, sizeof(corrupt));
-    assert(!decoded.no_ballistics && !decoded.no_spread && !decoded.fast_loot);
+    assert(!decoded.no_ballistics && !decoded.no_spread && !decoded.fast_loot && !decoded.bullet_tp);
 }
 
 void test_kind(fast_fire::Kind kind) {

@@ -191,7 +191,12 @@ struct BotAimEnt {
 void esp_set_bot_aim_enabled(bool enabled);
 void esp_bot_aim_maintain();
 std::vector<BotAimEnt> esp_bot_aim_list();
+struct EspBulletTpTarget {
+    uint64_t id = 0;
+    float x = 0.f, y = 0.f, z = 0.f;
+};
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
+void esp_bullet_tp_tick(bool enabled, const EspBulletTpTarget& target);
 // True when the last box frame ended on a transient memory/resolver failure.
 bool        esp_box_frame_transient();
 
