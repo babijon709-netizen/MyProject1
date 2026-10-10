@@ -317,21 +317,6 @@ struct AimFlowPrev { unsigned long long id; float cx, cy; };
 static std::vector<AimFlowPrev> s_flowPrev;
 
 static void AimUpdateFlow(const std::vector<EspBox>& boxes, float sw, float sh, float camFov) {
-    static float s_lastVisualYaw = 0.f, s_lastVisualPitch = 0.f;
-    static bool s_haveVisualAngles = false;
-    float visualYaw = 0.f, visualPitch = 0.f;
-    float visualFlowYaw = 0.f, visualFlowPitch = 0.f;
-    const bool haveVisualAngles = esp_camera_angles(visualYaw, visualPitch) &&
-                                  std::isfinite(visualYaw) && std::isfinite(visualPitch);
-    const bool haveVisualFlow = haveVisualAngles && s_haveVisualAngles &&
-        aim_control::camera_flow_delta(visualYaw, visualPitch, s_lastVisualYaw,
-                                       s_lastVisualPitch, visualFlowYaw, visualFlowPitch);
-    if (haveVisualAngles) {
-        s_lastVisualYaw = visualYaw;
-        s_lastVisualPitch = visualPitch;
-    }
-    s_haveVisualAngles = haveVisualAngles;
-
     s_flowValid = false;
     s_flowYawDeg = s_flowPitchDeg = 0.f;
     std::vector<AimFlowPrev> cur;
@@ -378,18 +363,10 @@ static void AimUpdateFlow(const std::vector<EspBox>& boxes, float sw, float sh, 
             }
         }
     }
-    // A frame-angle delta works for input acknowledgement in duels, where box
-    // flow has fewer than three tracks; it is not used to learn touch gain.
-    if (!s_flowValid && haveVisualFlow) {
-        s_flowYawDeg = visualFlowYaw;
-        s_flowPitchDeg = visualFlowPitch;
-        s_flowValid = true;
-    }
     s_flowPrev = std::move(cur);
 }
 
-// Поток этого такта (в градусах). Ложь — не удалось получить сдвиг боксов
-// или угол камеры из кадра.
+// Поток этого такта (в градусах). Ложь — меньше трёх боксов совпало по id.
 static bool aim_camera_flow(float& yawDeg, float& pitchDeg) {
     yawDeg = s_flowYawDeg; pitchDeg = s_flowPitchDeg;
     return s_flowValid;
@@ -604,7 +581,7 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
             pick.filterUsesCamera = haveCamera;
             pick.filterModeSet = true;
         }
-        float timeConstant = g_state.aim_mode == AIM_MODE_MEMORY ? 0.050f : 0.060f;
+        float timeConstant = g_state.aim_mode == AIM_MODE_MEMORY ? 0.050f : 0.045f;
         if (best.world_dist > 0.0f && best.world_dist < 12.0f) timeConstant *= 0.75f;
         if (haveCamera) {
             filteredYaw = WrapDeg180(cameraYaw + filteredYaw);
@@ -714,10 +691,10 @@ static void UpdateAimTouch(float dt) {
         resetRuntime();
         s_wasActive = true;
     }
-    // Scale with the observed frame cadence, but do not retain commands for
-    // half a second at normal refresh rates; camera-flow feedback covers duels.
-    const float responseWindow = std::min(0.75f, std::max(0.12f, dt * 8.0f));
-    const float ackWait = std::min(0.75f, std::max(0.10f, dt * 8.0f));
+    // Overlay cadence can exceed the game's touch-processing cadence by a lot.
+    // Keep commands pending long enough for up to eight slow game frames.
+    const float responseWindow = aim_control::touch_response_window(dt);
+    const float ackWait = responseWindow;
 
     // Точка, из которой аим водит палец: выбирается в меню тапом по экрану
     // (вкладка «Аим», см. g_calibMode == 3). Пока не задана — прежняя позиция
@@ -1210,12 +1187,9 @@ static void UpdateAimTouch(float dt) {
     // всё равно упирается в потолок maxStep (0.05*sh = 54 px на этом экране),
     // и скорость наведения задаёт он. Слайдер ниже середины продолжает
     // работать: доля считается от устойчивого предела пропорционально frac.
-    // 0.5 даёт |z| = 0.71 — качели гаснут за 2-3 такта. Снизил до 0.45: на
-    // устройстве задержка отработки касания плавает (2-4 кадра), и запас по
-    // устойчивости здесь не лишний — «почти пропал, но не до конца» (19.09).
-    // На скорость захвата это почти не влияет: при большой ошибке шаг всё
-    // равно упирается в потолок maxStep.
-    const float kStable = 0.45f;
+    // The device still showed a fast pendulum at 0.45; use a more conservative
+    // fraction so delayed touch responses cannot reverse the next command.
+    const float kStable = 0.30f;
     const float fracMid = 0.25f + (5.f - 1.f) / 9.f * 0.75f;   // слайдер 5
     if (k > kStable) k = kStable;
     if (frac < fracMid) k *= frac / fracMid;
@@ -1284,7 +1258,7 @@ static void UpdateAimTouch(float dt) {
 
     // Bound each command in camera degrees as well as screen pixels. Learned
     // sensitivity must not multiply the first ADS correction into a large jump.
-    const float maxAnglePerFrame = 1.5f + 0.90f * sm;
+    const float maxAnglePerFrame = 1.0f + 0.65f * sm;
     const float maxYawStep = aim_control::touch_step_limit_pixels(sh, gy, maxAnglePerFrame);
     const float maxPitchStep = aim_control::touch_step_limit_pixels(sh, gp, maxAnglePerFrame);
     if (dx >  maxYawStep) dx =  maxYawStep;
