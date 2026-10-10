@@ -27,4 +27,9 @@ int main() {
 
     Vec3 invalid = playermotion::predict(sample, {NAN, 0.0F, 0.0F}, 10.0, 10.05);
     assert(near(invalid.x, sample.x));
+
+    // дрожь стоящего игрока (ниже порога) не экстраполируется
+    Vec3 jitter = playermotion::predict(sample, {0.1F, 0.0F, 0.1F}, 10.0, 11.0);
+    assert(near(jitter.x, sample.x) && near(jitter.z, sample.z));
+    return 0;
 }

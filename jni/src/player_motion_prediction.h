@@ -9,11 +9,16 @@ namespace playermotion {
 constexpr double kPredictionDelaySeconds = 0.008;
 constexpr double kPredictionMaxSeconds = 0.100;
 constexpr float kPredictionMaxDistance = 1.20F;
+// Ниже этой скорости (м/с) «скорость» — это дрожь сетевой позиции стоящего
+// игрока: экстраполяция по ней уносила бы модель за свою настоящую позицию.
+constexpr float kPredictionMinSpeed = 0.25F;
 
 inline Vec3 predict(const Vec3& sample, const Vec3& velocity,
                     double sample_time, double now) {
     double age = now - sample_time - kPredictionDelaySeconds;
     if (!(age > 0.0) || !std::isfinite(age)) return sample;
+    const float speed2 = velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z;
+    if (!(speed2 >= kPredictionMinSpeed * kPredictionMinSpeed)) return sample;
     age = std::min(age, kPredictionMaxSeconds);
 
     Vec3 step = {
