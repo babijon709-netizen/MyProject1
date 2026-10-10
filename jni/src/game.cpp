@@ -8649,8 +8649,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_aim_ballistic_params = {};
     std::vector<EspBox> result;
     const bool bullet_tp_enabled = g_state.viewmodel.bullet_tp;
+    EspBulletTpFrameDiagnostics bullet_tp_frame{};
     auto transient_return = [&](int tag) {
-        esp_bullet_tp_tick(bullet_tp_enabled, {});
+        bullet_tp_frame.transient_tag = tag;
+        esp_bullet_tp_tick(bullet_tp_enabled, {}, bullet_tp_frame);
         watch_boxes(result, (size_t)-1, nullptr, tag);
         return result;
     };
@@ -8682,7 +8684,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_player_count = 0;
 
     if (g_pid <= 0 || !g_il2cpp_base) {
-        esp_bullet_tp_tick(false, {});
+        bullet_tp_frame.missing_session = true;
+        esp_bullet_tp_tick(bullet_tp_enabled, {}, bullet_tp_frame);
         return result;
     }
 
@@ -9045,6 +9048,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     EspBulletTpTarget bullet_tp_target{};
     float bullet_tp_best_distance = 1e9F;
+    bullet_tp_frame.player_records = static_cast<uint32_t>(s_transforms.size());
 
     // Draw every remote PlayerManager returned by the player registry.
     // No UID, name, mount-point or movement heuristic is allowed to hide one.
@@ -9496,6 +9500,27 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 --s_pose_left;
             }
         }
+        if (bullet_tp_enabled) {
+            ++bullet_tp_frame.boxed_records;
+            if (!box.id) ++bullet_tp_frame.no_network_id;
+            if (box.dead) ++bullet_tp_frame.dead;
+        }
+        const bool bullet_tp_alive = box.id && !box.dead && box.health > 0.f;
+        const bool bullet_tp_enemy = bullet_tp_alive && !box.ally;
+        const bool bullet_tp_bot = bullet_tp_enemy && box.is_bot;
+        const bool bullet_tp_human = bullet_tp_enemy && !box.is_bot;
+        const bool bullet_tp_in_range = bullet_tp_human && std::isfinite(distance) &&
+            distance > 0.5F && distance < 1e9F;
+        const bool bullet_tp_world_position = bullet_tp_in_range &&
+            position_looks_like_world_space(feet);
+        if (bullet_tp_enabled) {
+            if (bullet_tp_alive) ++bullet_tp_frame.alive;
+            if (bullet_tp_enemy) ++bullet_tp_frame.enemies;
+            if (bullet_tp_bot) ++bullet_tp_frame.bot_candidates;
+            if (bullet_tp_human) ++bullet_tp_frame.human_candidates;
+            if (bullet_tp_in_range) ++bullet_tp_frame.distance_candidates;
+            if (bullet_tp_world_position) ++bullet_tp_frame.world_position_candidates;
+        }
         // A confirmed corpse must disappear immediately. The five-second list
         // grace protects living players from read gaps, not dead PlayerManagers.
         if (box.dead) {
@@ -9510,10 +9535,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             continue;
         }
-        if (bullet_tp_enabled && box.id && !box.dead && box.health > 0.f &&
-            !box.ally && !box.is_bot && distance > 0.5F &&
-            distance < bullet_tp_best_distance &&
-            position_looks_like_world_space(feet)) {
+        if (bullet_tp_enabled && bullet_tp_world_position &&
+            distance < bullet_tp_best_distance) {
             bullet_tp_best_distance = distance;
             bullet_tp_target.id = box.id;
             bullet_tp_target.x = feet.x;
@@ -9531,7 +9554,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     append_bot_boxes(result);
     g_box_frame_transient = false;
     watch_boxes(result, local_entity_index, &skip_reason, 0);
-    esp_bullet_tp_tick(bullet_tp_enabled, bullet_tp_target);
+    esp_bullet_tp_tick(bullet_tp_enabled, bullet_tp_target, bullet_tp_frame);
 
     return result;
 }

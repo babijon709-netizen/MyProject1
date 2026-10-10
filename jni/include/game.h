@@ -195,8 +195,16 @@ struct EspBulletTpTarget {
     uint64_t id = 0;
     float x = 0.f, y = 0.f, z = 0.f;
 };
+struct EspBulletTpFrameDiagnostics {
+    uint32_t player_records = 0, boxed_records = 0, no_network_id = 0, dead = 0;
+    uint32_t alive = 0, enemies = 0, bot_candidates = 0, human_candidates = 0;
+    uint32_t distance_candidates = 0, world_position_candidates = 0;
+    int transient_tag = 0;
+    bool missing_session = false;
+};
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
-void esp_bullet_tp_tick(bool enabled, const EspBulletTpTarget& target);
+void esp_bullet_tp_tick(bool enabled, const EspBulletTpTarget& target,
+                        EspBulletTpFrameDiagnostics diagnostics = {});
 // True when the last box frame ended on a transient memory/resolver failure.
 bool        esp_box_frame_transient();
 

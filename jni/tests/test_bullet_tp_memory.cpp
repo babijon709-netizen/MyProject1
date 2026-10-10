@@ -92,8 +92,13 @@ void test_heap_range_filter() {
         "400000-401000 rw-p 00000000 00:00 0 [anon:scudo:primary]\n"
         "500000-501000 rw-s 00000000 00:00 0 [heap]\n";
     std::vector<bullet_tp::Range> ranges;
-    assert(bullet_tp::collect_heap_ranges(maps, ranges));
+    bullet_tp::MapDiagnostics diagnostics{};
+    assert(bullet_tp::collect_heap_ranges(maps, ranges, &diagnostics));
     assert(ranges.size() == 2);
+    assert(diagnostics.accepted == 2 && diagnostics.accepted_bytes == 0x11000);
+    assert(diagnostics.file_backed == 1 && diagnostics.file_tail == 1);
+    assert(diagnostics.named_regions == 1 && diagnostics.bad_permissions == 1);
+    assert(std::strcmp(diagnostics.rejected_names[0], "[anon:UnityWhatever]") == 0);
     assert(ranges[0].begin == 0x100000 && ranges[0].end == 0x110000);
     assert(ranges[1].begin == 0x400000 && ranges[1].end == 0x401000);
     assert(!bullet_tp::collect_heap_ranges("bad maps header\n", ranges));
@@ -120,6 +125,12 @@ void test_controller_uses_io_and_tracks_candidates() {
     assert(io.exact_calls == 1);
     assert(io.writes == 4);
     assert(bullet_tp::same_vec(io.get<bullet_tp::Vec3>(io.projectile + game_offsets::BULLET_PROJECTILE_POSITION), second_target));
+    const auto diagnostics = controller.diagnostics();
+    assert(diagnostics.scan_cycles == 1 && diagnostics.scan_chunks == 1);
+    assert(diagnostics.candidates_with_valid_fields >= 2);
+    assert(diagnostics.exact_checks == 1 && diagnostics.exact_matches == 1);
+    assert(diagnostics.projectiles_added == 1 && diagnostics.tracked_projectiles == 1);
+    assert(diagnostics.write_pairs_ok == 2 && diagnostics.current_writes_ok == 2);
 
     assert(controller.tick(false, static_cast<int>(kPid), kModuleBase, 0,
                            {}, &kMaps, 1.032) == 0);
@@ -135,13 +146,37 @@ void test_scan_is_incremental() {
 
     assert(controller.tick(true, static_cast<int>(kPid), kModuleBase, 0x90000,
                            {10.f, 3.f, 20.f}, &maps, 2.0) == 1);
-    assert(io.range_reads == 2); // one scan chunk and one candidate revalidation
+    assert(io.range_reads == 7); // six overlapping scan chunks and one candidate revalidation
     assert(io.exact_calls == 1 && io.writes == 2);
 
     controller.tick(true, static_cast<int>(kPid), kModuleBase, 0x90000,
                     {11.f, 4.f, 21.f}, &maps, 2.016);
-    assert(io.range_reads == 3); // no new scan step before the 50 ms interval
+    assert(io.range_reads == 8); // no new scan step before the 50 ms interval
     assert(io.writes == 4);
+    const auto diagnostics = controller.diagnostics();
+    assert(diagnostics.scan_chunks == 6 && !diagnostics.scan_active);
+    assert(diagnostics.scan_bytes >= 0x500000);
+}
+
+void test_scan_budget_caps_small_ranges() {
+    FakeIO io;
+    std::string maps;
+    for (uint64_t index = 0; index < 20; ++index) {
+        const uint64_t begin = 0x300000 + index * 0x2000;
+        char line[128]{};
+        std::snprintf(line, sizeof(line), "%llx-%llx rw-p 00000000 00:00 0 [anon:scudo:primary]\n",
+            static_cast<unsigned long long>(begin),
+            static_cast<unsigned long long>(begin + 0x1000));
+        maps += line;
+    }
+    bullet_tp::Controller<FakeIO> controller(io);
+    controller.tick(true, static_cast<int>(kPid), kModuleBase, 0x90000,
+                    {10.f, 3.f, 20.f}, &maps, 3.0);
+    const auto diagnostics = controller.diagnostics();
+    assert(io.range_reads == bullet_tp::kScanChunksPerStep);
+    assert(diagnostics.scan_chunks == bullet_tp::kScanChunksPerStep);
+    assert(diagnostics.scan_read_failures == bullet_tp::kScanChunksPerStep);
+    assert(diagnostics.scan_active && diagnostics.maps.accepted == 20);
 }
 
 void test_config_v7_compatibility() {
@@ -172,6 +207,7 @@ int main() {
     test_heap_range_filter();
     test_controller_uses_io_and_tracks_candidates();
     test_scan_is_incremental();
+    test_scan_budget_caps_small_ranges();
     test_config_v7_compatibility();
     std::puts("ALL BULLET-TP TESTS PASS");
 }
