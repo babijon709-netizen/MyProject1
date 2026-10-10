@@ -22,6 +22,7 @@
 #include <thread>
 #include <chrono>
 #include <time.h>
+#include <unistd.h>
 
 static constexpr float kAimTouchDefX = 0.74f;
 static constexpr float kAimTouchDefY = 0.50f;
@@ -1613,6 +1614,24 @@ void UpdateAim(float dt) {
     ++s_frames;
     const int mode = g_state.aim_mode;
     AimLogTick(dt);
+    // Heartbeat: пишется всегда, пока стоит флаг, даже если аим выключен или
+    // ESP не подключён. Без него пустой лог неотличим от «флаг не сработал».
+    if (aimdbg::Enabled()) {
+        static bool s_started = false;
+        static double s_hbAt = 0.0;
+        const double now = aimdbg::NowSec();
+        if (!s_started) {
+            s_started = true;
+            aimdbg::Line("session start pid=%d", (int)getpid());
+        }
+        if (now - s_hbAt >= 2.0) {
+            s_hbAt = now;
+            aimdbg::Line("hb mode=%d aim_touch=%d esp=%d calib=%d freecam=%d scope_only=%d frames=%lu dt=%.4f",
+                         mode, (int)g_state.aim_touch, (int)g_esp_attached, g_calibMode,
+                         (int)g_state.freecam_on, (int)g_state.aim_scope_only,
+                         s_frames, dt);
+        }
+    }
     if (mode == AIM_MODE_MEMORY) UpdateAimMemory(dt);
     else if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);
     else                              UpdateAimTouch(dt);
