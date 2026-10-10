@@ -69,6 +69,7 @@ jobs:
           sha256sum dist/xvcen-arm64-v8a
 
       - name: Upload binary
+        id: upload
         uses: actions/upload-artifact@v4
         # Квота хранилища артефактов — не причина ронять сборку: бинарник уже
         # собран и проверен (test -f + sha256 выше), заливка только его
@@ -81,3 +82,18 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 3
+
+      - name: Итог сборки
+        if: always()
+        run: |
+          if [ "${{ steps.upload.outcome }}" = "success" ]; then
+            echo "артефакт залит: xvcen-arm64-v8a"
+          else
+            # continue-on-error не красит джоб, но строка CreateArtifact в логе
+            # остаётся и читается как провал сборки. Пишем прямо: бинарник
+            # собран, не залит только артефакт, и это квота, а не код.
+            echo "::warning::бинарник собран (sha256 ниже), но артефакт не залит:"
+            echo "::warning::закончилась квота хранилища Actions, она пересчитывается 6-12 ч."
+            echo "::warning::чистка: Actions -> Global Clear Artifacts -> Run workflow."
+          fi
+          sha256sum dist/xvcen-arm64-v8a
