@@ -1,14 +1,14 @@
-name: clean artifacts
-
-on:
-  schedule:
-    - cron: '0 0 * * *'
-
+name: Delete all artifacts
+on: workflow_dispatch
+permissions:
+  actions: write
 jobs:
   clean:
     runs-on: ubuntu-latest
     steps:
-      - name: cleanup
-        uses: glassechidna/artifact-cleaner@master
-        with:
-          minimumAge: 86400 # all artifacts at least one day old
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for id in $(gh api --paginate repos/${{ github.repository }}/actions/artifacts --jq '.artifacts[].id'); do
+            gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$id
+          done
