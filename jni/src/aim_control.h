@@ -55,6 +55,20 @@ struct AngleFilter {
     }
 };
 
+inline void memory_command_angles(float accumulator_yaw, float accumulator_pitch,
+                                  bool have_camera, float camera_yaw, float camera_pitch,
+                                  float delta_yaw, float delta_pitch,
+                                  float& out_yaw, float& out_pitch) {
+    float base_yaw = accumulator_yaw;
+    float base_pitch = accumulator_pitch;
+    if (have_camera && finite(camera_yaw) && finite(camera_pitch)) {
+        base_yaw = wrap_degrees(camera_yaw);
+        base_pitch = wrap_degrees(-camera_pitch);
+    }
+    out_yaw = wrap_degrees(base_yaw + delta_yaw);
+    out_pitch = wrap_degrees(base_pitch - delta_pitch);
+}
+
 inline float memory_step(float error_degrees, float dt, float speed,
                          float range_metres) {
     if (!finite(error_degrees)) return 0.0f;
@@ -62,7 +76,12 @@ inline float memory_step(float error_degrees, float dt, float speed,
     if (dt > 0.1f) dt = 0.1f;
     if (!(speed >= 1.0f)) speed = 1.0f;
     if (speed > 10.0f) speed = 10.0f;
-    if (std::fabs(error_degrees) <= 0.045f) return 0.0f;
+    float deadband = 0.08f;
+    if (range_metres > 0.0f && finite(range_metres)) {
+        const float bone_noise = std::atan(0.025f / range_metres) * 57.2957795f;
+        deadband = std::max(deadband, bone_noise);
+    }
+    if (std::fabs(error_degrees) <= deadband) return 0.0f;
 
     const float smooth = 0.25f + (speed - 1.0f) / 9.0f * 0.75f;
     const float gain = 1.0f - std::pow(1.0f - smooth, dt * 60.0f);

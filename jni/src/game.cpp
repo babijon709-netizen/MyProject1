@@ -6290,21 +6290,25 @@ bool aim_read_weapon_config(uint64_t weapon, uint64_t offset, bool allow_structu
     const int identity = aim_object_identity(config, "HitscanWeaponConfig", kAimWeaponNamespace);
     if (identity == 0) return false;
 
-    float max_distance = 0.0f, bullet_speed = 0.0f, fire_rate = 0.0f, dispersion = 0.0f;
-    int32_t projectiles = 0;
+    float max_distance = 0.0f, bullet_speed = 0.0f;
     if (!aim_read_float(config + HITSCANCONFIG_MAX_DISTANCE, 0.0f, 5000.0f, max_distance) ||
-        !aim_read_float(config + HITSCANCONFIG_BULLET_SPEED, 0.0f, 2000.0f, bullet_speed) ||
-        !aim_read_float(config + HITSCANCONFIG_FIRE_RATE, 0.0f, 1000.0f, fire_rate) ||
-        !aim_read_float(config + HITSCANCONFIG_BASE_DISPERSION, 0.0f, 1000.0f, dispersion) ||
-        !rd_exact(config + HITSCANCONFIG_PROJECTILES_PER_SHOT, projectiles)) return false;
+        !aim_read_float(config + HITSCANCONFIG_BULLET_SPEED, 0.0f, 2000.0f, bullet_speed))
+        return false;
 
     uint64_t profile = 0;
     if (!aim_read_pointer_exact(config + HITSCANCONFIG_BALLISTIC_PROFILE, profile)) return false;
     if (profile && !aim_read_profile(profile, read)) return false;
 
     if (identity == 2 && allow_structural_fallback) {
+        float fire_rate = 0.0f, dispersion = 0.0f;
+        int32_t projectiles = 0;
         uint64_t dispersion_config = 0;
-        if (!aim_read_pointer_exact(config + HITSCANCONFIG_DISPERSION_CONFIG, dispersion_config) ||
+        if (!aim_read_float(config + HITSCANCONFIG_FIRE_RATE, 0.0f, 1000.0f, fire_rate) ||
+            !aim_read_float(config + HITSCANCONFIG_BASE_DISPERSION, 0.0f, 1000.0f,
+                            dispersion) ||
+            !rd_exact(config + HITSCANCONFIG_PROJECTILES_PER_SHOT, projectiles) ||
+            !aim_read_pointer_exact(config + HITSCANCONFIG_DISPERSION_CONFIG,
+                                    dispersion_config) ||
             !valid_obj(dispersion_config) ||
             aim_object_identity(dispersion_config, "DispersionConfig", kAimWeaponNamespace) == 0 ||
             projectiles < 1 || projectiles > 32 || !(fire_rate > 0.0f) ||
@@ -6365,20 +6369,97 @@ void aim_merge_ballistics(const AimBallisticRead& config, const AimBallisticRead
 }
 
 void update_aim_ballistics(uint64_t player) {
+    static uint64_t cached_player = 0;
+    static uint64_t cached_weapon = 0;
+    static uint64_t cached_weapon_class = 0;
+    static double cached_at = 0.0;
+    static aim_ballistics::Parameters cached_params{};
+    constexpr double kCacheSeconds = 0.35;
+    const double now = mono_seconds();
+
     g_aim_ballistic_params = {};
     g_aim_inherited_velocity = {};
+    if (valid_obj(player)) {
+        auto local_track = g_player_track.find(player);
+        if (local_track != g_player_track.end() && local_track->second.have_vel_ref) {
+            const double age = now - local_track->second.vel_ref_t;
+            const Vec3 velocity = local_track->second.vel;
+            const float speed = aim_ballistics::length(velocity);
+            if (age >= 0.0 && age <= 0.35 && aim_ballistics::finite(velocity) &&
+                aim_ballistics::finite(speed) && speed <= 12.0f)
+                g_aim_inherited_velocity = velocity;
+        }
+    }
+
+    auto clear_cache = [&]() {
+        cached_weapon = 0;
+        cached_weapon_class = 0;
+        cached_at = 0.0;
+        cached_params = {};
+    };
+    auto restore_cache = [&]() {
+        if (cached_params.valid && now >= cached_at && now - cached_at <= kCacheSeconds) {
+            g_aim_ballistic_params = cached_params;
+        } else {
+            g_aim_ballistic_params = {};
+            cached_params = {};
+            cached_at = 0.0;
+        }
+    };
+
+    if (valid_obj(player) && cached_player != player) {
+        clear_cache();
+        cached_player = player;
+    }
     if (!g_mem.bound() || !valid_obj(player) ||
-        aim_object_identity(player, "PlayerManager", "Oxide") == 0) return;
+        aim_object_identity(player, "PlayerManager", "Oxide") == 0) {
+        restore_cache();
+        return;
+    }
 
     uint64_t fp = 0;
-    if (!aim_read_pointer_exact(player + PLAYER_FP_MANAGER, fp) || !valid_obj(fp) ||
-        aim_object_identity(fp, "FPManager", "Oxide") == 0) return;
+    if (!aim_read_pointer_exact(player + PLAYER_FP_MANAGER, fp)) {
+        restore_cache();
+        return;
+    }
+    if (!valid_obj(fp)) {
+        clear_cache();
+        return;
+    }
+    if (aim_object_identity(fp, "FPManager", "Oxide") == 0) {
+        restore_cache();
+        return;
+    }
+
     uint64_t weapon = 0;
-    if (!aim_read_pointer_exact(fp + FPMANAGER_CURRENT_OBJECT, weapon) || !valid_obj(weapon))
+    if (!aim_read_pointer_exact(fp + FPMANAGER_CURRENT_OBJECT, weapon)) {
+        restore_cache();
         return;
+    }
+    if (!valid_obj(weapon)) {
+        clear_cache();
+        return;
+    }
+    uint64_t weapon_class = 0;
+    if (!aim_read_pointer_exact(weapon, weapon_class) || !valid_obj(weapon_class)) {
+        restore_cache();
+        return;
+    }
+    if (cached_weapon != weapon || cached_weapon_class != weapon_class) {
+        clear_cache();
+        cached_weapon = weapon;
+        cached_weapon_class = weapon_class;
+    }
+
     uint64_t owner = 0;
-    if (!aim_read_pointer_exact(weapon + FPOBJECT_PLAYER_BACKREF, owner) || owner != player)
+    if (!aim_read_pointer_exact(weapon + FPOBJECT_PLAYER_BACKREF, owner)) {
+        restore_cache();
         return;
+    }
+    if (owner != player) {
+        clear_cache();
+        return;
+    }
 
     enum class Kind { None, Hitscan, Bow, Crossbow, Rocket, Explosive, Snowball, Spear };
     Kind kind = Kind::None;
@@ -6441,18 +6522,15 @@ void update_aim_ballistics(uint64_t player) {
         }
     }
 
+    aim_ballistics::Parameters current{};
     aim_merge_ballistics(config_ok ? config_read : AimBallisticRead{},
-                         projectile_ok ? projectile_read : AimBallisticRead{},
-                         g_aim_ballistic_params);
-
-    auto local_track = g_player_track.find(player);
-    if (local_track != g_player_track.end() && local_track->second.have_vel_ref) {
-        const double age = mono_seconds() - local_track->second.vel_ref_t;
-        const Vec3 velocity = local_track->second.vel;
-        const float speed = aim_ballistics::length(velocity);
-        if (age >= 0.0 && age <= 0.35 && aim_ballistics::finite(velocity) &&
-            aim_ballistics::finite(speed) && speed <= 12.0f)
-            g_aim_inherited_velocity = velocity;
+                         projectile_ok ? projectile_read : AimBallisticRead{}, current);
+    if (current.valid) {
+        g_aim_ballistic_params = current;
+        cached_params = current;
+        cached_at = now;
+    } else {
+        restore_cache();
     }
 }
 

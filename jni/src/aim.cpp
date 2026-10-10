@@ -582,7 +582,7 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
             pick.filterUsesCamera = haveCamera;
             pick.filterModeSet = true;
         }
-        float timeConstant = g_state.aim_mode == AIM_MODE_MEMORY ? 0.026f : 0.018f;
+        float timeConstant = g_state.aim_mode == AIM_MODE_MEMORY ? 0.050f : 0.045f;
         if (best.world_dist > 0.0f && best.world_dist < 12.0f) timeConstant *= 0.75f;
         if (haveCamera) {
             filteredYaw = WrapDeg180(cameraYaw + filteredYaw);
@@ -692,8 +692,10 @@ static void UpdateAimTouch(float dt) {
         resetRuntime();
         s_wasActive = true;
     }
-    const float responseWindow = std::min(0.60f, std::max(0.13f, dt * 8.0f));
-    const float ackWait = std::min(0.60f, std::max(0.25f, dt * 8.0f));
+    // dt is the overlay cadence, not the game's input cadence; keep enough
+    // time for up to eight slow game frames before issuing another command.
+    const float responseWindow = std::min(0.75f, std::max(0.55f, dt * 8.0f));
+    const float ackWait = std::min(0.75f, std::max(0.55f, dt * 8.0f));
 
     // Точка, из которой аим водит палец: выбирается в меню тапом по экрану
     // (вкладка «Аим», см. g_calibMode == 3). Пока не задана — прежняя позиция
@@ -955,7 +957,9 @@ static void UpdateAimTouch(float dt) {
     // стенде перелёт на дрожи ±0.4° падает с 0.9° до 0.4°, реверсов 0.
     static constexpr float kTouchRampBand = 2.5f;   // град, с чего начинается спад
     static constexpr float kTouchRampMin  = 0.40f;  // пол: ниже шаг станет меньше пикселя и прицел залипнет
-    const bool  useFlight = !haveCam;
+    // If camera feedback timed out, use the latency queue even when an angle
+    // source exists; otherwise the disabled ACK gate would resend every frame.
+    const bool useFlight = !haveCam || s_ackDisabled > 0.0f;
     auto clearFlight = [&]() {
         s_flight.clear();
         s_absorbYaw = s_absorbPitch = 0.f;
@@ -1446,7 +1450,7 @@ static void UpdateAimMemory(float dt) {
     const bool haveCam = esp_aim_camera_angles(camYaw, camPitch);
     if (haveCam) {
         s_memDiag.mismatch = fabsf(WrapDeg180(accY - camYaw)) +
-                             fabsf(WrapDeg180(accX - camPitch));
+                             fabsf(WrapDeg180(accX + camPitch));
         // Камера задвигалась в такт записи и накопитель не расходится —
         // разворачивается именно наша запись (дополнительно к ACK).
         if (s_haveLast && s_memDiag.mismatch < 1.0f &&
@@ -1467,10 +1471,16 @@ static void UpdateAimMemory(float dt) {
         return;
     }
 
-    // Накопитель MouseLook хранит текущую ориентацию игры. Прибавляем только
-    // сглаженный остаток; источник углов ESP уже учтён при расчёте best.
-    const float writeY = WrapDeg180(accY + offYaw);
-    const float writeX = WrapDeg180(accX - offPitch);
+    // Write from the camera orientation rather than from a pending accumulator
+    // value. Repeated overlay ticks then overwrite the same absolute command
+    // until the slower game frame consumes it, instead of stacking stale steps.
+    float cameraYaw = 0.0f, cameraPitch = 0.0f;
+    const bool haveCameraReference = esp_camera_angles(cameraYaw, cameraPitch) &&
+                                     std::isfinite(cameraYaw) && std::isfinite(cameraPitch);
+    float writeY = 0.0f, writeX = 0.0f;
+    aim_control::memory_command_angles(accY, accX, haveCameraReference,
+                                       cameraYaw, cameraPitch, offYaw, offPitch,
+                                       writeY, writeX);
 
     // Градусы -> накопитель игры: X — «наклон вниз» (вверх — меньше),
     // Y — рысканье (вправо — больше).
