@@ -4239,6 +4239,7 @@ struct CachedSkeleton {
     bool     valid = false;
     int      retry_cooldown = 0;
     int      fail_streak = 0;
+    int      build_fail = 0;         // пересборок подряд, закончившихся провалом
     int      revalidate_timer = 0;
 };
 
@@ -4248,6 +4249,13 @@ static std::unordered_map<uint64_t, CachedSkeleton> g_skeletons;
 static unsigned long long g_skel_reads_bones = 0;    // данные+индекс каждой кости
 static unsigned long long g_skel_reads_bulk = 0;     // пакетные TRS и родители
 static unsigned long long g_skel_reads_walk = 0;     // обход цепочек и дочитывание
+static unsigned long long g_skel_reads_build = 0;    // пересборка кэша игрока
+static unsigned long long g_skel_box_calls = 0;      // вызовов fill_skeleton_box
+static unsigned long long g_skel_build_calls = 0;    // пересборок кэша
+static unsigned long long g_skel_build_skipped = 0;  // пересборок, отложенных за кадр
+static unsigned long long g_skel_drop_fail = 0;      // кэш сброшен: кости перестали читаться
+static unsigned long long g_skel_drop_model = 0;     // кэш сброшен: сменилась модель
+static unsigned long long g_skel_build_fail = 0;     // пересборок, закончившихся провалом
 static bool g_skeleton_enabled = false;
 // The aimbot needs bone positions regardless of the skeleton ESP toggle. Bone
 // resolution is therefore driven by (skeleton ESP || aim requested).
@@ -6433,24 +6441,42 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         box.aim_world_valid[i] = false;
     }
 
+    ++g_skel_box_calls;
     CachedSkeleton& skeleton = g_skeletons[player];
     if (!skeleton.valid) {
         if (skeleton.retry_cooldown > 0) { --skeleton.retry_cooldown; return false; }
         // Building walks the whole model; allow at most one rebuild per frame
         // so multiple new players never stall the overlay.
-        if (g_skeleton_builds_this_frame >= 1) return false;
+        if (g_skeleton_builds_this_frame >= 1) { ++g_skel_build_skipped; return false; }
         ++g_skeleton_builds_this_frame;
-        if (!build_skeleton(player, skeleton)) {
+        // build_skeleton обнуляет структуру, поэтому счётчик провалов держим
+        // здесь: он переживает пересборку и копит отступ.
+        const int build_fails = skeleton.build_fail;
+        const unsigned long long reads_before_build = g_mem.reads_total();
+        const bool built = build_skeleton(player, skeleton);
+        g_skel_reads_build += g_mem.reads_total() - reads_before_build;
+        ++g_skel_build_calls;
+        if (!built) {
+            ++g_skel_build_fail;
             skeleton.valid = false;
-            skeleton.retry_cooldown = 20;
+            // Объект без модели (манекен, спектейтор, пустое кресло) не
+            // обзаведётся ей от того, что мы будем пересобирать его каждые
+            // 20 кадров. Отступаем всё дальше — иначе такие объекты занимают
+            // единственный слот пересборки в кадре, и настоящий новый игрок
+            // ждёт скелета несколько кадров (лог 10.10: двое таких висят всё
+            // время — это разрыв «игроков 5, со скелетом 4»).
+            skeleton.retry_cooldown = build_fails < 3 ? 20 : (build_fails < 6 ? 120 : 600);
+            skeleton.build_fail = build_fails + 1;
             return false;
         }
+        skeleton.build_fail = 0;
     }
 
     // Periodically make sure the player still uses the same character model.
     if (++skeleton.revalidate_timer >= 120) {
         skeleton.revalidate_timer = 0;
         if (skeleton_model_root(player) != skeleton.model_root) {
+            ++g_skel_drop_model;
             skeleton = CachedSkeleton{};
             skeleton.retry_cooldown = 2;
             return false;
@@ -6493,7 +6519,11 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     g_skel_reads_bones += g_mem.reads_total() - reads_before_bones;
     // Liveness: the hips transform no longer resolves => model despawned.
     if (group_count == 0 || bone_index[BONE_HIPS] < 0) {
-        if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
+        if (++skeleton.fail_streak > 30) {
+            ++g_skel_drop_fail;
+            skeleton = CachedSkeleton{};
+            skeleton.retry_cooldown = 30;
+        }
         return false;
     }
 
@@ -6541,6 +6571,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
 
     int projected = 0;
+    int bones_world = 0;      // костей с мировой позицией, прочитанных сейчас
     int remote_fallbacks = 0;
     const unsigned long long reads_before_walk = g_mem.reads_total();
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
@@ -6565,6 +6596,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
             }
             if (walked == 1) {
                 have_world = true;
+                ++bones_world;
                 skeleton.bone_world[bone] = world;
                 skeleton.bone_world_age[bone] = 1;
             }
@@ -6586,8 +6618,8 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         ++projected;
     }
     g_skel_reads_walk += g_mem.reads_total() - reads_before_walk;
-    if (!projected) {
-        skeleton_log(12, 10.0, "ни одна кость не спроецировалась: костей в кэше %d, "
+    if (bones_world == 0) {
+        skeleton_log(12, 10.0, "ни одна кость не прочиталась: костей в кэше %d, "
                                "групп %d, отказов чтения массивов %d",
                      skeleton.bone_count, group_count, group_read_failed);
     }
@@ -6652,11 +6684,19 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         }
     }
 
+    // Данные целы — мировые позиции костей читаются, просто игрок за спиной
+    // или за краем экрана. Кэш не трогаем: раньше не спроецировавшаяся кость
+    // крутила fail_streak, и через 30 кадров скелет игрока за спиной
+    // выбрасывался и пересобирался заново — обход модели на ровном месте.
+    if (bones_world >= 4) skeleton.fail_streak = 0;
     if (projected < 4) {
-        if (++skeleton.fail_streak > 30) { skeleton = CachedSkeleton{}; skeleton.retry_cooldown = 30; }
+        if (bones_world < 4 && ++skeleton.fail_streak > 30) {
+            ++g_skel_drop_fail;
+            skeleton = CachedSkeleton{};
+            skeleton.retry_cooldown = 30;
+        }
         return false;
     }
-    skeleton.fail_streak = 0;
     box.has_skeleton = true;
     // Габариты скелета в метрах. Нужны для признака смерти: труп ЛЕЖИТ, его
     // кости вытянуты по горизонтали и почти не имеют высоты. Читать здоровье
@@ -9306,14 +9346,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             int with_bones = 0;
             for (const EspBox& box : result) if (box.has_skeleton) ++with_bones;
             const unsigned long long reads_delta = g_mem.reads_total() - reads_mark;
-            const unsigned long long reads_phases =
-                    g_skel_reads_bones + g_skel_reads_bulk + g_skel_reads_walk;
+            const unsigned long long reads_phases = g_skel_reads_bones + g_skel_reads_bulk +
+                    g_skel_reads_walk + g_skel_reads_build;
             const unsigned long long reads_other =
                     reads_delta > reads_phases ? reads_delta - reads_phases : 0;
             LogLine("скелет: сводка — игроков %d, со скелетом %d; "
                     "раскладка данные +0x%llx индекс +0x%llx матрицы +0x%llx индексы +0x%llx"
                     " косвенно %d/%d; имя GameObject %s; модель +0x%llx (%s); "
-                    "за %.0f с чтений %llu (кости %llu массивы %llu обход %llu прочее %llu) "
+                    "за %.0f с чтений %llu (кости %llu массивы %llu обход %llu пересборок %llu "
+                    "прочее %llu); вызовов %llu пересборок %llu (провал %llu, отложено %llu); "
+                    "сброшено: кости %llu модель %llu; "
                     "отказов %llu обрывов %llu мусора %llu меток %llu",
                     (int)result.size(), with_bones,
                     (unsigned long long)g_skeleton_layout.data_offset,
@@ -9327,11 +9369,16 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     g_character_model_offset ? "перебор" : "вшитый",
                     span,
                     reads_delta, g_skel_reads_bones, g_skel_reads_bulk,
-                    g_skel_reads_walk, reads_other,
+                    g_skel_reads_walk, g_skel_reads_build, reads_other,
+                    g_skel_box_calls, g_skel_build_calls, g_skel_build_fail,
+                    g_skel_build_skipped, g_skel_drop_fail, g_skel_drop_model,
                     g_mem.read_fails_total(), g_mem.cut_total(),
                     g_mem.junk_total(), g_mem.tagged_total());
             reads_mark = g_mem.reads_total();
             g_skel_reads_bones = g_skel_reads_bulk = g_skel_reads_walk = 0;
+            g_skel_reads_build = 0;
+            g_skel_box_calls = g_skel_build_calls = g_skel_build_skipped = 0;
+            g_skel_build_fail = g_skel_drop_fail = g_skel_drop_model = 0;
         }
     }
 
