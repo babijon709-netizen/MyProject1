@@ -10,11 +10,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           REPO=babijon709-netizen/MyProject1
-          echo "Было:"
-          gh api repos/$REPO/actions/artifacts --jq '.total_count'
-          gh api --paginate repos/$REPO/actions/artifacts --jq '.artifacts[].id' | while read id; do
-            echo "Удаляю $id"
-            gh api -X DELETE repos/$REPO/actions/artifacts/$id
-          done
-          echo "Стало:"
-          gh api repos/$REPO/actions/artifacts --jq '.total_count'
+          gh api --paginate repos/$REPO/actions/runs --jq '.workflow_runs[] | select(.status=="completed") | .id' | xargs -P 8 -I{} gh api -X DELETE repos/$REPO/actions/runs/{}
