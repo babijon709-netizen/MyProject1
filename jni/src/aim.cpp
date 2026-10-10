@@ -13,6 +13,7 @@
 #include "hud.h"               // ShowToast: мемори-режимы сообщают о поломке тостом
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
+#include "aim_control.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -172,34 +173,30 @@ float AimSensitivityGain(bool& from_game) {
 
 // ============================ Общее для всех режимов ========================
 //
-// Режимов три (переключатель во вкладке «Аим»): тач ведёт камеру синтетическим
-// пальцем, «память» пишет ввод взгляда в память игры, «сайлент» пишет ось
-// выстрела. Выбор цели и упреждение у них общие: чем бы прицел ни крутили,
-// цель выбирается по одним правилам (круг FOV, приоритет, залипание на цели,
-// упреждение по угловой скорости).
+// The three modes are touch (synthetic camera input), memory (write view input
+// to game memory), and silent (write the shot axis). Touch and memory share FOV,
+// priority, bone lock, and angle filtering; game.cpp predicts with world velocity
+// and weapon ballistics.
 
 // Состояние выбора цели. Держится каждым режимом своим экземпляром: у сайлента
 // и у памяти другая петля (нет пальца, который живёт между кадрами), и мешать
 // им залипание на цель с тачем незачем.
 struct AimPick {
-    unsigned long long lastId = 0;      // прилипчивая цель
-    int   lastBone    = -1;             // слот точки прицела прошлого такта
-    float prevTgtYaw = 0.f, prevTgtPitch = 0.f;
-    float prevCamYaw = 0.f, prevCamPitch = 0.f;
-    // Скорость цели со сглаживанием — по ней считается упреждение (см. выбор
-    // цели): дрожь кости каждый кадр меняет знак и в среднем даёт ноль, а
-    // настоящее движение идёт в одну сторону и в среднем остаётся.
-    float velYaw = 0.f, velPitch = 0.f;
-    bool  havePrev   = false;
-    // Цель в этом кадре сменилась. Режиму важно: обученный коэффициент и
-    // упреждение по прошлой цели к новой не относятся (тач, например,
-    // выбрасывает их при смене). Состояние цели при её пропаже НЕ сбрасывается
-    // — решение «цель потеряна» принимает режим (палец ждёт шесть кадров,
-    // память пишет перестаёт сразу).
-    bool  switched   = false;
+    unsigned long long lastId = 0;
+    int lastBone = -1;
+    aim_control::AngleFilter angleFilter{};
+    bool filterUsesCamera = false;
+    bool filterModeSet = false;
+    bool switched = false;
 
-    void reset() { lastId = 0; lastBone = -1; havePrev = false; switched = false;
-                   velYaw = 0.f; velPitch = 0.f; }
+    void reset() {
+        lastId = 0;
+        lastBone = -1;
+        switched = false;
+        filterUsesCamera = false;
+        filterModeSet = false;
+        angleFilter.reset();
+    }
 };
 
 // Common per-frame checks. Calibration, detached state, freecam, and the
@@ -212,6 +209,8 @@ struct AimPick {
 // rest of the diagnostics.
 static int  s_adsState  = -1;   // 1 в прицеле, 0 нет, -1 режим выключен
 static int  s_adsSource = 0;    // 1 Aim, 2 isAiming, 0 не подтвердилась
+static bool s_adsDebounced = false;
+static int s_adsOnStreak = 0, s_adsOffStreak = 0;
 
 static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     g_aimActive = false;
@@ -222,11 +221,24 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
 
     // "Только с прицелом": only steer while the local player is ADS.
     if (g_state.aim_scope_only && g_esp_attached) {
-        s_adsState = esp_local_player_is_aiming() ? 1 : 0;
+        const bool rawAds = esp_local_player_is_aiming();
+        s_adsState = rawAds ? 1 : 0;
         s_adsSource = esp_local_aim_source();
-        if (active && !s_adsState) active = false;
+        if (rawAds) {
+            if (s_adsOnStreak < 2) ++s_adsOnStreak;
+            s_adsOffStreak = 0;
+            if (s_adsOnStreak >= 2) s_adsDebounced = true;
+        } else {
+            if (s_adsOffStreak < 2) ++s_adsOffStreak;
+            s_adsOnStreak = 0;
+            if (s_adsOffStreak >= 2) s_adsDebounced = false;
+        }
+        if (active && !s_adsDebounced) active = false;
     } else {
-        s_adsState = -1; s_adsSource = 0;
+        s_adsState = -1;
+        s_adsSource = 0;
+        s_adsDebounced = false;
+        s_adsOnStreak = s_adsOffStreak = 0;
     }
     if (!active) {
         // Причину пишем по первому же невыполненному условию: в логе 15:57
@@ -259,22 +271,14 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     return true;
 }
 
-// Выбор цели и упреждение. false — цели нет; сбрасывать ли из-за этого
-// прилипание, решает режим (палец ждёт шесть кадров, запись в память
-// прекращается сразу). degPerPx наружу — мёртвая зона считается в пикселях.
+// Select and filter a target angle. A false result means no target; each mode
+// decides when to release its lock. degPerPx lets touch set a pixel-based deadband.
 // Кость, в которую аим ведёт огонь: 0 голова, 1 шея, 2 грудь.
 // Шея — просьба 19.09: попадание по кости головы уходит в нижнюю часть
 // черепа, а шея даёт крупную и устойчивую зону. Переключателя в меню нет,
 // поэтому цель задана константой.
 static constexpr int   kAimBoneSlot = 1;
 
-// Множитель упреждения по скорости цели (кадров вперёд). 0 — выключено.
-// Действует только в ТАЧ-режиме: там камера догоняет кость через трубу
-// касания, и цель за это время уходит. Мемори-аиму упреждение не нужно и
-// выключено: лок каждый такт пишет в память абсолютный угол самой кости —
-// упреждать нечего, а сдвиг точки вперёд по ходу цели выглядел бы как
-// «прицел убегает от головы» (жалоба 19.09). 0.055 — просьба 24.09.
-static constexpr float kAimVelocityLead = 0.055f;
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
 static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
 static unsigned long s_bones_not_projected = 0; // скелет есть, кости не легли на экран
@@ -376,7 +380,8 @@ static bool aim_camera_flow(float& yawDeg, float& pitchDeg) {
 // Без этого кода кадр «аим активен, прицел есть, записей ноль» нечем
 // прочесть: в логе 17:06 таких было 32 из 92, и что именно не пустило
 // цель — отфильтровали трупа, круг обзора или пустой список — не видно.
-static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, float& degPerPx, int* why = nullptr) {
+static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarget& best,
+                            float& degPerPx, int* why = nullptr) {
     if (why) *why = 0;
     const unsigned long was_ally = s_ally_skipped, was_dead = s_dead_skipped;
     const unsigned long was_nosk = s_no_skeleton,  was_noproj = s_bones_not_projected;
@@ -442,12 +447,11 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         // игроков с корректным скелетом, и прицел уезжал на него (19.09).
         if (b.dead) { ++s_dead_skipped; continue; }
         AimTarget t;
-        // Memory mode has an exact bone lock: it never substitutes a nearby
-        // joint when the selected slot is unavailable. A head/neck/chest swap
-        // is a visible angular jump at range, so a missing requested bone makes
-        // that target ineligible until that exact rig point is readable again.
-        const bool strictBoneLock = g_state.aim_mode == AIM_MODE_MEMORY;
-        // Other modes retain the old graceful fallback order.
+        // Camera-driving modes keep the configured bone exactly. Substituting
+        // another joint moves the target point enough to create visible chatter.
+        const bool strictBoneLock = g_state.aim_mode == AIM_MODE_MEMORY ||
+                                    g_state.aim_mode == AIM_MODE_TOUCH;
+        // Silent mode retains the graceful fallback order.
         static const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 1, 0}};
         int usedBone = -1;
         if (strictBoneLock) {
@@ -535,9 +539,9 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
             case 2:  score = rangeTerm * 4.f + aimTerm * 0.05f; break;
             default: score = aimTerm + rangeTerm * 0.8f; break;
         }
-        // A memory lock is target-sticky as well as bone-sticky: while its
-        // exact selected bone is valid, no newly closer target may steal it.
-        // The lock is released only by an invalid/dead/out-of-range target.
+        // Keep the current target until its exact bone becomes invalid or it
+        // leaves the release FOV. This prevents nearby candidates from stealing
+        // the lock during ADS/FOV changes.
         if (strictBoneLock && sticky) score = -1.f;
         else if (sticky) score *= 0.35f;
         if (score < bestScore) { bestScore = score; best = t; }
@@ -564,82 +568,33 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
         return false;
     }
 
-    // Lead a moving target: the game applies our step next frame, by
-    // which time the target has moved on. Use the target's angular velocity
-    // relative to the camera (with the camera's own rotation removed) and
-    // aim one frame ahead. Reset on target switch.
-    //
-    // Камера здесь та же, что и в обучении коэффициента (esp_aim_camera_angles):
-    // вычитать отстающий базис из матрицы вида из угловой скорости цели нельзя —
-    // в поправку попадал бы его запаздывающий поворот, и прицел уезжал бы в
-    // сторону. Нет настоящей оси — нет и упреждения: так вёл цель эталонный аим.
-    //
-    // Упреждение действует только в ТАЧ-режиме: камера догоняет кость через
-    // трубу касания, и цель за это время уходит. Мемори-лок пишет абсолютный
-    // угол самой кости каждый такт — ему упреждать нечего (просьба 24.09:
-    // «есть ли упреждение в мемори аиме, оно там не нужно»).
-    if (g_state.aim_mode == AIM_MODE_TOUCH) {
-        float cy = 0.f, cp = 0.f;
-        // Мусорный угол камеры (чтение сорвалось) не годится даже в
-        // нормализацию: упреждение по нему уводит прицел, а раньше из-за него
-        // ещё и зависал цикл приведения угла.
-        bool haveC = esp_aim_camera_angles(cy, cp) && std::isfinite(cy) && std::isfinite(cp);
-        if (best.id == pick.lastId && pick.havePrev && haveC) {
-            const float dCamYaw = WrapDeg180(cy - pick.prevCamYaw);
-            float dCamPitch = cp - pick.prevCamPitch;
-            // world-space angular motion of the target = change in offset + camera rotation
-            float vYaw = (best.yaw - pick.prevTgtYaw) + dCamYaw;
-            float vPitch = (best.pitch - pick.prevTgtPitch) + dCamPitch;
-            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 10.f && fabsf(vPitch) < 10.f) {
-                pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
-                // Скорость сглаживаем, прежде чем упреждать по ней. Раньше
-                // упреждение брало сырой прирост за кадр, а он у дрожащей кости
-                // каждый кадр другого знака: прицел получал рывок в полный
-                // размах дрожи и ещё столько же вперёд — то есть дрожь
-                // удваивалась. Это и была жалоба «мемори трясётся»: магнит
-                // держал цель, но вокруг неё камера ходила.
-                const float kv = 0.35f;
-                pick.velYaw   += (vYaw   - pick.velYaw)   * kv;
-                pick.velPitch += (vPitch - pick.velPitch) * kv;
-                // Below this the "motion" is bone animation jitter (breathing,
-                // sway), which at long range is larger than the head itself.
-                // Extrapolating it would double the error, so only lead real
-                // movement. Aim more than a frame ahead for fast movers so the
-                // crosshair stays on a laterally running target (the controller
-                // smoothing otherwise makes it trail behind).
-                const float leadMin = degPerPx * 2.f;
-                float vMag = sqrtf(pick.velYaw * pick.velYaw + pick.velPitch * pick.velPitch);
-                if (vMag > leadMin) {
-                    // Забегаем чуть больше чем на кадр вперёд (игра применит
-                    // шаг в своём следующем кадре). По сглаженной скорости это
-                    // безопасно: дрожь в неё не проходит, а постоянное
-                    // движение проходит целиком. Множитель больше 1.1 только
-                    // мерил: при 2.0 цель идёт с остатком 0.98° против 0.70°,
-                    // то есть прицел уезжает вперёд, а не отстаёт.
-                    // История: было до 1.5 кадра вперёд — выглядело как «аим
-                    // пытается запредиктить движение игрока» (жалоба 19.09):
-                    // точка уезжала вперёд по ходу цели, а когда цель меняла
-                    // направление, прицел оказывался не там. Поэтому упреждение
-                    // долго стояло на нуле. Просьба 24.09 — вернуть упреждение
-                    // в тач и поднять его до 0.055 кадра: оно компенсирует трубу
-                    // касания и уход цели за время догонки. Кэп 1.5 кадра
-                    // оставлен, чтобы не уезжать далеко вперёд по ходу цели.
-                    float k = kAimVelocityLead * (1.f - leadMin / vMag);
-                    if (k > 1.5f) k = 1.5f;
-                    best.yaw   += pick.velYaw   * k;
-                    best.pitch += pick.velPitch * k;
-                }
-            } else {
-                // Скорость сорвалась (мусор) — и сглаженную обнуляем, чтобы
-                // одиночный выброс не тянул прицел дальше.
-                pick.velYaw = pick.velPitch = 0.f;
-                pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
-            }
-        } else {
-            pick.prevTgtYaw = best.yaw; pick.prevTgtPitch = best.pitch;
+    const bool targetChanged = best.id != pick.lastId;
+    const bool selectionChanged = targetChanged || best.bone != pick.lastBone;
+    if (selectionChanged) pick.angleFilter.reset();
+    if (g_state.aim_mode == AIM_MODE_MEMORY || g_state.aim_mode == AIM_MODE_TOUCH) {
+        float filteredYaw = best.yaw;
+        float filteredPitch = best.pitch;
+        float cameraYaw = 0.0f, cameraPitch = 0.0f;
+        const bool haveCamera = esp_aim_camera_angles(cameraYaw, cameraPitch) &&
+                                std::isfinite(cameraYaw) && std::isfinite(cameraPitch);
+        if (!pick.filterModeSet || pick.filterUsesCamera != haveCamera) {
+            pick.angleFilter.reset();
+            pick.filterUsesCamera = haveCamera;
+            pick.filterModeSet = true;
         }
-        if (haveC) { pick.prevCamYaw = cy; pick.prevCamPitch = cp; pick.havePrev = true; }
-        else pick.havePrev = false;
+        float timeConstant = g_state.aim_mode == AIM_MODE_MEMORY ? 0.026f : 0.018f;
+        if (best.world_dist > 0.0f && best.world_dist < 12.0f) timeConstant *= 0.75f;
+        if (haveCamera) {
+            filteredYaw = WrapDeg180(cameraYaw + filteredYaw);
+            filteredPitch += cameraPitch;
+            pick.angleFilter.update(filteredYaw, filteredPitch, dt, timeConstant);
+            best.yaw = WrapDeg180(filteredYaw - cameraYaw);
+            best.pitch = filteredPitch - cameraPitch;
+        } else {
+            pick.angleFilter.update(filteredYaw, filteredPitch, dt, timeConstant);
+            best.yaw = filteredYaw;
+            best.pitch = filteredPitch;
+        }
     }
     // Цель взята — с этого такта камера (или ось выстрела) наша: автофарм ей
     // больше не командует.
@@ -647,11 +602,9 @@ static bool AimSelectTarget(float sw, float sh, AimPick& pick, AimTarget& best, 
     // Состояние выбранной цели — чтобы по логу проверить признак смерти:
     // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
     // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
-    if (best.id != pick.lastId)
-        ;
-    pick.switched = (best.id != pick.lastId);
+    pick.switched = selectionChanged;
     const double now = MonoNow();
-    if (pick.switched) {
+    if (targetChanged) {
         g_aim_pulse_target.store(best.id, std::memory_order_relaxed);
         g_aim_pulse_at.store(now, std::memory_order_relaxed);
     }
@@ -694,21 +647,53 @@ static void UpdateAimTouch(float dt) {
     static bool  s_havePrevRaw = false;
     // Счётчики однонаправленного остатка в полосе дрожи (см. константы выше).
     static int s_streakYaw = 0, s_streakPitch = 0;
+    static int s_ackTimeouts = 0;
+    static float s_ackDisabled = 0.f;
+    static float s_trimYaw = 1.f, s_trimPitch = 1.f;
+    static float s_flipDamp = 1.f;
+    static float s_prevCtlYaw = 0.f, s_prevCtlPitch = 0.f;
+    static bool s_haveCtlErr = false;
+    static bool s_wasActive = false;
     static AimPick pick;
+
+    auto resetRuntime = [&]() {
+        AimReleaseFinger(s_fingerDown);
+        s_fx = s_fy = 0.0f;
+        s_lastCamYaw = s_lastCamPitch = 0.0f;
+        s_haveLast = false;
+        s_gainYaw = s_gainPitch = 0.0f;
+        s_trackYaw.reset(); s_trackPitch.reset();
+        s_pendDx = s_pendDy = s_pendTime = 0.0f;
+        s_camMovedPrev = false;
+        s_lostFrames = s_holdFrames = 0;
+        s_acquire = 0.0f;
+        s_flight.clear();
+        s_absorbYaw = s_absorbPitch = 0.0f;
+        s_stallYaw = s_stallPitch = 0.0f;
+        s_prevRawYaw = s_prevRawPitch = 0.0f;
+        s_havePrevRaw = false;
+        s_streakYaw = s_streakPitch = 0;
+        s_ackTimeouts = 0;
+        s_ackDisabled = 0.0f;
+        s_trimYaw = s_trimPitch = 1.0f;
+        s_flipDamp = 1.0f;
+        s_prevCtlYaw = s_prevCtlPitch = 0.0f;
+        s_haveCtlErr = false;
+        pick.reset();
+    };
 
     float sw = 0.f, sh = 0.f;
     if (!AimBegin(dt, sw, sh)) {
-        AimReleaseFinger(s_fingerDown);
-        s_haveLast = false; pick.reset();
-        s_lostFrames = 0; s_holdFrames = 0;
-        s_trackYaw.reset(); s_trackPitch.reset();
-        s_flight.clear();
-        s_absorbYaw = s_absorbPitch = 0.f;
-        s_stallYaw = s_stallPitch = 0.f;
-        s_havePrevRaw = false;
-        s_streakYaw = s_streakPitch = 0;
+        resetRuntime();
+        s_wasActive = false;
         return;
     }
+    if (!s_wasActive) {
+        resetRuntime();
+        s_wasActive = true;
+    }
+    const float responseWindow = std::min(0.60f, std::max(0.13f, dt * 8.0f));
+    const float ackWait = std::min(0.60f, std::max(0.25f, dt * 8.0f));
 
     // Точка, из которой аим водит палец: выбирается в меню тапом по экрану
     // (вкладка «Аим», см. g_calibMode == 3). Пока не задана — прежняя позиция
@@ -717,7 +702,7 @@ static void UpdateAimTouch(float dt) {
 
     AimTarget best;
     float degPerPx = 0.f;
-    if (!AimSelectTarget(sw, sh, pick, best, degPerPx)) {
+    if (!AimSelectTarget(sw, sh, dt, pick, best, degPerPx)) {
         // Keep the finger down briefly so a momentary read failure does not
         // register as a tap (tap-to-shoot in some layouts) or reset momentum.
         if (++s_lostFrames > 6) {
@@ -846,7 +831,6 @@ static void UpdateAimTouch(float dt) {
     //    меньше нужного, то есть аим просто медленнее — безопасная сторона.
     constexpr float kGainTrimMax   = 1.4f;
     constexpr float kGainTrimStep  = 0.25f;   // ~6 тактов на новую подтяжку
-    static float s_trimYaw = 1.f, s_trimPitch = 1.f;
     auto trimTo = [](float trim, float measured, float base) {
         float want = 1.f;
         if (fabsf(measured) > 1e-4f && fabsf(base) > 1e-4f) {
@@ -883,8 +867,6 @@ static void UpdateAimTouch(float dt) {
     // свой таймаут: аим двигался бы рывками. Считаем таймауты подряд — после
     // третьего выключаем такт на 5 с и работаем шагами по ошибке (он устойчив и
     // без подтверждения: доля ошибки за такт ограничена половиной).
-    static int   s_ackTimeouts = 0;
-    static float s_ackDisabled = 0.f;
     const bool camAnswered = camMoved || s_camMovedPrev;
     s_camMovedPrev = camMoved;
     if (s_ackDisabled > 0.f) s_ackDisabled -= dt;
@@ -892,7 +874,7 @@ static void UpdateAimTouch(float dt) {
     if (ackGate && s_fingerDown && !camAnswered &&
         (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
         s_pendTime += dt;
-        if (s_pendTime < 0.25f) {
+        if (s_pendTime < ackWait) {
             Touch_Move(s_fx, s_fy);   // держим тач живым, ничего не двигаем
             return;
         }
@@ -923,9 +905,8 @@ static void UpdateAimTouch(float dt) {
     //      боксов меньше трёх) — падение остатка: камера отработала приказ
     //      тогда, когда остаток стал меньше. Ни предположений о задержке, ни
     //      поедания уже отработанных приказов: сколько съедено, столько списано.
-    //   2. ОКНО приказов моложе kTouchFlightLife: ограничивает оценку сверху
-    //      на ведении цели (цель убегает, а поток не посчитался — остаток не
-    //      падает, и поглощение само не списывается никогда).
+    //   2. Flight orders younger than responseWindow cap the estimate while
+    //      tracking a moving target when camera feedback is unavailable.
     //
     // Выбор оценки по величине остатка. Раньше бралась просто меньшая по
     // величине из двух, и на просадке ФПС (жалоба 23.09, третий заход: «при
@@ -952,7 +933,6 @@ static void UpdateAimTouch(float dt) {
     //     кадров (110 реверсов на стенде);
     //   * доля шага спадает вместе с остатком — поздние прилёты длинной
     //     трубы не перелетают кость.
-    static constexpr float kTouchFlightLife = 0.13f;  // жизнь приказа в окне, с
     // Заказ без отклика — потерялся. При просадке ФПС игры труба касания
     // растягивается на 2-8 кадров ИГРЫ: на 12-15 фпс это до 0.5-0.7 с, а
     // прежние 0.4 с списывали заказ, который ещё ЛЕТИТ — контроллер считал
@@ -1063,7 +1043,7 @@ static void UpdateAimTouch(float dt) {
         // Окно приказов.
         for (auto& o : s_flight) o.age += dt;
         s_flight.erase(std::remove_if(s_flight.begin(), s_flight.end(),
-                       [](const FlightOrd& o) { return o.age >= kTouchFlightLife; }),
+                       [responseWindow](const FlightOrd& o) { return o.age >= responseWindow; }),
                        s_flight.end());
         float winYaw = 0.f, winPitch = 0.f;
         for (const auto& o : s_flight) { winYaw += o.yawDeg; winPitch += o.pitchDeg; }
@@ -1137,8 +1117,8 @@ static void UpdateAimTouch(float dt) {
     if (gainKnownPitch && deadPitch < qPitch * 2.0f) deadPitch = qPitch * 2.0f;
     if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
-        // Заказанное за прошлые такты камера дорабатывает и без нас: окно
-        // стареет само, приказы молча истекают по kTouchFlightLife.
+        // Orders from previous frames continue resolving without new input;
+        // each expires after the adaptive responseWindow.
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
         return;
     }
@@ -1221,9 +1201,6 @@ static void UpdateAimTouch(float dt) {
     // тактов режем шаг, чтобы вместо дрожи подойти спокойно; восстанавливаемся
     // плавно (около четырёх тактов). Стенд: реверсы пальца на подходе 6 -> 4,
     // перелёт не растёт.
-    static float s_flipDamp = 1.f;
-    static float s_prevCtlYaw = 0.f, s_prevCtlPitch = 0.f;
-    static bool  s_haveCtlErr = false;
     const bool flipYaw = s_haveCtlErr && s_prevCtlYaw * errYaw < 0.f &&
                          fabsf(errYaw) > fabsf(s_prevCtlYaw) * 0.35f;
     const bool flipPitch = s_haveCtlErr && s_prevCtlPitch * errPitch < 0.f &&
@@ -1237,21 +1214,11 @@ static void UpdateAimTouch(float dt) {
     s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
     k *= s_flipDamp;
 
-    // Мягкий старт при захвате.
-    //
-    // Жалоба 19.09: «тач-аим ходит маятником первые две секунды». Механика
-    // такая: в момент захвата ошибка велика, и контроллер сразу выдаёт шаг под
-    // потолок (0.15*sh пикселей — 162 px на этом экране). Касание идёт до
-    // камеры через систему ввода Android 2—8 кадров, и за это время мы
-    // успеваем заказать ещё столько же. Камера приходит сразу на несколько
-    // шагов и перелетает; ошибка меняет знак; дальше петля ходит, пока окно
-    // «в полёте» не выровняется — эти две секунды и есть.
-    //
-    // Поэтому первые 0.2 с после захвата (и после нового касания) шаг режем
-    // до трети и плавно отдаём полный. Основную раскачку теперь гасит учёт
-    // «в полёте» (см. выше), мягкий старт — дополнительная страховка самого
-    // первого шага; наведение всё равно занимает считанные кадры: при большой
-    // ошибке шаг и в треть размера упирается в потолок.
+    // Soft-start a new lock. Previously, the first frame could use the old
+    // pixel cap (0.15*sh, about 162 px here). Android touch can take 2-8 frames
+    // to reach the camera, so commands accumulated and caused an overshoot
+    // before the in-flight window caught up. Ramp the first 0.2 s from one-third
+    // to full strength; the in-flight accounting handles the remaining delay.
     if (pick.switched) s_acquire = 0.f;
     s_acquire += dt / 0.20f;
     if (s_acquire > 1.f) s_acquire = 1.f;
@@ -1289,16 +1256,15 @@ static void UpdateAimTouch(float dt) {
     if (fabsf(dx * gy) > fabsf(errYaw)) dx = errYaw / gy;
     if (fabsf(dy * gp) > fabsf(errPitch)) dy = -errPitch / gp;
 
-    // Clamp per-frame travel so a bad gain estimate never slingshots.
-    // Потолок шага поднимаем только коэффициенту, выученному по повороту камеры
-    // (это прямое измерение град/px). Оценка по реакции прицела и значение из
-    // настройки работают с прежним потолком: большой шаг по непроверенному
-    // коэффициенту — это рывок через пол-экрана.
-    const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
-    if (dx >  maxStep) dx =  maxStep;
-    if (dx < -maxStep) dx = -maxStep;
-    if (dy >  maxStep) dy =  maxStep;
-    if (dy < -maxStep) dy = -maxStep;
+    // Bound each command in camera degrees as well as screen pixels. Learned
+    // sensitivity must not multiply the first ADS correction into a large jump.
+    const float maxAnglePerFrame = 1.5f + 0.90f * sm;
+    const float maxYawStep = aim_control::touch_step_limit_pixels(sh, gy, maxAnglePerFrame);
+    const float maxPitchStep = aim_control::touch_step_limit_pixels(sh, gp, maxAnglePerFrame);
+    if (dx >  maxYawStep) dx =  maxYawStep;
+    if (dx < -maxYawStep) dx = -maxYawStep;
+    if (dy >  maxPitchStep) dy =  maxPitchStep;
+    if (dy < -maxPitchStep) dy = -maxPitchStep;
 
     // Move in whole device units so the applied delta is exactly what we
     // measure next frame (gain learning) and the finger never accumulates a
@@ -1386,8 +1352,6 @@ static void AimLogTick(float dt) {
 // MouseLook полный шум одного снимка рига. Мёртвая зона меньше одного пикселя
 // на обычном FOV; за ней шаг плавно ограничен скоростью. Поэтому лок остаётся
 // на кости, а микроколебания анимации/чтения не превращаются в дёрганье камеры.
-static constexpr float kMemDeadbandDeg  = 0.035f;
-static constexpr float kMemMaxSpeedDeg  = 72.0f;
 // ACK по накопителю: расхождение с нашей записью, в пределах которого игра
 // приняла значение. Это только диагностика отклика в меню.
 static constexpr float kMemAckEps = 0.10f;
@@ -1396,23 +1360,10 @@ static AimMemDiag s_memDiag;
 
 const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
-// Остаток -> гладкий шаг жёсткого лока. Кость должна быть в пределах
-// kMemDeadbandDeg, а не перескакиваться каждым шумным измерением. За границей
-// шаг пропорционален остатку и ограничен угловой скоростью. Коэффициент
-// приведён к dt, поэтому поведение не меняется вместе с FPS оверлея.
-static float mem_axis_step(float err, float dt) {
-    if (!std::isfinite(err)) return 0.f;
-    if (fabsf(err) <= kMemDeadbandDeg) return 0.f;
-    float speed = g_state.gun_str;
-    if (!(speed >= 1.f)) speed = 1.f;
-    if (speed > 10.f) speed = 10.f;
-    const float smooth = 0.25f + (speed - 1.f) / 9.f * 0.75f;
-    const float gain = manes_aim_source::frame_gain(smooth, dt);
-    const float maxStep = kMemMaxSpeedDeg * dt;
-    float step = err * gain;
-    if (step >  maxStep) step =  maxStep;
-    if (step < -maxStep) step = -maxStep;
-    return step;
+// Convert remaining error into a smooth lock step. Use a small deadband near
+// the bone; farther away, acquisition speed depends on sensitivity and range.
+static float mem_axis_step(float err, float dt, float range) {
+    return aim_control::memory_step(err, dt, g_state.gun_str, range);
 }
 
 static void UpdateAimMemory(float dt) {
@@ -1463,7 +1414,7 @@ static void UpdateAimMemory(float dt) {
     AimTarget best;
     float degPerPx = 0.f;
     int noTgtWhy = 0;
-    if (!AimSelectTarget(sw, sh, pick, best, degPerPx, &noTgtWhy)) {
+    if (!AimSelectTarget(sw, sh, dt, pick, best, degPerPx, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
         pick.reset(); s_haveLast = false; s_haveLastWrite = false;
         return;
@@ -1508,8 +1459,8 @@ static void UpdateAimMemory(float dt) {
     }
 
     // ---- плавный жёсткий лок --------------------------------------------------
-    const float offYaw   = mem_axis_step(best.yaw, dt);
-    const float offPitch = mem_axis_step(best.pitch, dt);
+    const float offYaw   = mem_axis_step(best.yaw, dt, best.world_dist);
+    const float offPitch = mem_axis_step(best.pitch, dt, best.world_dist);
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         ++s_memDiag.on_target;
@@ -1547,7 +1498,7 @@ static void UpdateAimSilent(float dt) {
 
     AimTarget best;
     float degPerPx = 0.f;
-    if (!AimSelectTarget(sw, sh, pick, best, degPerPx) || !best.world_valid) {
+    if (!AimSelectTarget(sw, sh, dt, pick, best, degPerPx) || !best.world_valid) {
         g_aimActive = false;
         pick.reset();
         silent_aim::clear();

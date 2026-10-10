@@ -60,13 +60,11 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
                                 g_state.aim_mode == AIM_MODE_MEMORY);
         esp_set_always_day(g_state.always_day);
         esp_set_marker_max_distance(g_state.marker_dist);
-        // Упреждение аима (слайдер на вкладке аима): в игру уходит в секундах.
-        // Упреждение: слайдер, но для мемори-аима — автоматически не меньше
-        // задержки контура (1-2 кадра игры + запись в середине кадра ≈ 50 мс).
-        // Скорость берётся из трекера игроков в game.cpp (world-space, уже
-        // сглаженная) — в отличие от углового предикта по разности кадров,
-        // который шумел и дёргал прицел (жалоба 05.10).
-        const float leadAuto = (g_state.aim_mode == AIM_MODE_MEMORY) ? 0.05f : 0.0f;
+        // Keep a control-latency floor for touch and memory; the slider can
+        // raise it. Projectile flight time is added separately from the active
+        // weapon's ballistic parameters in game.cpp.
+        const float leadAuto = (g_state.aim_mode == AIM_MODE_MEMORY) ? 0.05f :
+                               (g_state.aim_mode == AIM_MODE_TOUCH) ? 0.04f : 0.0f;
         const float leadUser = g_state.aim_lead_ms * 0.001f;
         esp_set_aim_lead(leadUser > leadAuto ? leadUser : leadAuto);
         esp_set_screen_stretch(g_state.screen_stretch_x);

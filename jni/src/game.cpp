@@ -5,6 +5,7 @@
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
+#include "aim_ballistics.h"
 #include "mem_io.h"                // чтение/запись памяти игры: транспорт + кэш блоков
 #include "kernel_io.h"             // кернел-транспорт (сокет ядерного драйвера)
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
@@ -6221,21 +6222,256 @@ static float head_lift_for_range(const Vec3& world) {
 // without this the crosshair sits permanently behind him, by a distance
 // proportional to how fast he runs.
 //
-// It is his own speed through the world, so nothing here depends on knowing
-// the look sensitivity, on reading the camera angles, or on separating our
-// turning from his -- the three things that have no reliable answer on this
-// build. Set per player just below, applied here, and it only shifts the
-// point the aim steers to: the ESP box still draws where the man actually is.
-// Упреждение ВЫКЛЮЧЕНО по умолчанию (0.0 с; историческое значение было
-// 0.05 с). При включении оно уводило прицел туда, где цель ОКАЖЕТСЯ через
-// несколько кадров, и на глаз это выглядело как «аим пытается
-// запредиктить движение»: точка прыгала вперёд по ходу цели, аим за ней,
-// цель меняла направление — начинались качели (жалоба 19.09). Поэтому
-// константа стала слайдером «Упреждение» (0 = вести ровно по кости):
-// желающий подбирает забег под свой пинг сам, дефолт — прежнее «без
-// упреждения».
+// A small control-latency floor is applied by esp_draw.cpp for memory/touch;
+// the user setting may raise it. This shifts only the aim point, not the ESP
+// box. Active projectile flight time is solved separately below from the
+// weapon's speed, gravity and drag when those parameters are available.
 static float g_aim_lead_seconds = 0.0F;
 static Vec3 g_aim_lead{};
+static Vec3 g_aim_velocity{};
+static Vec3 g_aim_inherited_velocity{};
+static aim_ballistics::Parameters g_aim_ballistic_params{};
+
+namespace {
+constexpr const char* kAimWeaponNamespace = "HyperHug.Games.Oxide.Features.Weapons";
+constexpr const char* kAimFirstPersonNamespace =
+    "HyperHug.Games.Oxide.By_Namespace.Oxide.Player.First_Person";
+constexpr const char* kAimBallisticsNamespace =
+    "HyperHug.Games.Oxide.Features.Weapons.Ballistics";
+
+struct AimBallisticRead {
+    aim_ballistics::Parameters params{};
+    bool valid_chain = false;
+};
+
+bool aim_read_pointer_exact(uint64_t address, uint64_t& value) {
+    value = 0;
+    uint64_t raw = 0;
+    if (!rd_exact(address, raw)) return false;
+    value = memio::untag(raw);
+    return raw == 0 || valid_obj(value);
+}
+
+int aim_object_identity(uint64_t object, const char* name, const char* name_space) {
+    if (!valid_obj(object)) return 0;
+    uint64_t klass = 0;
+    if (!aim_read_pointer_exact(object, klass) || !valid_obj(klass)) return 0;
+    return class_identity(klass, name, name_space);
+}
+
+bool aim_read_float(uint64_t address, float minimum, float maximum, float& value) {
+    value = 0.0f;
+    float read_value = 0.0f;
+    if (!rd_exact(address, read_value) || !aim_ballistics::finite(read_value) ||
+        read_value < minimum || read_value > maximum) return false;
+    value = read_value;
+    return true;
+}
+
+bool aim_read_profile(uint64_t profile, AimBallisticRead& read) {
+    if (aim_object_identity(profile, "BallisticProfile", kAimBallisticsNamespace) == 0)
+        return false;
+    float gravity = 0.0f, air_drag = 0.0f, underwater_drag = 0.0f;
+    if (!aim_read_float(profile + BALLISTICPROFILE_GRAVITY, -20.0f, 20.0f, gravity) ||
+        !aim_read_float(profile + BALLISTICPROFILE_AIR_DRAG, 0.0f, 100.0f, air_drag) ||
+        !aim_read_float(profile + BALLISTICPROFILE_UNDERWATER_DRAG, 0.0f, 100.0f,
+                        underwater_drag)) return false;
+    read.params.gravity = gravity;
+    read.params.air_drag = air_drag;
+    read.params.underwater_drag = underwater_drag;
+    return true;
+}
+
+bool aim_read_weapon_config(uint64_t weapon, uint64_t offset, bool allow_structural_fallback,
+                            AimBallisticRead& read) {
+    read = {};
+    uint64_t config = 0;
+    if (!aim_read_pointer_exact(weapon + offset, config) || !valid_obj(config)) return false;
+    const int identity = aim_object_identity(config, "HitscanWeaponConfig", kAimWeaponNamespace);
+    if (identity == 0) return false;
+
+    float max_distance = 0.0f, bullet_speed = 0.0f, fire_rate = 0.0f, dispersion = 0.0f;
+    int32_t projectiles = 0;
+    if (!aim_read_float(config + HITSCANCONFIG_MAX_DISTANCE, 0.0f, 5000.0f, max_distance) ||
+        !aim_read_float(config + HITSCANCONFIG_BULLET_SPEED, 0.0f, 2000.0f, bullet_speed) ||
+        !aim_read_float(config + HITSCANCONFIG_FIRE_RATE, 0.0f, 1000.0f, fire_rate) ||
+        !aim_read_float(config + HITSCANCONFIG_BASE_DISPERSION, 0.0f, 1000.0f, dispersion) ||
+        !rd_exact(config + HITSCANCONFIG_PROJECTILES_PER_SHOT, projectiles)) return false;
+
+    uint64_t profile = 0;
+    if (!aim_read_pointer_exact(config + HITSCANCONFIG_BALLISTIC_PROFILE, profile)) return false;
+    if (profile && !aim_read_profile(profile, read)) return false;
+
+    if (identity == 2 && allow_structural_fallback) {
+        uint64_t dispersion_config = 0;
+        if (!aim_read_pointer_exact(config + HITSCANCONFIG_DISPERSION_CONFIG, dispersion_config) ||
+            !valid_obj(dispersion_config) ||
+            aim_object_identity(dispersion_config, "DispersionConfig", kAimWeaponNamespace) == 0 ||
+            projectiles < 1 || projectiles > 32 || !(fire_rate > 0.0f) ||
+            !(max_distance > 0.0f) || !(bullet_speed > 1.0f) || dispersion > 30.0f)
+            return false;
+    }
+
+    read.params.muzzle_speed = bullet_speed;
+    read.params.max_range = max_distance;
+    read.params.valid = bullet_speed >= 1.0f;
+    read.valid_chain = true;
+    return true;
+}
+
+bool aim_read_projectile(uint64_t weapon, uint64_t offset, bool allow_structural_fallback,
+                         AimBallisticRead& read) {
+    read = {};
+    uint64_t projectile = 0;
+    if (!aim_read_pointer_exact(weapon + offset, projectile) || !valid_obj(projectile))
+        return false;
+    const int identity = aim_object_identity(projectile, "ShaftedProjectile", "Oxide");
+    if (identity == 0) return false;
+
+    float max_distance = 0.0f, launch_speed = 0.0f;
+    float gravity = 0.0f, air_drag = 0.0f, underwater_drag = 0.0f;
+    if (!aim_read_float(projectile + SHAFTEDPROJECTILE_MAX_DISTANCE, 0.0f, 5000.0f,
+                        max_distance) ||
+        !aim_read_float(projectile + SHAFTEDPROJECTILE_LAUNCH_SPEED, 0.0f, 2000.0f,
+                        launch_speed) ||
+        !aim_read_float(projectile + SHAFTEDPROJECTILE_GRAVITY, -20.0f, 20.0f, gravity) ||
+        !aim_read_float(projectile + SHAFTEDPROJECTILE_AIR_DRAG, 0.0f, 100.0f, air_drag) ||
+        !aim_read_float(projectile + SHAFTEDPROJECTILE_UNDERWATER_DRAG, 0.0f, 100.0f,
+                        underwater_drag)) return false;
+    if (identity == 2 && allow_structural_fallback &&
+        (!(max_distance > 0.0f) || !(launch_speed > 1.0f))) return false;
+
+    read.params.muzzle_speed = launch_speed;
+    read.params.max_range = max_distance;
+    read.params.gravity = gravity;
+    read.params.air_drag = air_drag;
+    read.params.underwater_drag = underwater_drag;
+    read.params.valid = launch_speed >= 1.0f;
+    read.valid_chain = true;
+    return true;
+}
+
+void aim_merge_ballistics(const AimBallisticRead& config, const AimBallisticRead& projectile,
+                          aim_ballistics::Parameters& out) {
+    out = {};
+    if (projectile.valid_chain && projectile.params.valid) {
+        out = projectile.params;
+        if (!(out.max_range > 0.0f) && config.valid_chain && config.params.valid)
+            out.max_range = config.params.max_range;
+    } else if (config.valid_chain && config.params.valid) {
+        out = config.params;
+    }
+    out.valid = out.muzzle_speed >= 1.0f && aim_ballistics::parameters_valid(out);
+}
+
+void update_aim_ballistics(uint64_t player) {
+    g_aim_ballistic_params = {};
+    g_aim_inherited_velocity = {};
+    if (!g_mem.bound() || !valid_obj(player) ||
+        aim_object_identity(player, "PlayerManager", "Oxide") == 0) return;
+
+    uint64_t fp = 0;
+    if (!aim_read_pointer_exact(player + PLAYER_FP_MANAGER, fp) || !valid_obj(fp) ||
+        aim_object_identity(fp, "FPManager", "Oxide") == 0) return;
+    uint64_t weapon = 0;
+    if (!aim_read_pointer_exact(fp + FPMANAGER_CURRENT_OBJECT, weapon) || !valid_obj(weapon))
+        return;
+    uint64_t owner = 0;
+    if (!aim_read_pointer_exact(weapon + FPOBJECT_PLAYER_BACKREF, owner) || owner != player)
+        return;
+
+    enum class Kind { None, Hitscan, Bow, Crossbow, Rocket, Explosive, Snowball, Spear };
+    Kind kind = Kind::None;
+    if (aim_object_identity(weapon, "FPHitscan", "Oxide") == 1) kind = Kind::Hitscan;
+    else if (aim_object_identity(weapon, "FPBow", "Oxide") == 1) kind = Kind::Bow;
+    else if (aim_object_identity(weapon, "FPCrossbow", kAimFirstPersonNamespace) == 1)
+        kind = Kind::Crossbow;
+    else if (aim_object_identity(weapon, "FPRocketLauncher", "Oxide") == 1)
+        kind = Kind::Rocket;
+    else if (aim_object_identity(weapon, "FPExplosiveCharge", "Oxide") == 1)
+        kind = Kind::Explosive;
+    else if (aim_object_identity(weapon, "FPSnowball", kAimFirstPersonNamespace) == 1)
+        kind = Kind::Snowball;
+    else if (aim_object_identity(weapon, "FPSpear", "Oxide") == 1)
+        kind = Kind::Spear;
+
+    uint64_t config_offset = 0, projectile_offset = 0;
+    switch (kind) {
+        case Kind::Hitscan: config_offset = FPHITSCAN_CONFIG; break;
+        case Kind::Bow: projectile_offset = FPBOW_PROJECTILE_PREFAB; break;
+        case Kind::Crossbow:
+            config_offset = FPCROSSBOW_CONFIG;
+            projectile_offset = FPCROSSBOW_PROJECTILE_PREFAB;
+            break;
+        case Kind::Rocket:
+            config_offset = FPROCKETLAUNCHER_CONFIG;
+            projectile_offset = FPROCKETLAUNCHER_PROJECTILE_PREFAB;
+            break;
+        case Kind::Explosive: projectile_offset = FPEXPLOSIVECHARGE_PROJECTILE_PREFAB; break;
+        case Kind::Snowball: projectile_offset = FPSNOWBALL_PROJECTILE_PREFAB; break;
+        case Kind::Spear: projectile_offset = FPSPEAR_PROJECTILE_PREFAB; break;
+        default: break;
+    }
+
+    AimBallisticRead config_read{}, projectile_read{};
+    bool config_ok = false, projectile_ok = false;
+    if (config_offset)
+        config_ok = aim_read_weapon_config(weapon, config_offset, false, config_read);
+    if (projectile_offset)
+        projectile_ok = aim_read_projectile(weapon, projectile_offset, false, projectile_read);
+
+    if (kind == Kind::None) {
+        static constexpr uint64_t config_candidates[] = {
+            FPHITSCAN_CONFIG, FPCROSSBOW_CONFIG, FPROCKETLAUNCHER_CONFIG
+        };
+        for (uint64_t offset : config_candidates) {
+            if (aim_read_weapon_config(weapon, offset, true, config_read) &&
+                config_read.params.valid) { config_ok = true; break; }
+            config_read = {};
+        }
+        static constexpr uint64_t projectile_candidates[] = {
+            FPBOW_PROJECTILE_PREFAB, FPCROSSBOW_PROJECTILE_PREFAB,
+            FPROCKETLAUNCHER_PROJECTILE_PREFAB, FPEXPLOSIVECHARGE_PROJECTILE_PREFAB,
+            FPSPEAR_PROJECTILE_PREFAB
+        };
+        for (uint64_t offset : projectile_candidates) {
+            if (aim_read_projectile(weapon, offset, true, projectile_read) &&
+                projectile_read.params.valid) { projectile_ok = true; break; }
+            projectile_read = {};
+        }
+    }
+
+    aim_merge_ballistics(config_ok ? config_read : AimBallisticRead{},
+                         projectile_ok ? projectile_read : AimBallisticRead{},
+                         g_aim_ballistic_params);
+
+    auto local_track = g_player_track.find(player);
+    if (local_track != g_player_track.end() && local_track->second.have_vel_ref) {
+        const double age = mono_seconds() - local_track->second.vel_ref_t;
+        const Vec3 velocity = local_track->second.vel;
+        const float speed = aim_ballistics::length(velocity);
+        if (age >= 0.0 && age <= 0.35 && aim_ballistics::finite(velocity) &&
+            aim_ballistics::finite(speed) && speed <= 12.0f)
+            g_aim_inherited_velocity = velocity;
+    }
+}
+
+bool aim_ballistic_origin(Vec3& origin) {
+    if (g_aim_ref_valid && aim_ballistics::finite(g_aim_ref_origin)) {
+        origin = g_aim_ref_origin;
+        return true;
+    }
+    if (g_cam_pose_valid && aim_ballistics::finite(g_cam_pos)) {
+        origin = g_cam_pos;
+        return true;
+    }
+    if (g_frame_cam_basis_valid && aim_ballistics::finite(g_frame_cam_pos)) {
+        origin = g_frame_cam_pos;
+        return true;
+    }
+    return false;
+}
+} // namespace
 
 // Растяг экрана (Aspect Ratio), множитель к aspect камеры игры; 1.0 = выкл.
 // Поставляется из меню через esp_set_screen_stretch (см. esp_draw.cpp).
@@ -6255,20 +6491,36 @@ void esp_set_aim_lead(float seconds) {
 }
 
 static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat4& vp, float sw, float sh) {
-    Vec3 world = world_in;
-    world.x += g_aim_lead.x; world.y += g_aim_lead.y; world.z += g_aim_lead.z;
+    Vec3 world{world_in.x + g_aim_lead.x,
+               world_in.y + g_aim_lead.y,
+               world_in.z + g_aim_lead.z};
     if (slot == 0) world.y += head_lift_for_range(world_in);
-    // На дали пуля садится ниже кости: каждые 20 м — 5 см вниз (тач и память
-    // берут одну и ту же точку). Слот любой: голова/шея/тело одинаково.
-    {
-        Vec3 origin = g_cam_pose_valid ? g_cam_pos : g_aim_ref_origin;
-        const bool have = g_cam_pose_valid || g_aim_ref_valid;
-        if (have) {
-            float dx = world_in.x - origin.x, dy = world_in.y - origin.y, dz = world_in.z - origin.z;
-            float range = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (std::isfinite(range) && range > 0.f)
-                world.y -= 0.05F * (range / 20.0F);
+
+    Vec3 origin{};
+    const bool haveOrigin = aim_ballistic_origin(origin);
+    bool ballisticSolved = false;
+    if (g_state.aim_touch && g_state.aim_mode != AIM_MODE_SILENT &&
+        g_aim_ballistic_params.valid && haveOrigin) {
+        aim_ballistics::Solution solution{};
+        if (aim_ballistics::solve(origin, world, g_aim_velocity,
+                                  g_aim_inherited_velocity,
+                                  g_aim_ballistic_params, solution)) {
+            float range = aim_ballistics::length(aim_ballistics::sub(world, origin));
+            if (aim_ballistics::finite(range) && range < 1.0f) range = 1.0f;
+            if (aim_ballistics::finite(range)) {
+                world = aim_ballistics::add(origin,
+                    aim_ballistics::scale(solution.direction, range));
+                ballisticSolved = true;
+            }
         }
+    }
+
+    if (!ballisticSolved && haveOrigin) {
+        // Legacy drop correction is retained only when weapon ballistics are
+        // unavailable or the target is outside the projectile's reachable arc.
+        const float range = aim_ballistics::length(aim_ballistics::sub(world_in, origin));
+        if (aim_ballistics::finite(range) && range > 0.0f)
+            world.y -= 0.05F * (range / 20.0F);
     }
     Vec2 screen{};
     if (!w2s(vp, world, sw, sh, screen, false)) return false;
@@ -7757,6 +8009,7 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
         // перечитываются раз в 6/15 кадров, и видимый бот за это время уходит
         // вперёд от той точки, которую мы ещё держим в кэше.
         if (src.vel_valid) {
+            g_aim_velocity = {src.vx, src.vy, src.vz};
             float lead = g_aim_lead_seconds;
             if (src.pos_age > 0.0F)
                 lead += (src.pos_age < kBotPosLeadMax) ? src.pos_age : kBotPosLeadMax;
@@ -7764,6 +8017,7 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
             g_aim_lead.y = src.vy * lead;
             g_aim_lead.z = src.vz * lead;
         } else {
+            g_aim_velocity = {};
             g_aim_lead = {};
         }
         // Цель — шея (как у игроков); голова и грудь — запасные слоты.
@@ -7796,9 +8050,9 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
         out.push_back(box);
         ++g_frame_bot_count;
     }
-    // Чужая (последнего игрока) скорость не должна пережить кадр: следующий
-    // потребитель g_aim_lead обязан выставить её сам.
+    // Per-target velocity must not leak into the next frame's aim point.
     g_aim_lead = {};
+    g_aim_velocity = {};
 }
 
 
@@ -8312,6 +8566,10 @@ static void note_direct_position_health(const std::vector<uint64_t>& players,
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
     g_box_frame_transient = true;
+    g_aim_lead = {};
+    g_aim_velocity = {};
+    g_aim_inherited_velocity = {};
+    g_aim_ballistic_params = {};
     std::vector<EspBox> result;
     auto transient_return = [&](int tag) {
         watch_boxes(result, (size_t)-1, nullptr, tag);
@@ -8403,6 +8661,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // resolver is not, even though this camera-only frame can publish.
         note_player_pipeline_health(player_list_ok);
         publish_camera_only_frame(sw, sh);
+        if (g_aim_bones_requested && g_state.aim_touch &&
+            g_state.aim_mode != AIM_MODE_SILENT) {
+            const uint64_t local_player = resolve_local_player();
+            const PlayerAux* local_aux = nullptr;
+            bool local_crouched = false;
+            if (valid_obj(local_player)) {
+                PlayerAux& aux = player_aux(local_player);
+                local_aux = &aux;
+                local_crouched = player_is_crouched(aux);
+            }
+            read_local_aim_reference(local_player, local_aux, local_crouched);
+            update_aim_ballistics(local_player);
+        }
         append_bot_boxes(result); // боты — и без игроков
         g_box_frame_transient = !player_list_ok;
         return transient_return(1);
@@ -8687,6 +8958,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             local_crouched = player_is_crouched(la);
         }
         read_local_aim_reference(local_player, local_aux, local_crouched);
+        if (g_aim_bones_requested && g_state.aim_touch &&
+            g_state.aim_mode != AIM_MODE_SILENT)
+            update_aim_ballistics(local_player);
     }
 
     // Draw every remote PlayerManager returned by the player registry.
@@ -8845,14 +9119,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             {feet.x - box_half_width, body_top.y, feet.z + box_half_depth}
         };
         EspBox box{};
-        // Lead for this player, used by every set_aim_point call below.
+        // The base lead follows this target's smoothed world-space velocity.
         {
             auto vt = g_player_track.find(s_transforms[i]);
-            if (vt != g_player_track.end()) {
-                g_aim_lead.x = vt->second.vel.x * g_aim_lead_seconds;
-                g_aim_lead.y = vt->second.vel.y * g_aim_lead_seconds;
-                g_aim_lead.z = vt->second.vel.z * g_aim_lead_seconds;
+            if (vt != g_player_track.end() && vt->second.have_vel_ref) {
+                const Vec3 velocity = vt->second.vel;
+                const double age = mono_seconds() - vt->second.vel_ref_t;
+                if (age >= 0.0 && age <= 0.35 && aim_ballistics::finite(velocity)) {
+                    g_aim_velocity = velocity;
+                    g_aim_lead.x = velocity.x * g_aim_lead_seconds;
+                    g_aim_lead.y = velocity.y * g_aim_lead_seconds;
+                    g_aim_lead.z = velocity.z * g_aim_lead_seconds;
+                } else {
+                    g_aim_velocity = {};
+                    g_aim_lead = {};
+                }
             } else {
+                g_aim_velocity = {};
                 g_aim_lead = {};
             }
         }
