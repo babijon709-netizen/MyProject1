@@ -1,65 +1,14 @@
-name: Global Clear Artifacts
-on:
-  workflow_dispatch:
-  push:
+name: clean artifacts
 
-# ВАЖНО: Выдаем скрипту явные права на запись и удаление в Actions
-permissions:
-  actions: write
-  contents: read
+on:
+  schedule:
+    - cron: '0 0 * * *'
 
 jobs:
-  clear-all-branches:
+  clean:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/github-script@v7
+      - name: cleanup
+        uses: glassechidna/artifact-cleaner@master
         with:
-          script: |
-            let page = 1;
-            let hasMore = true;
-            let totalDeleted = 0;
-
-            console.log("Начинаю полную очистку всех артефактов репозитория...");
-
-            while (hasMore) {
-              // Запрашиваем по 100 штук за раз, листая страницы
-              const res = await github.rest.actions.listArtifactsForRepo({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                per_page: 100,
-                page: page
-              });
-
-              const artifacts = res.data.artifacts;
-              
-              if (artifacts.length === 0) {
-                hasMore = false;
-                break;
-              }
-
-              console.log(`На странице ${page} найдено ${artifacts.length} артефактов.`);
-
-              for (const art of artifacts) {
-                try {
-                  console.log(`Удаляю артефакт: ID ${art.id} ("${art.name}")`);
-                  await github.rest.actions.deleteArtifact({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    artifact_id: art.id
-                  });
-                  totalDeleted++;
-                } catch (err) {
-                  console.log(`Ошибка при удалении ID ${art.id}: ${err.message}`);
-                }
-              }
-
-              // Переходим к следующей странице, если на текущей было ровно 100 штук
-              if (artifacts.length === 100) {
-                page++;
-              } else {
-                hasMore = false;
-              }
-            }
-
-            console.log(`Очистка завершена! Всего удалено артефактов: ${totalDeleted}`);
-            
+          minimumAge: 86400 # all artifacts at least one day old
