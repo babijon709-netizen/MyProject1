@@ -177,22 +177,19 @@ int main() {
         std::printf("fast_loot: helper identity gate ok\n");
     }
 
-    // 6. Бета-сценарий: основной слот отдаёт <>c, класс берётся из запасного.
+    // 6. Бета 11957: слоты точные (TypeInfoPointers), запасного нет — класс берётся с основного слота.
     {
-        go_active::Select(go_active::GameVersion::Beta); // включает _ALT-слоты
+        go_active::Select(go_active::GameVersion::Beta);
         Fixture f;
-        const uint64_t c_klass = 0x533000, dp_alt = 0x534000;
-        f.io.put<uint64_t>(base + go_active::FASTLOOT_DELAYPROMISE_TYPEINFO_RVA, c_klass);
-        f.io.put<uint64_t>(base + go_active::FASTLOOT_DELAYPROMISE_TYPEINFO_RVA_ALT, dp_alt);
-        f.io.klass_names[c_klass] = {"<>c", ""};
-        f.io.klass_names[dp_alt] = {"DelayPromise", ""};
         const uint64_t item = 0x650000, r = 0x700000;
-        make_promise(f.io, item, dp_alt, 0.35f, 0.f, true);
+        f.io.put<uint64_t>(base + go_active::FASTLOOT_DELAYPROMISE_TYPEINFO_RVA, dp_klass);
+        make_promise(f.io, item, dp_klass, 0.35f, 0.f, true);
         f.runners({f.runner(r, 1, {item})});
+        assert(go_active::FASTLOOT_DELAYPROMISE_TYPEINFO_RVA_ALT == 0);
         assert(f.c.tick(base, true) == 1);
         assert(f.io.value(item + go_active::DELAYPROMISE_SCALED_TIMESPAN) == 0.f);
         go_active::Select(go_active::GameVersion::Release);
-        std::printf("fast_loot: alt typeinfo slot fallback ok\n");
+        std::printf("fast_loot: beta exact typeinfo slot ok\n");
     }
 
     // 7. Выключенный тумблер: состояние Off, память не читается на запись.
