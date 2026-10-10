@@ -284,8 +284,8 @@ int main(int argc, char* argv[]) {
     // до запуска оверлея и игры.
     // dump — рантайм-дамп global-metadata.dat из памяти запущенной игры
     // (metadata_dump.h): тоже без GUI и маскировки, короткоживущий процесс
-    // с терминальным выводом; транспорт — из .mode или аргумента, без
-    // фоллбэков.
+    // с терминальным выводом; транспорт — аргумент → .mode → трейлер
+    // конфига, изучение — явным шагом до bind, без переключений в сессии.
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--check-driver") == 0) return driver_check::Run(false);
         if (strcmp(argv[i], "--scan-driver") == 0) return driver_check::Run(true);

@@ -280,8 +280,61 @@ void RestoreLayout() {
     if (ReadNewestUi(t)) LayoutFromArray(t.layout);
 }
 
-// Transport chosen on the mode screen in the session that wrote the newest config.
+// KERNEL.md §6: выбранный на экране режим сохраняется в
+// /storage/emulated/0/benzware/.mode — оттуда его берут one-shot CLI
+// (dump/skel). Значения: external/kernel/rt-dev/rt-hook.
+static const char* kModeDir() noexcept {
+    static constexpr auto _s = xp::_mk("/storage/emulated/0/benzware/");
+    return _s.d();
+}
+static std::string ModeFilePath() { return std::string(kModeDir()) + ".mode"; }
+
+void CfgWriteMemBackend(int backend) {
+    const char* v = nullptr;
+    if (backend == ESP_MEM_EXTERNAL)      v = "external";
+    else if (backend == ESP_MEM_FT)       v = "kernel";
+    else if (backend == ESP_MEM_RT_DEV)   v = "rt-dev";
+    else if (backend == ESP_MEM_RT_HOOK)  v = "rt-hook";
+    else return;
+    mkdir(kModeDir(), 0777);
+    FILE* f = fopen(ModeFilePath().c_str(), "w");
+    if (!f) return;
+    fputs(v, f);
+    fputc('\n', f);
+    fclose(f);
+}
+
+static int ParseModeFileValue(const char* s) {
+    if (!s) return -1;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') ++s;
+    char v[16] = {};
+    size_t n = 0;
+    while (s[n] && n + 1 < sizeof(v) &&
+           s[n] != ' ' && s[n] != '\t' && s[n] != '\n' && s[n] != '\r') {
+        v[n] = s[n];
+        ++n;
+    }
+    if (!strcmp(v, "external") || !strcmp(v, "ext")) return ESP_MEM_EXTERNAL;
+    if (!strcmp(v, "kernel") || !strcmp(v, "ft"))    return ESP_MEM_FT;
+    if (!strcmp(v, "rt-dev") || !strcmp(v, "rt"))    return ESP_MEM_RT_DEV;
+    if (!strcmp(v, "rt-hook"))                       return ESP_MEM_RT_HOOK;
+    return -1;
+}
+
+// Transport chosen on the mode screen, read back by the one-shot CLI
+// (metadata dump, skeleton diag). .mode first, newest-config trailer as
+// legacy fallback. -1 = nothing saved yet.
 int CfgSavedMemBackend() {
+    FILE* f = fopen(ModeFilePath().c_str(), "r");
+    if (f) {
+        char buf[32] = {};
+        const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (n > 0) {
+            const int m = ParseModeFileValue(buf);
+            if (m >= 0) return m;
+        }
+    }
     CfgUiTrailer t;
     if (!ReadNewestUi(t) || t.mem_backend > 3) return -1;
     return (int)t.mem_backend;

@@ -185,13 +185,15 @@ class KernelTransport : public Transport {
 public:
     const char* name() const override { return "kernel (драйвер)"; }
 
-    // Привязка к процессу: поднимаем сокеты, протокол и коды команд уже
-    // должны быть выучены (detect_protocol в driver_available); для
+    // Привязка к процессу: поднимаем сокеты и переиспользуем выученное.
+    // Протокол и коды команд учит только явный шаг ДО bind: driver_available
+    // на экране выбора или PrepareOneShotBackend в one-shot CLI. Здесь
+    // detect_protocol НЕ вызывается никогда (KERNEL.md §4.5): неизвестный
+    // протокол — честная ошибка bind, а не повод сканировать. Для
     // pte-протокола цепляемся к pid сокетом (ATTACH_PROCESS).
     bool open(pid_t pid) override {
         if (pid <= 0) return false;
         if (!ensure_socket()) return false;
-        if (!map_known_ && !scanned_) detect_protocol();
         if (use_ioctl_) send_auth();   // 5.10: без пароля команды молчат
         if (proto_ == PROTO_GONG_PTE && !gong_attach((int)pid)) return false;
         pid_ = (int)pid;
@@ -426,7 +428,7 @@ public:
         const int bingCand[4] = { kDriverCmdRead, kDriverCmdWrite, 0x300, 0x303 };
         int rd = 0, wr = 0;
         if (ensure_socket()) {
-            for (int i = 0; i < 3; ++i) {
+            for (int i = 0; i < 4; ++i) {
                 const CmdProbe p = classify_cmd(bingCand[i]);
                 if (p.kind == CMD_READ  && !rd) rd = bingCand[i];
                 if (p.kind == CMD_WRITE && !wr) wr = bingCand[i];
@@ -814,7 +816,7 @@ inline RtDevTransport& rt_dev_transport() {
 }
 
 // RT-Dev доступен? (узел /dev/[A-GNY]{1,6} отвечает пробой по своей памяти
-// — для меню выбора и --check-driver).
+// — для экрана выбора, --check-driver и one-shot CLI до bind).
 inline bool rt_dev_available() {
     RtDevTransport& t = rt_dev_transport();
     if (t.connected()) return t.verified() ? true : t.classify().kind == CMD_READ;
@@ -978,7 +980,7 @@ inline RtHookTransport& rt_hook_transport() {
 }
 
 // RT-Hook доступен? (хук ioctl отвечает пробой по своей памяти — для
-// меню выбора и --check-driver).
+// экрана выбора, --check-driver и one-shot CLI до bind).
 inline bool rt_hook_available() {
     RtHookTransport& t = rt_hook_transport();
     return t.connected() ? true : t.classify().kind == CMD_READ;
@@ -991,9 +993,12 @@ inline KernelTransport& kernel_transport() {
     return t;
 }
 
-// Проверка «драйвер загружен?» для меню: находит семейство, поднимает сокет
-// (bing или gongchuang) и ВЫУЧИВАЕТ протокол (короткий список кодов, при
-// неудаче — полный скан). Пробы идут по собственной памяти, до привязки к игре.
+// Проверка «драйвер загружен?» для экрана выбора и one-shot CLI: находит
+// семейство, поднимает сокет (bing или gongchuang) и ВЫУЧИВАЕТ протокол
+// (короткий список кодов, при неудаче — полный скан). Пробы идут по
+// собственной памяти, до привязки к игре. Единственные законные
+// вызывающие — экран выбора, PrepareOneShotBackend и диагностика
+// --check-driver/--scan-driver (KERNEL.md §4.5).
 inline bool driver_available(int* family_out = nullptr) {
     KernelTransport& t = kernel_transport();
     if (!t.connected() && t.connect() < 0 && t.gong_connect() < 0) return false;

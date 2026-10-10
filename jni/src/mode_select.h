@@ -8,7 +8,8 @@
 // тапу, повторный тап по кнопке драйвера перепроверяет драйвер (прошить
 // .sh можно и после запуска).
 //
-// Выбор уходит в конфиг при сохранении (трейлер, см. config.cpp), но
+// Выбор сразу пишется в /storage/emulated/0/benzware/.mode (для one-shot
+// CLI dump/skel) и дублируется в трейлер конфига при его сохранении, но
 // экран всё равно показывается на каждом запуске — драйвер живёт до
 // перезагрузки, и «нашёл/не нашёл» нужно видеть каждый раз.
 //
@@ -337,10 +338,14 @@ static bool RunModeSelect() {
     // Ошибка от нажатия на другую карточку могла появиться перед успешным
     // выбором RT-Hook/RT-Dev/FT. Не переносим этот устаревший тост в игру.
     if (picked >= 0 && mode != MODE_EXTERNAL) ClearToast();
-    esp_set_mem_backend(mode == MODE_KERNEL ? ESP_MEM_FT
-                        : mode == MODE_RT_DEV  ? ESP_MEM_RT_DEV
-                        : mode == MODE_RT_HOOK ? ESP_MEM_RT_HOOK
-                                                : ESP_MEM_EXTERNAL);
+    const int backend = mode == MODE_KERNEL  ? ESP_MEM_FT
+                      : mode == MODE_RT_DEV  ? ESP_MEM_RT_DEV
+                      : mode == MODE_RT_HOOK ? ESP_MEM_RT_HOOK
+                                             : ESP_MEM_EXTERNAL;
+    esp_set_mem_backend(backend);
+    // Сохранить выбор для one-shot CLI (dump/skel). Только при реальном
+    // выборе: выход без тапа не должен затирать прошлый .mode.
+    if (picked >= 0) CfgWriteMemBackend(backend);
     return picked >= 0;
 }
 

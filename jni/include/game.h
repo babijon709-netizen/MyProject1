@@ -94,8 +94,8 @@ struct EspMarker {
     char  name[40] = {};        // localized label (UTF-8), may carry a stack size
 };
 
-// Почему привязка к игре не удалась — main.cpp показывает это пользователю
-// тостом. ESP_ATTACH_NO_PID решает сам main.cpp (процесса игры нет).
+// Почему привязка к игре не удалась — для диагностики (лог, skel-отчёт).
+// GUI тостов привязки не показывает (см. KERNEL.md §6).
 enum EspAttachState {
     ESP_ATTACH_OK = 0,
     ESP_ATTACH_NO_PID,

@@ -2,7 +2,7 @@
 // skeleton_diag.h — CLI-команда skel: прогон конвейера костей на живом
 // процессе игры и печать того, на каком шаге он рассыпается.
 //
-//     su -c /data/local/tmp/xvcen skel                  // режим из конфига
+//     su -c /data/local/tmp/xvcen skel                  // режим из .mode
 //     su -c /data/local/tmp/xvcen skel external         // режим аргументом
 //     su -c /data/local/tmp/xvcen skel rt-dev 12345     // режим + конкретный pid
 //
@@ -21,7 +21,8 @@
 // сколько доехало до экрана.
 //
 // Как и dump, это отдельный короткоживущий процесс: без GUI и маскировки,
-// транспорт — из конфига или аргументом, без фоллбэков.
+// транспорт — аргумент → .mode → трейлер конфига, изучение — явным шагом
+// до bind, без фоллбэков.
 //
 // Коды выхода: 0 — скелеты строятся, 1 — игра не найдена или транспорт не
 // привязался, 2 — привязались, но ни у одного игрока скелет не собрался,
@@ -65,14 +66,7 @@ static int Run(int argc, char* argv[]) {
     }
     int backend = -1;
     if (mode_arg) {
-        if (!strcmp(mode_arg, "external") || !strcmp(mode_arg, "ext"))
-            backend = ESP_MEM_EXTERNAL;
-        else if (!strcmp(mode_arg, "ft") || !strcmp(mode_arg, "kernel"))
-            backend = ESP_MEM_FT;
-        else if (!strcmp(mode_arg, "rt-dev") || !strcmp(mode_arg, "rt"))
-            backend = ESP_MEM_RT_DEV;
-        else if (!strcmp(mode_arg, "rt-hook"))
-            backend = ESP_MEM_RT_HOOK;
+        backend = metadump::ParseBackendArg(mode_arg);
         if (backend < 0) {
             printf("неизвестный режим: %s (external | ft | rt-dev | rt-hook)\n", mode_arg);
             return 1;
@@ -92,11 +86,13 @@ static int Run(int argc, char* argv[]) {
     if (geteuid() != 0)
         log.say("!! нужен root: su -c <путь>/xvcen skel");
     log.say("режим    : %s%s", metadump::backend_name(backend),
-            mode_arg ? " (аргументом)" : " (из конфига)");
+            mode_arg ? " (аргументом)" : " (сохранённый)");
 
     // Транспорт назначается один раз на жизнь процесса (§2 KERNEL.md), до
-    // первого bind и без фоллбэков — как у команды dump.
+    // первого bind и без фоллбэков — как у команды dump. Изучение — явным
+    // шагом здесь же, чтобы bind только переиспользовал (§4.5).
     esp_set_mem_backend(backend);
+    metadump::PrepareOneShotBackend(backend);
 
     std::vector<pid_t> pids;
     if (want_pid > 0) {

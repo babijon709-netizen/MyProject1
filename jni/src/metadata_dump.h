@@ -2,7 +2,7 @@
 // metadata_dump.h — CLI-команда dump: рантайм-дамп global-metadata.dat из
 // памяти ЗАПУЩЕННОЙ игры, из Termux:
 //
-//     su -c /data/local/tmp/xvcen dump                  // режим из конфига
+//     su -c /data/local/tmp/xvcen dump                  // режим из .mode
 //     su -c /data/local/tmp/xvcen dump external         // режим аргументом
 //     su -c /data/local/tmp/xvcen dump rt-dev 12345     // режим + конкретный pid
 //
@@ -54,8 +54,9 @@
 // чтения идут g_mem.read_quiet мимо кадрового кэша, своего /proc/<pid>/mem
 // команда не открывает никогда. Из /proc берутся лишь карта (maps) и
 // cmdline — то же, что делает поток привязки. Транспорт назначается ОДИН
-// раз (аргумент или сохранённый в конфиге режим), никаких фоллбэков и переключений
-// (§2): не заработал — команда честно печатает errno и подсказывает
+// раз (аргумент → .mode → трейлер конфига), изучение — явным шагом
+// PrepareOneShotBackend до bind, без фоллбэков и переключений (§2,
+// §4.5): не заработал — команда честно печатает errno и подсказывает
 // перезапустить с другим режимом ЯВНЫМ аргументом.
 //
 // Запуск — как у --check-driver: в main() до stealth-маскировки (нужен
@@ -85,6 +86,7 @@
 #include "config.h"          // CfgDir()
 #include "game.h"            // esp_set_mem_backend, esp_mem_last_errno, ESP_MEM_*
 #include "game_internal.h"   // g_mem
+#include "kernel_io.h"       // memio::*_available — явный pre-bind шаг
 #include "maps_lookup.h"     // maps::lookup_library_bases
 #include "process.h"         // process_find_game_pid, process_find_unity_candidates
 
@@ -1022,7 +1024,7 @@ static bool dump_blob(const Blob& b, const char* path, Log* log) {
 
 // ---- выбор режима -----------------------------------------------------------
 
-// Режим, сохранённый в самом свежем конфиге (трейлер конфига, см. config.cpp).
+// Режим, сохранённый экраном выбора (.mode, затем трейлер конфига).
 static int saved_backend() {
     const int m = CfgSavedMemBackend();
     return m < 0 ? ESP_MEM_EXTERNAL : m;
@@ -1035,6 +1037,28 @@ static const char* backend_name(int backend) {
         case ESP_MEM_RT_HOOK: return "RT-Hook";
         default: return "Прямое чтение";
     }
+}
+
+// Общий для one-shot CLI (dump, skel) разбор аргумента режима.
+// Возвращает ESP_MEM_* или -1 (неизвестный режим).
+static int ParseBackendArg(const char* mode_arg) {
+    if (!mode_arg) return -1;
+    if (!strcmp(mode_arg, "external") || !strcmp(mode_arg, "ext")) return ESP_MEM_EXTERNAL;
+    if (!strcmp(mode_arg, "ft") || !strcmp(mode_arg, "kernel"))    return ESP_MEM_FT;
+    if (!strcmp(mode_arg, "rt-dev") || !strcmp(mode_arg, "rt"))    return ESP_MEM_RT_DEV;
+    if (!strcmp(mode_arg, "rt-hook"))                             return ESP_MEM_RT_HOOK;
+    return -1;
+}
+
+// One-shot CLI: явное изучение выбранного транспорта ДО первого bind —
+// тот же шаг, что экран выбора делает через *_available(). В этих
+// процессах экрана нет, поэтому вызов здесь, а не в Transport::open
+// (см. KERNEL.md §2, §4.5). После этого bind только переиспользует
+// выученное, никаких детектов из чтения.
+static void PrepareOneShotBackend(int backend) {
+    if (backend == ESP_MEM_FT)           memio::driver_available(nullptr);
+    else if (backend == ESP_MEM_RT_DEV)  memio::rt_dev_available();
+    else if (backend == ESP_MEM_RT_HOOK) memio::rt_hook_available();
 }
 
 // ---- точка входа ------------------------------------------------------------
@@ -1058,14 +1082,7 @@ static int Run(int argc, char* argv[]) {
     }
     int backend = -1;
     if (mode_arg) {
-        if (!strcmp(mode_arg, "external") || !strcmp(mode_arg, "ext"))
-            backend = ESP_MEM_EXTERNAL;
-        else if (!strcmp(mode_arg, "ft") || !strcmp(mode_arg, "kernel"))
-            backend = ESP_MEM_FT;
-        else if (!strcmp(mode_arg, "rt-dev") || !strcmp(mode_arg, "rt"))
-            backend = ESP_MEM_RT_DEV;  // «rt» — compatibility alias
-        else if (!strcmp(mode_arg, "rt-hook"))
-            backend = ESP_MEM_RT_HOOK;
+        backend = ParseBackendArg(mode_arg);
         if (backend < 0) {
             printf("неизвестный режим: %s "
                    "(external | ft | rt-dev | rt-hook)\n", mode_arg);
@@ -1087,12 +1104,14 @@ static int Run(int argc, char* argv[]) {
     if (geteuid() != 0)
         log.say("!! нужен root: su -c <путь>/xvcen dump");
     log.say("режим    : %s%s", backend_name(backend),
-            mode_arg ? " (аргументом)" : " (из конфига)");
+            mode_arg ? " (аргументом)" : " (сохранённый)");
     log.say("каталог  : %s", dump_dir.c_str());
 
     // Единственное назначение транспорта за жизнь этого процесса (§2):
-    // до первого bind, без переключений и фоллбэков.
+    // до первого bind, без переключений и фоллбэков. Изучение — явным
+    // шагом здесь же, чтобы bind только переиспользовал (§4.5).
     esp_set_mem_backend(backend);
+    PrepareOneShotBackend(backend);
 
     // ---- процесс игры: тот же поиск, что у потока привязки ----------------
     std::vector<pid_t> pids;

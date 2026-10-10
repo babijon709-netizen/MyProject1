@@ -28,5 +28,10 @@ void ConfigDelete(int idx);
 void RestoreLang();
 void RestoreAccent();
 void RestoreLayout();
-// Режим чтения, сохранённый в конфиге; -1 если конфигов нет.
+// Режим чтения, выбранный на экране выбора; -1 если ничего нет.
+// Источник: /storage/emulated/0/benzware/.mode (пишется каждым выбором),
+// затем (legacy) трейлер самого свежего конфига.
 int  CfgSavedMemBackend();
+// Записать выбор экрана режима в .mode (значения KERNEL.md §6).
+// Только при реальном выборе; закрытие экрана без тапа не пишет.
+void CfgWriteMemBackend(int backend);
