@@ -7,7 +7,6 @@
 #include "ui_util.h"           // ColU32
 #include "game_offsets_active.h" // go_active::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
-#include "esp_box_hold.h"        // состав боксов/маркеров на кадр
 #include "overlay_geometry.h"
 #include <algorithm>
 #include <cfloat>
@@ -28,100 +27,49 @@ float AimFovRadiusPx(float sw, float sh) {
     return r;
 }
 
-// One remote snapshot per frame, shared by the ESP overlay and the aimbot.
-// Сколько боксов нарисовано в последнем кадре — для сводки в мини-логе.
-
-// One short hold window for every ESP visual, including world-marker labels.
-constexpr double kEspHoldSeconds = 0.30;
-
+// One fresh world-space snapshot per frame is shared by the overlay and aim.
 const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
-    static std::vector<espboxhold::Entry<EspBox>> s_hold;
-    static std::vector<EspBox> s_out;
-    static int s_frame = -1;
-    int frame = ImGui::GetFrameCount();
-    if (frame != s_frame) {
-        s_frame = frame;
-        esp_set_skeleton_enabled(g_state.esp_skeleton);
-        // Кости нужны аиму в обоих режимах: и касание, и память считают ошибку
-        // по точке на шее, взятой из костей. Раньше запрос включался только от
-        // касания, и в режиме «память» при выключенном скелете в ESP кости не
-        // читались вовсе — тогда аим уходил на запасной расчёт по росту, а
-        // признак смерти по позе вообще нечем было мерить.
-        esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
-        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
-                                g_state.esp_loot, g_state.esp_pickup,
-                                g_state.esp_vehicles, g_state.esp_bots,
-                                g_state.esp_scrap, g_state.esp_turrets,
-                                g_state.esp_backpacks, g_state.esp_sleepers,
-                                g_state.esp_house_boxes, g_state.esp_cupboards);
-        // Аим по ботам — тем же условием, что кости для аима: работает и
-        // когда маркеры ботов выключены.
-        esp_set_bot_aim_enabled(g_state.esp_bots || g_state.aim_touch ||
-                                g_state.aim_mode == AIM_MODE_MEMORY);
-        esp_set_always_day(g_state.always_day);
-        esp_set_marker_max_distance(g_state.marker_dist);
-        // Keep a control-latency floor for touch and memory; the slider can
-        // raise it. Projectile flight time is added separately from the active
-        // weapon's ballistic parameters in game.cpp.
-        const float leadAuto = (g_state.aim_mode == AIM_MODE_MEMORY) ? 0.05f :
-                               (g_state.aim_mode == AIM_MODE_TOUCH) ? 0.04f : 0.0f;
-        const float leadUser = g_state.aim_lead_ms * 0.001f;
-        esp_set_aim_lead(leadUser > leadAuto ? leadUser : leadAuto);
-        esp_set_screen_stretch(g_state.screen_stretch_x);
-        esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
-        std::vector<EspBox> next = esp_get_boxes((int)sw, (int)sh);
-        timespec ts{};
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-        const bool transient = esp_box_frame_transient();
-        const size_t raw_count = next.size();
+    static std::vector<EspBox> boxes;
+    static int cached_frame = -1;
+    const int frame = ImGui::GetFrameCount();
+    if (frame == cached_frame) return boxes;
+    cached_frame = frame;
 
-        espboxhold::update(s_hold, next, transient, now, kEspHoldSeconds, s_out);
+    esp_set_skeleton_enabled(g_state.esp_skeleton);
+    esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
+    esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
+                            g_state.esp_loot, g_state.esp_pickup,
+                            g_state.esp_vehicles, g_state.esp_bots,
+                            g_state.esp_scrap, g_state.esp_turrets,
+                            g_state.esp_backpacks, g_state.esp_sleepers,
+                            g_state.esp_house_boxes, g_state.esp_cupboards);
+    esp_set_bot_aim_enabled(g_state.esp_bots || g_state.aim_touch ||
+                            g_state.aim_mode == AIM_MODE_MEMORY);
+    esp_set_always_day(g_state.always_day);
+    esp_set_marker_max_distance(g_state.marker_dist);
 
-        static double diag_at = -1e9;
-        static int diag_frames = 0, diag_transient = 0;
-        static size_t diag_raw_min = (size_t)-1, diag_raw_max = 0;
-        static size_t diag_draw_min = (size_t)-1, diag_draw_max = 0;
-        static int diag_hold_max = 0;
-        ++diag_frames;
-        if (transient) ++diag_transient;
-        diag_raw_min = std::min(diag_raw_min, raw_count);
-        diag_raw_max = std::max(diag_raw_max, raw_count);
-        diag_draw_min = std::min(diag_draw_min, s_out.size());
-        diag_draw_max = std::max(diag_draw_max, s_out.size());
-        if (s_out.size() > raw_count)
-            diag_hold_max = std::max(diag_hold_max, (int)(s_out.size() - raw_count));
-        if (now - diag_at >= 1.0) {
-            diag_at = now; diag_frames = diag_transient = 0;
-            diag_raw_min = diag_draw_min = (size_t)-1;
-            diag_raw_max = diag_draw_max = 0;
-            diag_hold_max = 0;
-        }
-    }
-    return s_out;
+    const float lead_auto = (g_state.aim_mode == AIM_MODE_MEMORY) ? 0.05f :
+                            (g_state.aim_mode == AIM_MODE_TOUCH) ? 0.04f : 0.0f;
+    const float lead_user = g_state.aim_lead_ms * 0.001f;
+    esp_set_aim_lead(lead_user > lead_auto ? lead_user : lead_auto);
+    esp_set_screen_stretch(g_state.screen_stretch_x);
+    esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
+    boxes = esp_get_boxes((int)sw, (int)sh);
+    return boxes;
 }
 
 static const std::vector<EspMarker>& FrameMarkers() {
-    static std::vector<espboxhold::Entry<EspMarker>> hold;
-    static std::vector<EspMarker> out;
+    static std::vector<EspMarker> markers;
     static int cached_frame = -1;
     const int frame = ImGui::GetFrameCount();
-    if (frame == cached_frame) return out;
+    if (frame == cached_frame) return markers;
     cached_frame = frame;
 
-    std::vector<EspMarker> next = esp_get_markers();
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-    espboxhold::erase_if(hold, [](const EspMarker& marker) {
+    markers = esp_get_markers();
+    markers.erase(std::remove_if(markers.begin(), markers.end(), [](const EspMarker& marker) {
         return marker.kind == ESP_MARKER_BOT && esp_marker_confirmed_dead(marker.id);
-    });
-    next.erase(std::remove_if(next.begin(), next.end(), [](const EspMarker& marker) {
-        return marker.kind == ESP_MARKER_BOT && esp_marker_confirmed_dead(marker.id);
-    }), next.end());
-    espboxhold::update(hold, next, esp_marker_frame_transient(),
-                       now, kEspHoldSeconds, out);
-    return out;
+    }), markers.end());
+    return markers;
 }
 
 void DrawEspOverlay() {
@@ -143,7 +91,7 @@ void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes && !g_state.esp_cupboards) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {

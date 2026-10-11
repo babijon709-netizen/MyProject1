@@ -382,6 +382,10 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
     const unsigned long was_off  = s_offscreen_skipped, was_fov = s_out_of_fov;
     const unsigned long was_seen = s_seen_boxes;
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
+    if (!esp_frame_camera_fresh()) {
+        if (why) *why = 1;
+        return false;
+    }
 
     // Сводку пропусков печатаем БЕЗ условий и ДО выбора. В сборке 829a1dc
     // строка «мёртвых N» жила внутри ветки «кости не нашлись», и когда

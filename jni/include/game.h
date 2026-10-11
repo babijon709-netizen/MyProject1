@@ -161,7 +161,6 @@ void        esp_set_always_day(bool enabled);
 void        esp_set_marker_max_distance(float metres);// Markers for the current frame, nearest first. Call after esp_get_boxes():
 // it reuses the camera/projection state that call established.
 std::vector<EspMarker> esp_get_markers();
-bool esp_marker_frame_transient();
 // Authoritative death bypasses transient-frame marker retention.
 bool esp_marker_confirmed_dead(uint64_t id);
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.
@@ -192,8 +191,8 @@ void esp_set_bot_aim_enabled(bool enabled);
 void esp_bot_aim_maintain();
 std::vector<BotAimEnt> esp_bot_aim_list();
 std::vector<EspBox> esp_get_boxes(int screen_width, int screen_height);
-// True when the last box frame ended on a transient memory/resolver failure.
-bool        esp_box_frame_transient();
+// False when the overlay is using a short-lived last-known camera frame.
+bool esp_frame_camera_fresh();
 
 // Players near the local player as of the last esp_get_boxes() call, in all
 // directions (360 degrees) — NOT limited to the ones visible on screen.

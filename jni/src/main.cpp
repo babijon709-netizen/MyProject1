@@ -244,10 +244,14 @@ static int Run(bool full_scan) {
            "   (drivers.7z — FT, rt dev Драйвера root cheat.zip — RT-Dev, RT-hook.7z — RT-Hook)\n"
            "   и повтори проверку. Драйверы не переживают перезагрузку —\n"
            "   после ребута прошивай заново.\n");
-    const int fd = ::open("/proc/1/mem", O_RDWR | O_CLOEXEC);
-    printf("экстернал       : /proc/<pid>/mem %s\n",
-           fd >= 0 ? "доступен (root)" : "недоступен");
-    if (fd >= 0) close(fd);
+    if (!full_scan) {
+        const int fd = ::open("/proc/1/mem", O_RDWR | O_CLOEXEC);
+        printf("экстернал       : /proc/<pid>/mem %s\n",
+               fd >= 0 ? "доступен (root)" : "недоступен");
+        if (fd >= 0) close(fd);
+    } else {
+        printf("экстернал       : проверка пропущена в режиме --scan-driver\n");
+    }
     return 1;
 }
 

@@ -1,7 +1,6 @@
 #include "game.h"
 #include "aim.h"
 #include "app_state.h"
-#include "player_esp_watchdog.h"
 #include "silent_aim.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
@@ -11,10 +10,10 @@
 #include "game_internal.h"        // общий срез состояния/помощников для game_markers/farm.cpp
 #include "maps_lookup.h"           // базовый адрес библиотеки по /proc/<pid>/maps
 #include "game_offsets_active.h"   // выбранный Release/Beta профиль
-#include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
-#include "player_motion_prediction.h" // дорисовка сетевых позиций между тиками
-#include "mount_latch.h"           // удержание бокса на транспорте (хост-проверяемый)
-#include "body_clip.h"             // отсечение тела по ближней плоскости (хост-проверяемый)
+#include "player_motion_prediction.h"
+#include "body_clip.h"
+#include "esp_projection.h"
+#include "esp_snapshot_policy.h"
 #include "Vector.h"
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
@@ -97,16 +96,10 @@ static uint64_t  g_player_manager_class = 0;
 static uint64_t  g_player_manager_static_fields = 0;
 uint64_t  g_game_controller_class = 0;
 uint64_t  g_local_player = 0;
-static bool      g_matrix_configuration_validated = false;
-static bool      g_camera_matrix_physical_match = false;
-static uint64_t  g_player_position_offset = PLAYER_POSITION;
-
+static float g_screen_stretch_x = 1.0F;
 
 static TransformHierarchyLayout g_transform_hierarchy_layout{};
 static bool g_transform_hierarchy_layout_valid = false;
-
-static bool      g_use_direct_player_position = true;
-static bool      g_player_position_validated = false;
 
 // Camera state captured by the last esp_get_boxes() call (used by the aimbot
 // to convert bone positions into yaw/pitch offsets from the crosshair).
@@ -796,7 +789,7 @@ struct PlayerTextCache {
     bool ally = false;    // shares the local player's team or clan
     char tag[16] = {};    // clan tag
     bool has_tag = false;
-    int  revalidate = 30; // first sighting resolves immediately
+    double revalidate_at = 0.0;
 };
 static std::unordered_map<uint64_t, PlayerTextCache> g_player_text;
 
@@ -2697,19 +2690,12 @@ static bool discover_transform_hierarchy_layout(const std::vector<uint64_t>& pla
     return discover_layout_from_native_transforms(native_transforms, best_position_count, candidate_count);
 }
 
-static bool read_entity_position(uint64_t source, Vec3& position) {
-    if (!source) return false;
-    if (g_use_direct_player_position && g_player_position_offset != 0) { position = rd_v3(source + g_player_position_offset); return vec3_is_finite(position); }
-    uint64_t native = resolve_player_native_transform(source);
-    if (!native) return false;
-    return read_transform_hierarchy_position(native, position);
-}
+static bool position_near_world_origin(const Vec3& position);
+bool position_looks_like_world_space(const Vec3& position);
 
-static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
-    if (!source || g_use_direct_player_position || !g_transform_hierarchy_layout_valid) return false;
-    uint64_t native = resolve_player_native_transform(source);
-    if (!native) return false;
-    return read_transform_hierarchy_layout(native, g_transform_hierarchy_layout, position, &rotation);
+static bool read_entity_position(uint64_t source, Vec3& position) {
+    return source && rd_exact(source + PLAYER_POSITION, position) &&
+           position_looks_like_world_space(position) && !position_near_world_origin(position);
 }
 
 // Сентинел пулового мусора: свежий объект (игра пересоздаёт PlayerManager
@@ -2735,125 +2721,6 @@ bool position_looks_like_world_space(const Vec3& position) {
     if (fabsf(position.x) > 20000.0F || fabsf(position.z) > 20000.0F) return false;
     if (fabsf(position.y) > 10000.0F) return false;
     return fabsf(position.x) + fabsf(position.y) + fabsf(position.z) > 0.01F;
-}
-
-static bool evaluate_player_position_offset(const std::vector<uint64_t>& players, uint64_t offset, double& score) {
-    score = 0.0;
-    if (!offset) return false;
-    size_t valid = 0, non_zero = 0;
-    Vec3 minimum{}, maximum{};
-    bool initialized = false;
-    for (uint64_t player : players) {
-        if (!player) continue;
-        Vec3 position = rd_v3(player + offset);
-        if (!vec3_is_finite(position)) continue;
-        // Сэмпл вида (x, 0, 0) — не живая позиция, а неинициализированный
-        // пул. Раньше такой сэмпл шёл в valid/non_zero, и смещение могло быть
-        // принято на мусоре.
-        if (position_near_world_origin(position)) continue;
-        float magnitude = fabsf(position.x) + fabsf(position.y) + fabsf(position.z);
-        if (magnitude < 0.01F) continue;
-        ++valid; ++non_zero;
-        if (!initialized) { minimum = position; maximum = position; initialized = true; }
-        else {
-            minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
-            maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
-        }
-    }
-    if (!initialized || valid < 1 || non_zero < 1) return false;
-    double extent = fabs((double)maximum.x - minimum.x) + fabs((double)maximum.y - minimum.y) + fabs((double)maximum.z - minimum.z);
-    if (!std::isfinite(extent) || extent > 1000000.0) return false;
-    // Alone on the server (or everybody standing on the same spot) there is no
-    // spread to measure, so a single plausible world position has to do. Not
-    // accepting it used to kill the whole ESP after a solo respawn: the offset
-    // never re-validated and every frame bailed out early until app restart.
-    if (valid < 2 || extent < 0.1) {
-        if (!position_looks_like_world_space(minimum)) return false;
-        score = (double)valid * 1000000.0;
-        return true;
-    }
-    score = (double)valid * 1000000.0 + std::min(extent, 999999.0);
-    return true;
-}
-
-// Direct (PlayerManager field) position offsets, most trusted first. 0x260 is
-// the field the live client actually uses now: the log at 19:52 confirmed it
-// against kcc (8 of 9 players) while the profile's 0x1F4 read invalid-world
-// for every player. The canonical field is lastSavedPosition (0x1D0);
-// lastTickPosition (0x1C8) is equivalent. The rest are legacy guesses kept as
-// a last resort only.
-static const uint64_t k_known_position_offsets[] = {0x260, 0x1D0, 0x1C8, 0x1E0, 0x2D0, 0x2DC, 0x1D4, 0x1DC, 0x1E8};
-
-static uint64_t find_direct_player_position_offset(const std::vector<uint64_t>& players) {
-    bool saved_use_direct = g_use_direct_player_position;
-    g_use_direct_player_position = true;
-    uint64_t best_offset = 0;
-    double best_score = 0.0;
-    for (uint64_t offset : k_known_position_offsets) {
-        double score = 0.0;
-        if (!evaluate_player_position_offset(players, offset, score)) continue;
-        // Prefer the offset that validates for the most players; on a tie the
-        // earlier (more trusted) entry wins regardless of spatial extent.
-        double count = floor(score / 1000000.0), best_count = floor(best_score / 1000000.0);
-        if (count > best_count) { best_offset = offset; best_score = score; }
-    }
-    g_use_direct_player_position = saved_use_direct;
-    return best_offset;
-}
-
-// Frames in a row the direct offsets failed to validate. Right after a world
-// reload the position fields are still zero for a few frames; falling back to
-// the transform-hierarchy path on the very first failure used to lock the ESP
-// into that mode (boxes hanging 1.6 m below the player) until restart.
-static int g_direct_position_fail_streak = 0;
-static int g_direct_position_recheck = 0;
-// Когда началась текущая серия неудач прямых полей. Ожидание «поля допишутся»
-// считается и по кадрам, и по времени: 60 кадров на перезагрузке мира (там же
-// просаживается FPS) растягивались в две-три секунды, и всё это время боксов не
-// было вовсе — ровно то, на что жалоба «после смерти прогружаются не сразу».
-static double g_direct_position_fail_since = 0.0;
-static constexpr double kDirectPositionSettleSeconds = 0.6;
-static bool g_body_caches_dirty = false; // clear per-player caches on the next frame
-
-static bool discover_player_position_offset(const std::vector<uint64_t>& players) {
-    uint64_t best_offset = find_direct_player_position_offset(players);
-    if (best_offset) {
-        g_direct_position_fail_streak = 0;
-        g_direct_position_fail_since = 0.0;
-        g_use_direct_player_position = true; g_player_position_offset = best_offset;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        return true;
-    }
-    // Даём прямым полям устояться, прежде чем уходить на обход иерархии, но не
-    // дольше положенного: и по кадрам (60), и по времени (0.6 с) — что раньше.
-    const double now = mono_seconds();
-    if (g_direct_position_fail_since == 0.0) g_direct_position_fail_since = now;
-    ++g_direct_position_fail_streak;
-    if (g_direct_position_fail_streak < 60 &&
-        (now - g_direct_position_fail_since) < kDirectPositionSettleSeconds) return false;
-    size_t discovered_position_count = 0, hierarchy_candidate_count = 0;
-    if (discover_transform_hierarchy_layout(players, discovered_position_count, hierarchy_candidate_count)) {
-        g_use_direct_player_position = false;
-        g_player_position_validated = true; g_matrix_configuration_validated = false;
-        g_direct_position_recheck = 0;
-        return true;
-    }
-    return false;
-}
-
-// While on the hierarchy fallback, keep probing the direct fields and switch
-// back as soon as they validate again.
-static void recheck_direct_player_position(const std::vector<uint64_t>& players) {
-    if (g_use_direct_player_position || !g_player_position_validated) return;
-    if (++g_direct_position_recheck < 15) return;
-    g_direct_position_recheck = 0;
-    uint64_t best_offset = find_direct_player_position_offset(players);
-    if (!best_offset) return;
-    g_direct_position_fail_streak = 0;
-    g_direct_position_fail_since = 0.0;
-    g_use_direct_player_position = true; g_player_position_offset = best_offset;
-    g_matrix_configuration_validated = false;
-    g_body_caches_dirty = true;
 }
 
 // ---- Чувствительность взгляда (настройка игрока) ---------------------------
@@ -3576,34 +3443,9 @@ static Mat4 mat_mul(const Mat4& a, const Mat4& b) {
     return result;
 }
 
-static Mat4 mat_perspective(float fov_degrees, float aspect, float z_near, float z_far) {
-    Mat4 result{};
-    if (!(fov_degrees > 0.1F && fov_degrees < 179.0F) || !(aspect > 0.05F) || !(z_near > 0.0F) || !(z_far > z_near))
-        return result;
-    float fov_rad = fov_degrees * 0.01745329251F;
-    float cotangent = 1.0F / tanf(fov_rad * 0.5F);
-    mat_set(result, 0, 0, cotangent / aspect);
-    mat_set(result, 1, 1, cotangent);
-    mat_set(result, 2, 2, -(z_far + z_near) / (z_far - z_near));
-    mat_set(result, 2, 3, -(2.0F * z_far * z_near) / (z_far - z_near));
-    mat_set(result, 3, 2, -1.0F);
-    return result;
-}
-
-// worldToCamera from camera world pose (Unity camera looks down -Z).
 static Mat4 mat_world_to_camera(const Vec3& position, const Vec4& rotation) {
-    Vec3 right = rotate_vector(rotation, {1.0F, 0.0F, 0.0F});
-    Vec3 up = rotate_vector(rotation, {0.0F, 1.0F, 0.0F});
-    Vec3 forward = rotate_vector(rotation, {0.0F, 0.0F, 1.0F});
-    // View basis: rows = right, up, -forward (camera space).
     Mat4 view{};
-    mat_set(view, 0, 0, right.x);   mat_set(view, 0, 1, right.y);   mat_set(view, 0, 2, right.z);
-    mat_set(view, 1, 0, up.x);      mat_set(view, 1, 1, up.y);      mat_set(view, 1, 2, up.z);
-    mat_set(view, 2, 0, -forward.x); mat_set(view, 2, 1, -forward.y); mat_set(view, 2, 2, -forward.z);
-    mat_set(view, 0, 3, -(right.x * position.x + right.y * position.y + right.z * position.z));
-    mat_set(view, 1, 3, -(up.x * position.x + up.y * position.y + up.z * position.z));
-    mat_set(view, 2, 3, -(-forward.x * position.x + -forward.y * position.y + -forward.z * position.z));
-    mat_set(view, 3, 3, 1.0F);
+    espprojection::make_view(position, rotation, view);
     return view;
 }
 
@@ -3640,546 +3482,157 @@ static bool camera_position_from_view(const Mat4& view, Vec3& position) {
     return vec3_is_finite(position);
 }
 
-enum class W2SProjectionState : unsigned char {
-    NotRun,
-    NonFiniteClip,
-    BehindCamera,
-    NonFiniteScreen,
-    OutsideScreen,
-    Projected,
-    InvalidViewport,
-    NonFiniteCamera,
-    CameraBehind
-};
-
-struct W2SProjectionTrace {
-    bool camera_space = false;
-    float x = 0.0F, y = 0.0F, z = 0.0F, w = 0.0F;
-    float screen_x = 0.0F, screen_y = 0.0F;
-    W2SProjectionState state = W2SProjectionState::NotRun;
-};
-
-static const char* w2s_projection_state_name(W2SProjectionState state) {
-    switch (state) {
-        case W2SProjectionState::NonFiniteClip: return "nonfinite-clip";
-        case W2SProjectionState::BehindCamera: return "behind-camera";
-        case W2SProjectionState::NonFiniteScreen: return "nonfinite-screen";
-        case W2SProjectionState::OutsideScreen: return "outside-screen";
-        case W2SProjectionState::Projected: return "projected";
-        case W2SProjectionState::InvalidViewport: return "invalid-viewport";
-        case W2SProjectionState::NonFiniteCamera: return "nonfinite-camera";
-        case W2SProjectionState::CameraBehind: return "camera-behind";
-        default: return "not-run";
-    }
-}
-
-static bool w2s_with_trace(const Mat4& vp, const Vec3& world, float sw, float sh,
-                           Vec2& out, bool clip_to_screen, W2SProjectionTrace* trace) {
-    if (trace) *trace = {};
-    // clip = VP * float4(world, 1) with column-major VP
-    const float clip_x = mat_get(vp, 0, 0) * world.x + mat_get(vp, 0, 1) * world.y + mat_get(vp, 0, 2) * world.z + mat_get(vp, 0, 3);
-    const float clip_y = mat_get(vp, 1, 0) * world.x + mat_get(vp, 1, 1) * world.y + mat_get(vp, 1, 2) * world.z + mat_get(vp, 1, 3);
-    const float clip_w = mat_get(vp, 3, 0) * world.x + mat_get(vp, 3, 1) * world.y + mat_get(vp, 3, 2) * world.z + mat_get(vp, 3, 3);
-    if (trace) {
-        trace->x = clip_x;
-        trace->y = clip_y;
-        trace->z = mat_get(vp, 2, 0) * world.x + mat_get(vp, 2, 1) * world.y + mat_get(vp, 2, 2) * world.z + mat_get(vp, 2, 3);
-        trace->w = clip_w;
-    }
-    if (!std::isfinite(clip_x) || !std::isfinite(clip_y) || !std::isfinite(clip_w)) {
-        if (trace) trace->state = W2SProjectionState::NonFiniteClip;
-        return false;
-    }
-    if (clip_w <= 0.001F) {
-        if (trace) trace->state = W2SProjectionState::BehindCamera;
-        return false;
-    }
-    out.x = ((clip_x / clip_w) + 1.0F) * 0.5F * sw;
-    out.y = ((-clip_y / clip_w) + 1.0F) * 0.5F * sh;
-    if (trace) {
-        trace->screen_x = out.x;
-        trace->screen_y = out.y;
-    }
-    if (!std::isfinite(out.x) || !std::isfinite(out.y)) {
-        if (trace) trace->state = W2SProjectionState::NonFiniteScreen;
-        return false;
-    }
-    if (clip_to_screen && (out.x < 0.0F || out.x > sw || out.y < 0.0F || out.y > sh)) {
-        if (trace) trace->state = W2SProjectionState::OutsideScreen;
-        return false;
-    }
-    if (trace) trace->state = W2SProjectionState::Projected;
-    return true;
-}
-
 bool w2s(const Mat4& vp, const Vec3& world, float sw, float sh, Vec2& out, bool clip_to_screen) {
-    return w2s_with_trace(vp, world, sw, sh, out, clip_to_screen, nullptr);
+    return espprojection::project(vp, world, sw, sh, out, clip_to_screen);
 }
 
 
-// Массивы камеры, найденные проверенным путём (resolve_camera_arrays). Держим
-// их: пара «данные/индекс» у трансформа камеры постоянна, пока жив мир, а
-// искать её заново каждый кадр — это четыре чтения и разбор иерархии на каждом
-// кадре оверлея.
-static uint64_t s_cam_arr_m = 0, s_cam_arr_n = 0;
-static int32_t  s_cam_arr_idx = -1;
-static bool     s_cam_arr_valid = false;
-static double   s_cam_arr_at = -1e9;
+static bool read_camera_transform_pose(uint64_t native_cam, Vec3& position, Vec4& rotation) {
+    const uint64_t gameobject = rd_ptr(native_cam + CAMERA_NATIVE_TRANSFORM);
+    if (gameobject < 0x10000) return false;
+    const uint64_t transform = transform_from_gameobject(gameobject);
+    if (transform < 0x10000 || transform == gameobject) return false;
 
-// Поза камеры, сверенная с матрицей вида. Адреса массивов могут устареть при
-// перестройке иерархии, поэтому при расхождении они перечитываются по тем же
-// фиксированным release-смещениям. Во фрикаме сверку отключаем: там камера
-// намеренно не совпадает с положением, которое только что оставила игра.
-static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref, bool verify) {
-    if (!s_cam_arr_valid) {
-        Vec3 cp{};
-        float err = -1.f;
-        if (!resolve_camera_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, cp, err)) return false;
-        s_cam_arr_valid = true;
-        s_cam_arr_at = memio::now_seconds();
-    }
-    Vec3 p{};
-    Vec4 r{};
-    if (!read_transform_hierarchy_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, p, &r)) {
-        s_cam_arr_valid = false;
-        return false;
-    }
-    if (!vec3_is_finite(p)) { s_cam_arr_valid = false; return false; }
-    if (verify) {
-        const float dx = p.x - ref.x, dy = p.y - ref.y, dz = p.z - ref.z;
-        const float d2 = dx * dx + dy * dy + dz * dz;
-        // Два метра: камера успевает сдвинуться между двумя чтениями, а
-        // подмена массивов даёт десятки метров.
-        if (d2 > 2.0F * 2.0F) {
-            s_cam_arr_valid = false;
-            return false;
+    TransformHierarchyLayout layout{};
+    bool found = false;
+    for (int matrices_indirect = 0; matrices_indirect < 2 && !found; ++matrices_indirect) {
+        for (int indices_indirect = 0; indices_indirect < 2 && !found; ++indices_indirect) {
+            layout.matrices_indirect = matrices_indirect != 0;
+            layout.indices_indirect = indices_indirect != 0;
+            found = read_transform_hierarchy_layout(transform, layout, position, &rotation);
         }
     }
-    position = p;
-    rotation = r;
-    return true;
+    if (!found || !vec3_is_finite(position) || !normalize_quaternion(rotation)) return false;
+    if (fabsf(position.x) > 20000.0F || fabsf(position.z) > 20000.0F ||
+        fabsf(position.y) > 10000.0F)
+        return false;
+
+    const Vec3 right = rotate_vector(rotation, {1.0F, 0.0F, 0.0F});
+    const Vec3 up = rotate_vector(rotation, {0.0F, 1.0F, 0.0F});
+    const Vec3 forward = rotate_vector(rotation, {0.0F, 0.0F, 1.0F});
+    return vec3_is_finite(right) && vec3_is_finite(up) && vec3_is_finite(forward);
 }
 
-// Кадровый барьер матрицы вида. Все визуалы (боксы, маркеры, скелеты, линии)
-// рисуются через единый vp = projection * view, поэтому ОДИН кадр с недописанной
-// игрой матрицей разворачивает всю сцену в случайную сторону на миллисекунды —
-// это и было «визуалы телепортируются в рандомное место экрана». Раньше скачок
-// отсекался только в ветке живой позы камеры; кеш камеры и запасной путь шли в
-// кадр без проверок вовсе.
-//
-// Физика такова, что лечится дёшево:
-//   1. worldToCamera у Unity — чистый поворот + перенос, без масштаба: строки
-//      поворота обязаны быть ортонормальными. Смесь двух кадров, прочитанная
-//      на половине записи, таким свойством не обладает.
-//   2. Камера не прыгает на 30+ м и не разворачивается на 60+ градусов за кадр.
-//      Настоящий телепорт/респаун держится в памяти — серия из 4 одинаковых
-//      скачков подтвердит его и пропустит, а одиночный мусор отбрасывается, и
-//      кадр дорисовывается прошлой принятой матрицей.
-struct FrameViewGuard {
-    Mat4 view{};
-    Vec3 pos{};
-    Vec3 fwd{};
-    bool ok = false;
-    int  pos_streak = 0;
-    int  rot_streak = 0;
-};
-static FrameViewGuard s_fv_guard;
-
-// Ортонормальность поворота: camera_basis_from_view нормирует оси, дальше они
-// обязаны быть попарно ортогональными. 0.45 (~63°) — запас против почти
-// прямых углов игровой камеры; серьёзной половинчатой записи сюда не пройти.
-static bool view_basis_sane(const Mat4& view) {
-    if (!matrix_is_finite(view)) return false;
-    Vec3 right{}, up{}, forward{};
-    if (!camera_basis_from_view(view, right, up, forward)) return false;
-    const float d_ru = right.x * up.x + right.y * up.y + right.z * up.z;
-    const float d_rf = right.x * forward.x + right.y * forward.y + right.z * forward.z;
-    const float d_uf = up.x * forward.x + up.y * forward.y + up.z * forward.z;
-    return fabsf(d_ru) < 0.45F && fabsf(d_rf) < 0.45F && fabsf(d_uf) < 0.45F;
-}
-
-// Единый фильтр кадровых скачков для финального view кадра, из какого бы
-// источника он ни пришёл. false — образец отклонён; вызывающий дорисовывает
-// кадр через s_fv_guard.view.
-static bool frame_view_accepted(const Mat4& view) {
-    Vec3 pos{};
-    Vec3 right{}, up{}, fwd{};
-    if (!camera_position_from_view(view, pos)) return false;
-    if (!camera_basis_from_view(view, right, up, fwd)) return false;
-    if (!s_fv_guard.ok) {
-        s_fv_guard.view = view; s_fv_guard.pos = pos; s_fv_guard.fwd = fwd;
-        s_fv_guard.ok = true;
-        return true;
-    }
-    const float dx = pos.x - s_fv_guard.pos.x, dy = pos.y - s_fv_guard.pos.y, dz = pos.z - s_fv_guard.pos.z;
-    const bool pos_jump = dx * dx + dy * dy + dz * dz > 30.0F * 30.0F;
-    const float dot = fwd.x * s_fv_guard.fwd.x + fwd.y * s_fv_guard.fwd.y + fwd.z * s_fv_guard.fwd.z;
-    const bool rot_jump = dot < 0.5F;  // ~60° за кадр
-    if (pos_jump && s_fv_guard.pos_streak < 3) { ++s_fv_guard.pos_streak; return false; }
-    if (pos_jump) s_fv_guard.pos_streak = 0;
-    if (rot_jump && s_fv_guard.rot_streak < 3) { ++s_fv_guard.rot_streak; return false; }
-    if (rot_jump) s_fv_guard.rot_streak = 0;
-    s_fv_guard.view = view; s_fv_guard.pos = pos; s_fv_guard.fwd = fwd;
-    return true;
-}
-
-static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
+static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect,
+                                        Mat4& projection, Mat4& view) {
+    g_cam_pose_valid = false;
+    g_cam_pose_derived = false;
     if (!native_cam) return false;
 
-    static Mat4 s_last_view{};
-    static Mat4 s_last_proj{};
-    static bool s_last_ok = false;
+    Vec3 camera_position{};
+    Vec4 camera_rotation{};
+    if (!read_camera_transform_pose(native_cam, camera_position, camera_rotation)) return false;
 
-    // Матрица вида из кеша камеры (+0x70) — эталон: по ней игра и рисует кадр.
-    // Живая поза берётся только если она с этим эталоном согласна.
-    const Mat4 cached_view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
-    Vec3 ref_pos{};
-    const bool have_ref = matrix_is_finite(cached_view) && camera_position_from_view(cached_view, ref_pos) &&
-                          vec3_is_finite(ref_pos);
+    view = mat_world_to_camera(camera_position, camera_rotation);
+    if (!matrix_is_finite(view)) return false;
 
-    bool have_live_view = false;
-    uint64_t native_transform = camera_transform_of(native_cam);
-    if (native_transform && have_ref) {
-        Vec3 cam_pos{};
-        Vec4 cam_rot{};
-        bool pose_ok = camera_pose_checked(cam_pos, cam_rot, ref_pos, !g_freecam_on);
-        bool fin_ok = pose_ok && vec3_is_finite(cam_pos);
-        bool quat_ok = fin_ok && normalize_quaternion(cam_rot);
-        // Teleport rejection: a read that lands mid-update inside the game
-        // can return a garbage-but-finite pose. One such frame throws every
-        // box/marker across the screen (the flicker artifacts). A camera
-        // cannot move 30 m in one frame — reject the sample and reuse the
-        // last view; a REAL teleport (respawn) sticks, so after a few
-        // consecutive "jumps" the new position is accepted.
-        static Vec3 s_last_cam_pos{};
-        static bool s_last_cam_pos_ok = false;
-        static int  s_pose_jump_streak = 0;
-        if (quat_ok && s_last_cam_pos_ok && s_last_ok) {
-            float jx = cam_pos.x - s_last_cam_pos.x;
-            float jy = cam_pos.y - s_last_cam_pos.y;
-            float jz = cam_pos.z - s_last_cam_pos.z;
-            float j2 = jx * jx + jy * jy + jz * jz;
-            if (j2 > 30.0F * 30.0F && s_pose_jump_streak < 4) {
-                ++s_pose_jump_streak;
-                quat_ok = false; // fall through to the cached view below
-            } else {
-                s_pose_jump_streak = 0;
-            }
-        }
-        if (quat_ok) {
-            view = mat_world_to_camera(cam_pos, cam_rot);
-            have_live_view = matrix_is_finite(view);
-            if (have_live_view) {
-                g_cam_pos = cam_pos;
-                g_cam_right = rotate_vector(cam_rot, {1.0F, 0.0F, 0.0F});
-                g_cam_up = rotate_vector(cam_rot, {0.0F, 1.0F, 0.0F});
-                g_cam_forward = rotate_vector(cam_rot, {0.0F, 0.0F, 1.0F});
-                g_cam_pose_valid = true;
-                s_last_cam_pos = cam_pos;
-                s_last_cam_pos_ok = true;
-            }
-        }
-    }
-    if (!have_live_view) {
-        if (have_ref) {
-            view = cached_view;          // эталон: ровно то, чем рисует игра
-        } else if (s_last_ok && matrix_is_finite(s_last_view)) {
-            view = s_last_view;
-        } else {
-            return false;
-        }
-        g_cam_pose_derived = true;
-    } else {
-        g_cam_pose_derived = false;
-        s_last_view = view;
-    }
-    // Кадровый барьер (см. FrameViewGuard): структурная проверка и скачки.
-    // Отклонённый образец заменяется прошлой принятой матрицей — один кадр
-    // прежней камеры незаметен, а мусорный был бы виден сразу на всех визуалах.
-    if (!view_basis_sane(view) || !frame_view_accepted(view)) {
-        if (!s_fv_guard.ok) return false;
-        view = s_fv_guard.view;
-        g_cam_pose_derived = true;
-    }
-    // Поза и базис — из финальной матрицы вида, единственной, по которой
-    // рисуется кадр: иначе в g_cam_pos оставалась бы поза прошлого мира (её
-    // писал живой путь), и по ней строились и боксы, и углы цели.
-    {
-        Vec3 r{}, u{}, f{}, p{};
-        if (camera_basis_from_view(view, r, u, f) && camera_position_from_view(view, p)) {
-            g_cam_pos = p; g_cam_right = r; g_cam_up = u; g_cam_forward = f;
-            g_cam_pose_valid = true;
-        }
+    float fov = 0.0F;
+    if (!rd_exact(native_cam + CAMERA_FOV_DEGREES, fov) ||
+        !std::isfinite(fov) || !(fov > 1.0F && fov < 179.0F)) {
+        fov = (g_cam_fov_deg > 1.0F && g_cam_fov_deg < 179.0F) ? g_cam_fov_deg : 60.0F;
     }
 
-    // Projection params (FOV/aspect/clip) are stored as plain floats and stay hot.
-    float fov = rd<float>(native_cam + CAMERA_FOV_DEGREES);
-    float aspect = rd<float>(native_cam + CAMERA_ASPECT);
-    float z_near = rd<float>(native_cam + CAMERA_NEAR_CLIP);
-    float z_far = rd<float>(native_cam + CAMERA_FAR_CLIP);
+    float aspect = 0.0F;
+    const bool have_aspect = rd_exact(native_cam + CAMERA_ASPECT, aspect) &&
+                             std::isfinite(aspect) && aspect > 0.1F && aspect < 10.0F;
+    static float previous_stretch = 1.0F;
+    if (screen_aspect > 0.1F && screen_aspect < 10.0F) {
+        if (g_screen_stretch_x > 1.005F || previous_stretch > 1.005F) {
+            aspect = screen_aspect / g_screen_stretch_x;
+            wr_buf(native_cam + CAMERA_ASPECT, &aspect, sizeof(aspect));
+        } else if (!have_aspect) {
+            aspect = screen_aspect;
+        }
+    }
+    previous_stretch = g_screen_stretch_x;
     if (!(aspect > 0.1F && aspect < 10.0F))
         aspect = (screen_aspect > 0.1F && screen_aspect < 10.0F) ? screen_aspect : (9.0F / 16.0F);
-    if (!(z_near > 0.001F && z_near < 100.0F)) z_near = 0.1F;
-    if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
-    // Aspect и дистанции клипа болтаются в тех же float-полях — и попадают в
-    // тот же полузаписанный кадр разом с видом. Реальный повод для смены
-    // aspect — поворот экрана, держится серией; одиночный скачок растягивает
-    // все визуалы по горизонтали на кадр («телепорт на миллисекунды»).
-    static float s_fv_aspect = 0.0F;
-    static int   s_fv_aspect_streak = 0;
-    if (0.001F <= s_fv_aspect && fabsf(aspect - s_fv_aspect) > 0.3F && s_fv_aspect_streak < 3) {
-        ++s_fv_aspect_streak;
-        aspect = s_fv_aspect;
-    } else {
-        s_fv_aspect_streak = 0;
-        s_fv_aspect = aspect;
-    }
-    static float s_fv_zn = 0.0F, s_fv_zf = 0.0F;
-    static int   s_fv_clip_streak = 0;
-    if (s_fv_zn > 0.0F && s_fv_zf > 0.0F) {
-        const bool clip_jump = z_near > s_fv_zn * 4.0F || z_near < s_fv_zn * 0.25F ||
-                               z_far  > s_fv_zf * 4.0F || z_far  < s_fv_zf * 0.25F;
-        if (clip_jump && s_fv_clip_streak < 3) {
-            ++s_fv_clip_streak;
-            z_near = s_fv_zn; z_far = s_fv_zf;
-        } else {
-            s_fv_clip_streak = 0;
-            s_fv_zn = z_near; s_fv_zf = z_far;
-        }
-    } else {
-        s_fv_zn = z_near; s_fv_zf = z_far;
-    }
-    // FOV входит в ту же формулу кадра. Реальная смена (прицеливание, настройка)
-    // идёт серией; одиночный скачок — кривой отсчёт, кадр дорисовываем прошлым
-    // FOV (иначе вся сцена на миллисекунду меняет масштаб).
-    static float s_fv_fov = 0.0F;
-    static int   s_fv_fov_streak = 0;
-    if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) {
-        if (s_fv_fov > 0.0F && fabsf(fov - s_fv_fov) > 25.0F && s_fv_fov_streak < 3) {
-            ++s_fv_fov_streak;
-            fov = s_fv_fov;
-        } else {
-            s_fv_fov_streak = 0;
-            s_fv_fov = fov;
-        }
-    } else if (s_fv_fov > 0.0F) {
-        fov = s_fv_fov;
-    }
-    if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) g_cam_fov_deg = fov;
-    projection = mat_perspective(fov, aspect, z_near, z_far);
-    if (!matrix_is_finite(projection)) {
-        if (s_last_ok && matrix_is_finite(s_last_proj)) {
-            projection = s_last_proj;
-        } else {
-            projection = rd_m4(native_cam + CAMERA_PROJECTION_MATRIX);
-            if (!matrix_is_finite(projection)) return false;
-            // Перспектура Unity: последняя строка (0,0,-1,0). Полузаписанная
-            // матрица нарушает форму и бросает весь кадр — такую не берём.
-            if (fabsf(mat_get(projection, 3, 2) + 1.0F) > 0.05F ||
-                fabsf(mat_get(projection, 3, 0)) > 0.001F ||
-                fabsf(mat_get(projection, 3, 1)) > 0.001F ||
-                fabsf(mat_get(projection, 3, 3)) > 0.001F ||
-                !(mat_get(projection, 0, 0) > 0.0F) ||
-                !(mat_get(projection, 1, 1) > 0.0F)) return false;
-        }
-    }
-    if (matrix_is_finite(projection)) s_last_proj = projection;
-    if (have_live_view && matrix_is_finite(view)) {
-        s_last_view = view;
-        s_last_ok = true;
-    }
-    return true;
-}
 
-static bool w2s_transform_camera(const Vec3& camera_position, const Vec4& camera_rotation,
-                                 const Vec3& world, float screen_width, float screen_height,
-                                 Vec2& output, bool clip_to_screen = true,
-                                 W2SProjectionTrace* trace = nullptr) {
-    if (trace) {
-        *trace = {};
-        trace->camera_space = true;
-    }
-    if (screen_width < 100.0F || screen_height < 100.0F) {
-        if (trace) trace->state = W2SProjectionState::InvalidViewport;
-        return false;
-    }
-    Vec3 relative = {world.x - camera_position.x, world.y - camera_position.y, world.z - camera_position.z};
-    Vec4 inverse_rotation = {-camera_rotation.x, -camera_rotation.y, -camera_rotation.z, camera_rotation.w};
-    Vec3 camera_space = rotate_vector(inverse_rotation, relative);
-    if (trace) {
-        trace->x = camera_space.x;
-        trace->y = camera_space.y;
-        trace->z = camera_space.z;
-    }
-    if (!vec3_is_finite(camera_space)) {
-        if (trace) trace->state = W2SProjectionState::NonFiniteCamera;
-        return false;
-    }
-    if (camera_space.z <= 0.05F) {
-        if (trace) trace->state = W2SProjectionState::CameraBehind;
-        return false;
-    }
-    constexpr float vertical_fov_radians = 1.0471975512F;
-    float tangent = tanf(vertical_fov_radians * 0.5F);
-    float aspect = screen_width / screen_height;
-    float normalized_x = camera_space.x / (camera_space.z * tangent * aspect);
-    float normalized_y = camera_space.y / (camera_space.z * tangent);
-    if (trace) {
-        trace->screen_x = (normalized_x + 1.0F) * 0.5F * screen_width;
-        trace->screen_y = (1.0F - normalized_y) * 0.5F * screen_height;
-    }
-    if (!std::isfinite(normalized_x) || !std::isfinite(normalized_y)) {
-        if (trace) trace->state = W2SProjectionState::NonFiniteScreen;
-        return false;
-    }
-    if (clip_to_screen && (fabsf(normalized_x) > 1.0F || fabsf(normalized_y) > 1.0F)) {
-        if (trace) trace->state = W2SProjectionState::OutsideScreen;
-        return false;
-    }
-    output.x = (normalized_x + 1.0F) * 0.5F * screen_width;
-    output.y = (1.0F - normalized_y) * 0.5F * screen_height;
-    if (trace) {
-        trace->screen_x = output.x;
-        trace->screen_y = output.y;
-    }
-    const bool projected = std::isfinite(output.x) && std::isfinite(output.y);
-    if (trace) trace->state = projected ? W2SProjectionState::Projected
-                                        : W2SProjectionState::NonFiniteScreen;
-    return projected;
-}
+    float z_near = 0.0F, z_far = 0.0F;
+    if (!rd_exact(native_cam + CAMERA_NEAR_CLIP, z_near) ||
+        !std::isfinite(z_near) || !(z_near > 0.001F && z_near < 100.0F))
+        z_near = 0.1F;
+    if (!rd_exact(native_cam + CAMERA_FAR_CLIP, z_far) ||
+        !std::isfinite(z_far) || !(z_far > z_near && z_far < 100000.0F))
+        z_far = 1000.0F;
 
-// Кадры подряд, в которых выборка позиций игроков сошлась в одну точку (см.
-// optimize_matrix_configuration). Один transient sample must not invalidate
-// the fixed release position path.
-static int g_offset_extent_fail_streak = 0;
+    if (!espprojection::make_perspective(fov, aspect, z_near, z_far, projection)) return false;
+    if (!matrix_is_finite(projection)) return false;
 
-static bool optimize_matrix_configuration(uint64_t native_camera, const std::vector<uint64_t>& transforms) {
-    std::vector<Vec3> samples;
-    for (uint64_t source : transforms) {
-        Vec3 position{};
-        if (!read_entity_position(source, position)) continue;
-        // Нули после респауна и мусор из пула — не мировые позиции. Они не
-        // должны инвалидировать уже подтверждённый release position path.
-        if (!position_looks_like_world_space(position)) continue;
-        samples.push_back(position);
-        if (samples.size() >= 24) break;
-    }
-    if (samples.empty()) {
-        // Nothing readable this frame; keep the validated offset and retry.
-        return false;
-    }
-
-    Vec3 minimum = samples[0], maximum = samples[0];
-    for (const Vec3& position : samples) {
-        minimum.x = std::min(minimum.x, position.x); minimum.y = std::min(minimum.y, position.y); minimum.z = std::min(minimum.z, position.z);
-        maximum.x = std::max(maximum.x, position.x); maximum.y = std::max(maximum.y, position.y); maximum.z = std::max(maximum.z, position.z);
-    }
-    float extent = fabsf(maximum.x - minimum.x) + fabsf(maximum.y - minimum.y) + fabsf(maximum.z - minimum.z);
-    // Several players that never move apart mean the offset is not a position
-    // at all -- but only when there are several of them. Alone on the server a
-    // zero extent is normal and must not invalidate anything.
-    //
-    // Столпившиеся игроки и мигнувшее чтение выглядят одинаково, поэтому
-    // fixed release path revalidation starts only after a short failure streak.
-    if (samples.size() >= 2 && extent < 0.1F) {
-        if (++g_offset_extent_fail_streak >= 3) {
-            g_offset_extent_fail_streak = 0;
-            g_player_position_validated = false;
-        }
-        return false;
-    }
-    g_offset_extent_fail_streak = 0;
-    if (samples.size() < 2 && !position_looks_like_world_space(samples[0])) return false;
-
-    Mat4 validated_projection{}, validated_view{};
-    if (!read_native_camera_matrices(native_camera, 0.0F, validated_projection, validated_view))
-        return false;
-    Vec3 camera_position{};
-    double nearest_camera_distance_squared = INFINITY;
-    if (camera_position_from_view(validated_view, camera_position)) {
-        for (const Vec3& sample : samples) {
-            double dx = (double)sample.x - camera_position.x, dy = (double)sample.y - camera_position.y, dz = (double)sample.z - camera_position.z;
-            double distance_squared = dx * dx + dy * dy + dz * dz;
-            if (std::isfinite(distance_squared)) nearest_camera_distance_squared = std::min(nearest_camera_distance_squared, distance_squared);
-        }
-    }
-    g_camera_matrix_physical_match = std::isfinite(nearest_camera_distance_squared) && nearest_camera_distance_squared <= 100.0;
-    g_matrix_configuration_validated = true;
+    g_cam_fov_deg = fov;
+    g_cam_pos = camera_position;
+    g_cam_right = rotate_vector(camera_rotation, {1.0F, 0.0F, 0.0F});
+    g_cam_up = rotate_vector(camera_rotation, {0.0F, 1.0F, 0.0F});
+    g_cam_forward = rotate_vector(camera_rotation, {0.0F, 0.0F, 1.0F});
+    g_cam_pose_valid = true;
     return true;
 }
 
 static std::vector<uint64_t> read_configured_player_transforms(bool* player_list_ok) {
     if (player_list_ok) *player_list_ok = false;
-    std::vector<uint64_t> transforms;
-    uint64_t lists[2]{};
-    int list_count = resolve_player_lists(lists);
-    if (list_count == 0) return transforms;
-
-    uint64_t local_player = resolve_local_player();
-    if (local_player) {
-        bool contained = false;
-        bool any_nonempty = false;
-        for (int i = 0; i < list_count; ++i) {
-            contained |= player_list_contains(lists[i], local_player);
-            const int32_t count = rd<int32_t>(lists[i] + IL2CPP_LIST_SIZE);
-            any_nonempty |= count > 0 && count <= 512;
-        }
-        if (!contained && any_nonempty) {
-            if (local_player == g_local_player) g_local_player = 0;
-            local_player = 0;
-        }
-    }
-    const uint64_t local_source = local_player;
+    const uint64_t local_candidate = resolve_local_player();
 
     for (int attempt = 0; attempt < 3; ++attempt) {
-        if (attempt > 0) {
-            const int refreshed_count = resolve_player_lists(lists);
-            if (refreshed_count > 0) list_count = refreshed_count;
-        }
+        uint64_t lists[2]{};
+        const int list_count = resolve_player_lists(lists);
+        if (list_count <= 0) continue;
 
         std::vector<uint64_t> snapshot;
         snapshot.reserve(32);
-        if (local_source) snapshot.push_back(local_source);
-        bool stable = true;
         bool healthy = false;
+        bool stable = true;
 
         for (int list_index = 0; list_index < list_count; ++list_index) {
             const uint64_t list = lists[list_index];
-            const uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
-            const int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-            if (count < 0 || count > 512 || (count > 0 && !items)) {
+            uint64_t items = 0;
+            int32_t count = 0;
+            if (!rd_exact(list + IL2CPP_LIST_ITEMS, items) ||
+                !rd_exact(list + IL2CPP_LIST_SIZE, count)) {
+                stable = false;
+                break;
+            }
+            items = memio::untag(items);
+            if (count < 0 || count > 512 ||
+                (count > 0 && items < 0x10000)) {
                 stable = false;
                 break;
             }
             healthy = true;
 
             for (int32_t index = 0; index < count; ++index) {
-                const uint64_t player = rd_ptr(
-                    items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
-                if (!player || player == local_source) continue;
-                // The containing registry is already validated and its
-                // pointer/count are rechecked below. A failed class read must
-                // not make one live player disappear from an otherwise stable
-                // snapshot.
-                bool duplicate = false;
-                for (uint64_t known : snapshot) duplicate |= known == player;
-                if (!duplicate) snapshot.push_back(player);
+                uint64_t player = 0;
+                const uint64_t address = items + IL2CPP_ARRAY_FIRST_ELEMENT +
+                                         (uint64_t)index * sizeof(uint64_t);
+                if (!rd_exact(address, player)) {
+                    stable = false;
+                    break;
+                }
+                player = memio::untag(player);
+                if (player < 0x10000) continue;
+                if (std::find(snapshot.begin(), snapshot.end(), player) == snapshot.end())
+                    snapshot.push_back(player);
             }
+            if (!stable) break;
 
-            const uint64_t confirmed_items = rd_ptr(list + IL2CPP_LIST_ITEMS);
-            const int32_t confirmed_count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-            if (items != confirmed_items || count != confirmed_count) {
+            uint64_t confirmed_items = 0;
+            int32_t confirmed_count = 0;
+            if (!rd_exact(list + IL2CPP_LIST_ITEMS, confirmed_items) ||
+                !rd_exact(list + IL2CPP_LIST_SIZE, confirmed_count) ||
+                memio::untag(confirmed_items) != items || confirmed_count != count) {
                 stable = false;
                 break;
             }
         }
 
-        if (healthy && stable) {
-            if (player_list_ok) *player_list_ok = true;
-            return snapshot;
-        }
+        if (!healthy || !stable) continue;
+        const uint64_t current_local = local_candidate ? local_candidate : g_local_player;
+        const bool local_found = current_local &&
+            std::find(snapshot.begin(), snapshot.end(), current_local) != snapshot.end();
+        g_local_player = local_found ? current_local : 0;
+        if (player_list_ok) *player_list_ok = true;
+        return snapshot;
     }
-    return transforms;
+    return {};
 }
 
 // ===================== Skeleton ESP =====================
@@ -4232,15 +3685,16 @@ static const SkeletonBoneName kSkeletonBoneNames[] = {
 
 struct CachedSkeleton {
     uint64_t bone_transform[ESP_BONE_COUNT] = {};
-    Vec3     bone_world[ESP_BONE_COUNT] = {};
-    uint8_t  bone_world_age[ESP_BONE_COUNT] = {}; // 0 = none, 1 = fresh, grows on reuse
+    Vec3 bone_world[ESP_BONE_COUNT] = {};
+    double bone_world_time[ESP_BONE_COUNT] = {};
     uint64_t model_root = 0;
-    int      bone_count = 0;
-    bool     valid = false;
-    int      retry_cooldown = 0;
-    int      fail_streak = 0;
-    int      build_fail = 0;         // пересборок подряд, закончившихся провалом
-    int      revalidate_timer = 0;
+    int bone_count = 0;
+    bool valid = false;
+    double retry_at = 0.0;
+    double fail_since = 0.0;
+    double model_revalidate_at = 0.0;
+    int fail_streak = 0;
+    int build_fail = 0;
 };
 
 static std::unordered_map<uint64_t, CachedSkeleton> g_skeletons;
@@ -4259,25 +3713,23 @@ struct LocalAimState {
 };
 static LocalAimState g_aim_state{};
 
-// Per-player auxiliary data resolved through the KCC (character controller):
-// the game-maintained head transform and the current pose. Used for
-// crouch-aware boxes and as the aim target when rig bones are unavailable.
+// Per-player KCC and held-weapon references; all are discarded with the player.
 struct PlayerAux {
     uint64_t kcc = 0;
-    uint64_t head_native = 0;   // native Transform of KCC.head
-    uint64_t head_hitbox_transform = 0; // native Transform of the Head HitBox
-    Vec3     head_hitbox_center{};      // HitBox.center (local to that transform)
-    bool     head_hitbox_valid = false;
-    float    normal_height = 1.8F;
-    float    crouch_height = 1.1F;
-    int      retry_cooldown = 0;
-    int      revalidate = 0;
-    // Held-weapon chain (resolved lazily, revalidated by their back-references).
-    uint64_t weapon_component = 0; // PlayerWeapon (NetworkBehaviour)
-    uint64_t model_info = 0;       // PlayerModelInfo (weapon holders)
-    int      weapon_retry = 0;
+    float normal_height = 1.8F;
+    float crouch_height = 1.1F;
+    double kcc_retry_at = 0.0;
+    double kcc_revalidate_at = 0.0;
+    uint64_t weapon_component = 0;
+    uint64_t model_info = 0;
+    double weapon_retry_at = 0.0;
+    Vec3 last_position{};
+    double last_position_time = 0.0;
+    bool have_last_position = false;
+    bool last_position_mounted = false;
 };
 static std::unordered_map<uint64_t, PlayerAux> g_player_aux;
+static bool player_kcc_position(const PlayerAux& aux, Vec3& out);
 
 TransformHierarchyLayout g_skeleton_layout{};
 bool g_skeleton_layout_valid = false;
@@ -5321,48 +4773,37 @@ static uint64_t resolve_player_kcc(uint64_t player);
 
 static PlayerAux& player_aux(uint64_t player) {
     PlayerAux& aux = g_player_aux[player];
+    const double now = mono_seconds();
     if (aux.kcc) {
-        // Cheap liveness check every frame; full re-resolve occasionally.
-        if (rd_ptr(aux.kcc + KCC_PLAYER_BACKREF) != player || ++aux.revalidate >= 300) {
+        const bool backref_ok = rd_ptr(aux.kcc + KCC_PLAYER_BACKREF) == player;
+        if (!backref_ok || now >= aux.kcc_revalidate_at) {
+            const Vec3 last_position = aux.last_position;
+            const double last_position_time = aux.last_position_time;
+            const bool have_last_position = aux.have_last_position;
+            const bool last_position_mounted = aux.last_position_mounted;
             aux = PlayerAux{};
+            if (backref_ok) {
+                aux.last_position = last_position;
+                aux.last_position_time = last_position_time;
+                aux.have_last_position = have_last_position;
+                aux.last_position_mounted = last_position_mounted;
+            }
         }
     }
     if (!aux.kcc) {
-        if (aux.retry_cooldown > 0) { --aux.retry_cooldown; return aux; }
-        uint64_t kcc = resolve_player_kcc(player);
-        if (!kcc) { aux.retry_cooldown = 30; return aux; }
+        if (now < aux.kcc_retry_at) return aux;
+        const uint64_t kcc = resolve_player_kcc(player);
+        if (!kcc) {
+            aux.kcc_retry_at = now + 0.5;
+            return aux;
+        }
         aux.kcc = kcc;
-        aux.revalidate = 0;
-        float nh = rd<float>(kcc + KCC_NORMAL_HEIGHT);
-        float ch = rd<float>(kcc + KCC_CROUCH_HEIGHT);
+        aux.kcc_retry_at = 0.0;
+        aux.kcc_revalidate_at = now + 5.0;
+        const float nh = rd<float>(kcc + KCC_NORMAL_HEIGHT);
+        const float ch = rd<float>(kcc + KCC_CROUCH_HEIGHT);
         if (std::isfinite(nh) && nh > 1.2F && nh < 2.6F) aux.normal_height = nh;
         if (std::isfinite(ch) && ch > 0.6F && ch < aux.normal_height) aux.crouch_height = ch;
-        uint64_t head = rd_ptr(kcc + KCC_HEAD_TRANSFORM);
-        aux.head_native = head ? rd_ptr(head + MANAGED_CACHED_PTR) : 0;
-        if (aux.head_native && (aux.head_native < 0x10000 || aux.head_native >= 0x0001000000000000ULL))
-            aux.head_native = 0;
-        // Head hit volume (what the server actually tests shots against).
-        aux.head_hitbox_valid = false;
-        uint64_t hb_root = rd_ptr(kcc + KCC_HITBOX_ROOT);
-        uint64_t hb_array = hb_root ? rd_ptr(hb_root + HITBOX_ROOT_ARRAY) : 0;
-        int32_t hb_count = hb_array ? rd<int32_t>(hb_array + IL2CPP_ARRAY_LENGTH) : 0;
-        if (hb_count > 0 && hb_count <= 64) {
-            for (int32_t i = 0; i < hb_count; ++i) {
-                uint64_t hb = rd_ptr(hb_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
-                if (!hb || rd<int32_t>(hb + HITBOX_AREA) != 0) continue;
-                Vec3 center = rd_v3(hb + HITBOX_CENTER);
-                Vec3 size = rd_v3(hb + HITBOX_SIZE);
-                if (!vec3_is_finite(center) || !vec3_is_finite(size)) continue;
-                if (fabsf(center.x) > 1.0F || fabsf(center.y) > 1.0F || fabsf(center.z) > 1.0F) continue;
-                if (!(size.x > 0.02F && size.x < 1.0F && size.y > 0.02F && size.y < 1.0F)) continue;
-                uint64_t transform = native_component_transform(managed_object_native(hb));
-                if (!skeleton_transform_ptr_valid(transform)) continue;
-                aux.head_hitbox_transform = transform;
-                aux.head_hitbox_center = center;
-                aux.head_hitbox_valid = true;
-                break;
-            }
-        }
     }
     return aux;
 }
@@ -5375,27 +4816,6 @@ static bool player_is_crouched(const PlayerAux& aux) {
     return pose == 1 || state == 3;
 }
 
-static bool player_head_world(const PlayerAux& aux, Vec3& out) {
-    if (!aux.head_native) return false;
-    if (g_skeleton_layout_valid &&
-        read_transform_hierarchy_layout(aux.head_native, g_skeleton_layout, out)) return vec3_is_finite(out);
-    return read_transform_hierarchy_position(aux.head_native, out) && vec3_is_finite(out);
-}
-
-// World-space centre of the Head hit volume: transform TRS applied to the
-// local centre (HitBox.transform.TransformPoint(center)).
-static bool player_head_hitbox_world(const PlayerAux& aux, Vec3& out) {
-    if (!aux.head_hitbox_valid || !aux.head_hitbox_transform) return false;
-    Vec3 pos{}; Vec4 rot{};
-    const TransformHierarchyLayout& layout = g_skeleton_layout_valid ? g_skeleton_layout : g_transform_hierarchy_layout;
-    if (!(g_skeleton_layout_valid || g_transform_hierarchy_layout_valid)) return false;
-    if (!read_transform_hierarchy_layout(aux.head_hitbox_transform, layout, pos, &rot)) return false;
-    // Lossy scale is ~1 on character rigs; rotate the local centre and offset.
-    Vec3 offset = rotate_vector(rot, aux.head_hitbox_center);
-    out = {pos.x + offset.x, pos.y + offset.y, pos.z + offset.z};
-    return vec3_is_finite(out);
-}
-
 static void prune_player_aux(const std::vector<uint64_t>& players) {
     for (auto it = g_player_aux.begin(); it != g_player_aux.end();) {
         bool present = false;
@@ -5404,362 +4824,150 @@ static void prune_player_aux(const std::vector<uint64_t>& players) {
     }
 }
 
-// ---- Vehicles and ghost copies ----------------------------------------------
-// Two things go wrong once a player sits in a car:
-//   * lastSavedPosition (the field every box is built from) stops being
-//     updated and keeps pointing at the spot where he got in;
-//   * the old PlayerManager object often stays in the player list next to the
-//     one that drives away, so the same player is in there twice.
-// Both are handled here: mounted players are positioned from their rendered
-// transform (it is parented to the seat, so it follows the car), and objects
-// that share a userID are reduced to the one that is actually moving.
-
+// ---- Player positions and aim velocity -------------------------------------
 struct PlayerTrack {
-    char uid[40] = {};      // userID, empty when it could not be read
-    int  uid_recheck = 0;   // objects are pooled and reused for other players
-    // Последнее кадровое решение «мёртв» для ЭТОГО объекта и когда оно принято.
-    // Труп остаётся в реестре ещё несколько секунд после респауна, и без этого
-    // флага объект-трупа забирал uid себе: свежий объект того же игрока
-    // подавлялся как duplicate-uid, и живой игрок оставался без бокса. В логе
-    // 11:52:50 так пропал игрок на 0.5 с, а в 11:53:32 — игрок на 7.6 м.
-    bool corpse = false;
-    double corpse_at = 0.0;
-    Vec3 last{};
-    bool has_last = false;
-    int  still_frames = 0;  // consecutive frames without movement
-    // How fast this player is actually moving through the world, in metres
-    // per second. World space on purpose: it does not care where the camera
-    // is pointing or how fast it is turning, so it stays correct even when
-    // the camera angles cannot be read at all.
-    Vec3   vel{};
-    Vec3   vel_ref{};       // position the current estimate was measured from
-    double vel_ref_t = 0.0; // and when
-    bool   have_vel_ref = false;
-    // Последняя ПРИНЯТАЯ позиция и состояние временного фильтра (см.
-    // filter_player_position): бокс рисуется по ним, а не по сырому чтению.
-    posfilter::State filt{};
+    Vec3 vel{};
+    Vec3 vel_ref{};
+    double vel_ref_t = 0.0;
+    bool have_vel_ref = false;
 };
 
 double mono_seconds() {
     using namespace std::chrono;
     return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
 }
+
 static std::unordered_map<uint64_t, PlayerTrack> g_player_track;
-// Сколько игроков в кадре получили позицию из запасного источника (KCC/
-// characterModel), потому что синхронизируемое поле ещё не записано игрой —
-// наблюдение за жалобой «нет боксов на свежеспавнившихся».
-static int g_position_fallback_this_frame = 0;
-static int g_position_fallback_rejected = 0;  // отклонённые как далёкие (чужая база)
-static int g_position_origin_rejected = 0;   // отсчёты вида (≈0, 0, ≈0) из недоинициализированного пула
-static int g_position_origin_rejected_logged = 0;
-static double g_position_fallback_log_at = 0.0;
-static int g_position_fallback_logged = 0;
-static int g_position_fallback_rejected_logged = 0;
-// uid -> the object we drew last time, so a tie does not flip between copies.
-static std::unordered_map<std::string, uint64_t> g_player_track_pick;
 
 static void prune_player_track(const std::vector<uint64_t>& players) {
     for (auto it = g_player_track.begin(); it != g_player_track.end();) {
-        bool present = false;
-        for (uint64_t player : players) if (player == it->first) { present = true; break; }
-        if (!present) it = g_player_track.erase(it); else ++it;
+        if (std::find(players.begin(), players.end(), it->first) == players.end())
+            it = g_player_track.erase(it);
+        else
+            ++it;
     }
-    if (g_player_track_pick.size() > 256) g_player_track_pick.clear();
-}
-
-static float vec3_horiz2(const Vec3& a, const Vec3& b) {
-    float dx = a.x - b.x, dz = a.z - b.z;
-    return dx * dx + dz * dz;
 }
 
 static bool player_is_mounted(uint64_t player) {
     if (!player) return false;
-    uint32_t vehicle = rd<uint32_t>(player + PLAYER_VEHICLE_ID);
-    if (vehicle != 0 && vehicle != 0xFFFFFFFFu) return true;
-    // Copters / some seats leave vehicleID at 0; seatID is still non-zero.
-    uint32_t seat = rd<uint32_t>(player + PLAYER_SEAT_ID);
-    return seat != 0 && seat != 0xFFFFFFFFu && seat < 32u;
+    uint32_t vehicle = 0;
+    if (rd_exact(player + PLAYER_VEHICLE_ID, vehicle) &&
+        vehicle != 0 && vehicle != 0xFFFFFFFFu)
+        return true;
+    uint32_t seat = 0;
+    return rd_exact(player + PLAYER_SEAT_ID, seat) &&
+           seat != 0 && seat != 0xFFFFFFFFu && seat < 32u;
 }
 
-static bool player_saved_position(uint64_t player, Vec3& out) {
-    uint64_t off = g_player_position_offset ? g_player_position_offset : (uint64_t)PLAYER_POSITION;
-    out = rd_v3(player + off);
-    return vec3_is_finite(out) && position_looks_like_world_space(out) &&
-           !position_near_world_origin(out);
-}
-
-// World position of the player's own transform (worldCameraRoot). While he is
-// mounted this is the only source that moves with the vehicle.
 static bool player_rendered_position(uint64_t player, Vec3& out) {
-    uint64_t native = resolve_player_native_transform(player);
+    const uint64_t native = resolve_player_native_transform(player);
     if (!native) return false;
-    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(native, g_skeleton_layout, out)
-        && vec3_is_finite(out) && position_looks_like_world_space(out)
-        && !position_near_world_origin(out))
+    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(native, g_skeleton_layout, out) &&
+        position_looks_like_world_space(out) && !position_near_world_origin(out))
         return true;
-    return read_transform_hierarchy_position(native, out) && vec3_is_finite(out)
-        && position_looks_like_world_space(out) && !position_near_world_origin(out);
+    return read_transform_hierarchy_position(native, out) &&
+           position_looks_like_world_space(out) && !position_near_world_origin(out);
 }
 
-// Seated body: characterModel is parented to the seat even when worldCameraRoot
-// is left behind at the boarding point.
 static bool player_model_position(uint64_t player, Vec3& out) {
-    uint64_t root = skeleton_model_root(player);
+    const uint64_t root = skeleton_model_root(player);
     if (!root) return false;
-    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(root, g_skeleton_layout, out)
-        && vec3_is_finite(out) && position_looks_like_world_space(out)
-        && !position_near_world_origin(out))
+    if (g_skeleton_layout_valid && read_transform_hierarchy_layout(root, g_skeleton_layout, out) &&
+        position_looks_like_world_space(out) && !position_near_world_origin(out))
         return true;
-    return read_transform_hierarchy_position(root, out) && vec3_is_finite(out)
-        && position_looks_like_world_space(out) && !position_near_world_origin(out);
+    return read_transform_hierarchy_position(root, out) &&
+           position_looks_like_world_space(out) && !position_near_world_origin(out);
 }
 
-// worldCameraRoot sits at eye level, the box is built from the feet.
 static constexpr float kCameraRootHeight = 1.60F;
 
-// Mounted-state latch. lastSavedPosition freezes at the boarding point while
-// the rendered transform (and/or the character model) rides with the vehicle.
-// vehicleID / the transform also flicker mid-tick. Engage on seat/vehicle OR
-// on lastSaved freeze + a live visual that has left the mount; never snap the
-// box back to that mount mid-ride.
-// Состояние защёлки и само решение об удержании — в mount_latch.h, там же
-// host-тест на сценарий из лога 08.10 23:09:07.
-static std::unordered_map<uint64_t, MountLatch> g_mount_latch;
-
-static bool player_mount_engaged(uint64_t player) {
-    auto found = g_mount_latch.find(player);
-    return found != g_mount_latch.end() && found->second.engaged;
+static bool mounted_player_position(uint64_t player, Vec3& feet) {
+    Vec3 position{};
+    if (player_model_position(player, position)) {
+        feet = position;
+        return true;
+    }
+    if (player_rendered_position(player, position)) {
+        position.y -= kCameraRootHeight;
+        if (position_looks_like_world_space(position) && !position_near_world_origin(position)) {
+            feet = position;
+            return true;
+        }
+    }
+    return false;
 }
 
+static constexpr double kPlayerPositionGraceSeconds = 0.30;
 
-static void apply_mounted_position(uint64_t player, Vec3& feet) {
-    Vec3 saved{};
-    if (!player_saved_position(player, saved)) saved = feet;
-
-    bool id_mounted = player_is_mounted(player);
-    if (g_mount_latch.size() > 256 && g_mount_latch.find(player) == g_mount_latch.end()) return;
-    MountLatch& latch = g_mount_latch[player];
-
-    if (latch.have_saved) {
-        if (vec3_horiz2(saved, latch.prev_saved) < 0.15F * 0.15F) {
-            if (latch.saved_still < 100000) ++latch.saved_still;
-        } else {
-            latch.saved_still = 0;
-        }
+static bool player_world_position(uint64_t player, PlayerAux& aux, Vec3& feet,
+                                  bool& mounted) {
+    const double now = mono_seconds();
+    bool have_position = read_entity_position(player, feet);
+    if (!have_position && player_kcc_position(aux, feet))
+        have_position = true;
+    if (!have_position && player_model_position(player, feet)) {
+        feet.y -= 0.90F;
+        have_position = position_looks_like_world_space(feet) && !position_near_world_origin(feet);
     }
-    latch.prev_saved = saved;
-    latch.have_saved = true;
-
-    // On foot the box already sits on lastSaved. Skip the transform walks
-    // unless the seat says mounted, we are already riding, or lastSaved has
-    // been frozen long enough that this may be a boarding (copter vehicleID
-    // is often 0).
-    if (!id_mounted && !latch.engaged && (latch.saved_still < 8 || (latch.saved_still & 7) != 0))
-        return;
-
-    Vec3 cam{};
-    bool have_cam = player_rendered_position(player, cam);
-    Vec3 model{};
-    bool have_model = player_model_position(player, model);
-
-    // Direct path builds the box from feet; hierarchy path treats the value as
-    // eye height and subtracts 1.60 later. Keep whichever space `feet` is in.
-    const bool ground = g_use_direct_player_position;
-    Vec3 live{};
-    bool have_live = false;
-    float live_h2 = -1.0F;
-    const char* live_source = "нет";
-    if (have_cam) {
-        Vec3 p = cam;
-        if (ground) p.y -= kCameraRootHeight;
-        if (position_looks_like_world_space(p) || position_looks_like_world_space(cam)) {
-            live = p;
-            have_live = true;
-            live_h2 = vec3_horiz2(p, saved);
-            live_source = "трансформ";
-        }
-    }
-    if (have_model && !id_mounted && !latch.engaged) {
-        // While riding, characterModel can remain parented to the seat's old
-        // PlayerManager copy for a tick. Selecting whichever sample is farther
-        // from lastSaved made the box alternate between the boarding point and
-        // the vehicle every frame. The rendered/worldCameraRoot transform is
-        // the authoritative moving sample; use the model only on foot or when
-        // the rendered transform is unavailable.
-        Vec3 p = model;
-        if (!ground) p.y += 0.90F; // hips -> roughly eye, matches hierarchy boxes
-        float h2 = vec3_horiz2(p, saved);
-        if (!have_live || h2 > live_h2 + 0.25F) {
-            live = p;
-            have_live = true;
-            live_h2 = h2;
-            live_source = "модель";
-        }
-    } else if (!have_live && have_model) {
-        Vec3 p = model;
-        if (!ground) p.y += 0.90F;
-        live = p;
-        have_live = true;
-        live_h2 = vec3_horiz2(p, saved);
-        live_source = "модель";
-    }
-    if (!ground && !have_live && position_looks_like_world_space(feet)) {
-        live = feet;
-        have_live = true;
-        live_h2 = vec3_horiz2(feet, saved);
-        live_source = "ноги";
+    if (!have_position && player_rendered_position(player, feet)) {
+        feet.y -= kCameraRootHeight;
+        have_position = position_looks_like_world_space(feet) && !position_near_world_origin(feet);
     }
 
-    const bool was_engaged = latch.engaged;
-    bool pos_mounted = latch.saved_still >= 8 && have_live && live_h2 > 1.6F * 1.6F;
-    bool keep_mounted = latch.engaged && have_live && live_h2 > 1.6F * 1.6F;
-    if (id_mounted || pos_mounted || keep_mounted) {
-        latch.engaged = true;
-        latch.unmounted_streak = 0;
-    } else if (latch.engaged) {
-        if (++latch.unmounted_streak >= 45) {
-            latch.engaged = false;
-            latch.last_ok = false;
-            latch.unmounted_streak = 0;
-            latch.hold_count = 0;
-            latch.hold_streak = 0;
-            latch.miss_streak = 0;
-        }
+    mounted = player_is_mounted(player);
+    if (have_position && mounted) {
+        Vec3 mounted_position{};
+        if (mounted_player_position(player, mounted_position)) feet = mounted_position;
     }
-    if (latch.engaged != was_engaged) {
-        const uint32_t vid = rd<uint32_t>(player + PLAYER_VEHICLE_ID);
-        const uint32_t sid = rd<uint32_t>(player + PLAYER_SEAT_ID);
-        if (latch.engaged)
-            ;
-        else
-            ;
-    }
-    if (!latch.engaged) return;
-
-    const char* source = "нет";
-    bool held = false;
-    if (have_live) {
-        source = live_source;
-        held = mountlatch::apply_hold(latch, saved, live, live_h2, latch.saved_still, feet);
-    } else {
-        ++latch.miss_streak;
-        if (latch.last_ok) feet = latch.last;
+    have_position = have_position && position_looks_like_world_space(feet) &&
+                    !position_near_world_origin(feet);
+    if (have_position) {
+        aux.last_position = feet;
+        aux.last_position_time = now;
+        aux.have_last_position = true;
+        aux.last_position_mounted = mounted;
+        return true;
     }
 
-}
-
-static void prune_mount_latch(const std::vector<uint64_t>& players) {
-    for (auto it = g_mount_latch.begin(); it != g_mount_latch.end();) {
-        bool present = false;
-        for (uint64_t player : players) if (player == it->first) { present = true; break; }
-        if (!present) it = g_mount_latch.erase(it); else ++it;
+    if (aux.have_last_position &&
+        espsnapshot::within_age(now, aux.last_position_time, kPlayerPositionGraceSeconds)) {
+        feet = aux.last_position;
+        mounted = aux.last_position_mounted;
+        return true;
     }
+    aux.have_last_position = false;
+    return false;
 }
 
 static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
     PlayerTrack& track = g_player_track[player];
-    if (--track.uid_recheck <= 0) {
-        char uid[40] = {};
-        // Перезаписываем кеш ТОЛЬКО успешным чтением. Безусловный memcpy
-        // стирал userID после любого сбоя чтения, и на пару секунд дубли
-        // объекта (копия после посадки в транспорт, остаток респауна)
-        // переставали подавляться: второй бокс вспыхивал в стороне и пропадал.
-        if (read_managed_string_ex(rd_ptr(player + PLAYER_USER_ID), uid, sizeof(uid), 39)) {
-            memcpy(track.uid, uid, sizeof(track.uid));
-            track.uid_recheck = 120; // ~2 s: pooled objects change owner
-        } else {
-            // Старый кеш не трогаем. Если кеша нет вовсе, пробуем быстрее.
-            track.uid_recheck = track.uid[0] ? 120 : 20;
-        }
-    }
-    // Velocity, measured between the moments the position actually changed.
-    // A remote player's position only arrives on the network tick, so most
-    // frames repeat the previous one; differencing those would read zero.
-    {
-        const double now = mono_seconds();
-        if (!track.have_vel_ref) {
-            track.vel_ref = position; track.vel_ref_t = now; track.have_vel_ref = true;
-        } else {
-            const float mx = position.x - track.vel_ref.x;
-            const float my = position.y - track.vel_ref.y;
-            const float mz = position.z - track.vel_ref.z;
-            const float moved = mx * mx + my * my + mz * mz;
-            const double span = now - track.vel_ref_t;
-            if (moved > 0.0004F) {                     // moved more than 2 cm
-                if (span > 0.02 && span < 0.5) {
-                    const Vec3 v = { (float)(mx / span), (float)(my / span), (float)(mz / span) };
-                    const float speed = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-                    if (std::isfinite(speed) && speed < 12.0F) {
-                        track.vel = playermotion::blend_velocity(track.vel, v);
-                    }
-                }
-                track.vel_ref = position; track.vel_ref_t = now;
-            } else if (span > 0.3) {                   // stood still: stop leading
-                track.vel = {};
-                track.vel_ref = position; track.vel_ref_t = now;
-            }
-        }
-    }
-    if (track.has_last) {
-        float dx = position.x - track.last.x;
-        float dy = position.y - track.last.y;
-        float dz = position.z - track.last.z;
-        if (dx * dx + dy * dy + dz * dz > 0.0025F) track.still_frames = 0;      // > 5 cm
-        else if (track.still_frames < 100000) ++track.still_frames;
-    }
-    track.last = position;
-    track.has_last = true;
-    return track;
-}
-
-// Объект в прошлом кадре признали мёртвым. Решение живёт один кадр, поэтому
-// staleness ограничиваем секундой: объекты пула меняют владельца, и вчерашний
-// труп не должен распоряжаться uid сегодня.
-static bool player_track_is_corpse(uint64_t player) {
-    auto it = g_player_track.find(player);
-    if (it == g_player_track.end() || !it->second.corpse) return false;
-    return mono_seconds() - it->second.corpse_at < 1.0;
-}
-
-// ---- Временной фильтр позиции ------------------------------------------------
-// Два артефакта, которые видели как «визуалы мерцают и телепаются в другую
-// сторону»:
-//   1. один кадр без успешного чтения позиции — бокс пропадал и возвращался;
-//   2. один мусорный отсчёт (позиция не дописана игрой, объект из пула чужой,
-//      чтение попало между кадрами симуляции) — бокс улетал в сторону и на
-//      следующем кадре возвращался обратно.
-// Ни то ни другое не похоже на настоящее движение: позиция игрока меняется
-// плавно, а телепорт/респаун держится в памяти и на следующем кадре тоже.
-// Поэтому одиночный сбой чтения дорисовываем по последней принятой позиции
-// (продолжая её по измеренной скорости), а подозрительный скачок рисуем
-// только когда он подтверждается подряд несколькими кадрами.
-//
-// Допуск скачка взят с запасом: бег ~8 м/с, техника до ~50 м/с, а координаты
-// чужих игроков приходят пачкой раз в ~0.1 с, так что законный «прыжок» между
-// кадрами может быть в несколько метров. Всё, что больше, почти всегда мусор —
-// и даже если это настоящий телепорт, мы отстанем от него на пару кадров.
-// Пассажиры коптера — отдельный случай «настоящего» скачка: подтверждение по
-// форме ломаной, а не по той же точке (см. position_filter.h, покрыт тестом).
-// (сырое чтение, при read_ok) и выход (то, что рисуем).
-static double s_filt_sec = -1e9;
-static posfilter::Obs s_filt_obs;
-
-static bool filter_player_position(PlayerTrack& track, bool read_ok, Vec3& pos, uint64_t player) {
     const double now = mono_seconds();
-    // Наблюдение (на решения не влияет): сколько рваных отсчётов в секунду и
-    // сколько из них подтвердилось как настоящий скачок. Строка — не чаще раза
-    // в секунду и только когда было что считать.
-    if (now - s_filt_sec >= 1.0) {
-        s_filt_sec = now;
-        if (s_filt_obs.susp + s_filt_obs.conf > 0) {
-            s_filt_obs.susp = 0; s_filt_obs.conf = 0;
-        }
+    if (!track.have_vel_ref) {
+        track.have_vel_ref = true;
+        track.vel_ref = position;
+        track.vel_ref_t = now;
+        return track;
     }
 
-    const bool ok = posfilter::filter(track.filt, read_ok, pos, track.vel, now, s_filt_obs);
-    if (s_filt_obs.vel_reset) { track.vel = {}; track.have_vel_ref = false; s_filt_obs.vel_reset = false; }
-    if (ok && s_filt_obs.conf) s_filt_obs.last = player;
-    return ok;
+    const double elapsed = now - track.vel_ref_t;
+    const float dx = position.x - track.vel_ref.x;
+    const float dy = position.y - track.vel_ref.y;
+    const float dz = position.z - track.vel_ref.z;
+    const float moved_squared = dx * dx + dy * dy + dz * dz;
+    if (elapsed > 0.02 && elapsed < 0.5 && moved_squared > 0.0004F) {
+        const Vec3 measured{static_cast<float>(dx / elapsed),
+                            static_cast<float>(dy / elapsed),
+                            static_cast<float>(dz / elapsed)};
+        const float speed = sqrtf(measured.x * measured.x + measured.y * measured.y +
+                                  measured.z * measured.z);
+        if (std::isfinite(speed) && speed < 12.0F)
+            track.vel = playermotion::blend_velocity(track.vel, measured);
+    } else if (elapsed >= 0.3) {
+        track.vel = {};
+    }
+    track.vel_ref = position;
+    track.vel_ref_t = now;
+    return track;
 }
 
 // ===================== Remote (third-person) held weapon =====================
@@ -6075,12 +5283,9 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
     if (aux.weapon_component &&
         rd_ptr(aux.weapon_component + PLAYERWEAPON_PLAYER_BACKREF) != player)
         aux.weapon_component = 0;
-    if (!aux.weapon_component) {
-        if (aux.weapon_retry > 0) --aux.weapon_retry;
-        else {
-            aux.weapon_component = resolve_player_weapon_component(player);
-            if (!aux.weapon_component) aux.weapon_retry = 4;
-        }
+    if (!aux.weapon_component && mono_seconds() >= aux.weapon_retry_at) {
+        aux.weapon_component = resolve_player_weapon_component(player);
+        aux.weapon_retry_at = aux.weapon_component ? 0.0 : mono_seconds() + 0.2;
     }
 
     bool holds_weapon = false, knows_slot = false;
@@ -6551,7 +5756,6 @@ bool aim_ballistic_origin(Vec3& origin) {
 
 // Растяг экрана (Aspect Ratio), множитель к aspect камеры игры; 1.0 = выкл.
 // Поставляется из меню через esp_set_screen_stretch (см. esp_draw.cpp).
-static float g_screen_stretch_x = 1.0F;
 void esp_set_screen_stretch(float factor) {
     // Кламп к допустимому диапазону слайдера (1.00–2.00; верх поднят по заказу 04.10).
     if (!(factor >= 0.75F && factor <= 2.0F)) factor = 1.0F;
@@ -6617,6 +5821,8 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
     return true;
 }
 
+static constexpr double kBoneWorldGraceSeconds = 0.15;
+
 static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box) {
     box.has_skeleton = false;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) box.bone_valid[bone] = false;
@@ -6626,8 +5832,9 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
 
     CachedSkeleton& skeleton = g_skeletons[player];
+    const double now = mono_seconds();
     if (!skeleton.valid) {
-        if (skeleton.retry_cooldown > 0) { --skeleton.retry_cooldown; return false; }
+        if (now < skeleton.retry_at) return false;
         // Building walks the whole model; allow at most one rebuild per frame
         // so multiple new players never stall the overlay.
         if (g_skeleton_builds_this_frame >= 1) return false;
@@ -6640,23 +5847,26 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
             skeleton.valid = false;
             // Объект без модели (манекен, спектейтор, пустое кресло) не
             // обзаведётся ей от того, что мы будем пересобирать его каждые
-            // 20 кадров. Отступаем всё дальше — иначе такие объекты занимают
+            // 350 мс. Отступаем всё дальше — иначе такие объекты занимают
             // единственный слот пересборки в кадре, и настоящий новый игрок
-            // ждёт скелета несколько кадров (лог 10.10: двое таких висят всё
+            // ждёт следующего доступного кадра (лог 10.10: двое таких висят всё
             // время — это разрыв «игроков 5, со скелетом 4»).
-            skeleton.retry_cooldown = build_fails < 3 ? 20 : (build_fails < 6 ? 120 : 600);
+            const double retry_seconds = build_fails < 3 ? 0.35
+                                       : build_fails < 6 ? 2.0 : 10.0;
+            skeleton.retry_at = now + retry_seconds;
             skeleton.build_fail = build_fails + 1;
             return false;
         }
         skeleton.build_fail = 0;
+        skeleton.fail_since = 0.0;
+        skeleton.model_revalidate_at = now + 2.0;
     }
 
-    // Periodically make sure the player still uses the same character model.
-    if (++skeleton.revalidate_timer >= 120) {
-        skeleton.revalidate_timer = 0;
+    if (now >= skeleton.model_revalidate_at) {
+        skeleton.model_revalidate_at = now + 2.0;
         if (skeleton_model_root(player) != skeleton.model_root) {
             skeleton = CachedSkeleton{};
-            skeleton.retry_cooldown = 2;
+            skeleton.retry_at = now + 0.05;
             return false;
         }
     }
@@ -6695,12 +5905,15 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     }
     // Liveness: the hips transform no longer resolves => model despawned.
     if (group_count == 0 || bone_index[BONE_HIPS] < 0) {
-        if (++skeleton.fail_streak > 30) {
+        if (skeleton.fail_since <= 0.0) skeleton.fail_since = now;
+        ++skeleton.fail_streak;
+        if (now - skeleton.fail_since >= 0.5) {
             skeleton = CachedSkeleton{};
-            skeleton.retry_cooldown = 30;
+            skeleton.retry_at = now + 0.5;
         }
         return false;
     }
+    skeleton.fail_since = 0.0;
 
     // Bulk read the TRS + parent-index arrays of every hierarchy in use.
     static std::vector<Matrix34> local_matrices[kMaxGroups];
@@ -6758,14 +5971,14 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
                 have_world = true;
                 ++bones_world;
                 skeleton.bone_world[bone] = world;
-                skeleton.bone_world_age[bone] = 1;
+                skeleton.bone_world_time[bone] = now;
             }
         }
         // Transient read glitch (game mid-update): briefly reuse the last known
         // world position instead of letting the bone flicker off.
-        if (!have_world && skeleton.bone_world_age[bone] >= 1 && skeleton.bone_world_age[bone] <= 8) {
+        if (!have_world && espsnapshot::within_age(now, skeleton.bone_world_time[bone],
+                                                    kBoneWorldGraceSeconds)) {
             world = skeleton.bone_world[bone];
-            ++skeleton.bone_world_age[bone];
             have_world = true;
         }
         if (!have_world) continue;
@@ -6787,8 +6000,10 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     //   [2] chest : upper spine.
     {
         auto bone_world_ok = [&](int bone, Vec3& out) -> bool {
-            if (!box.bone_valid[bone]) return false;
-            if (skeleton.bone_world_age[bone] < 1 || skeleton.bone_world_age[bone] > 9) return false;
+            if (!box.bone_valid[bone] ||
+                !espsnapshot::within_age(now, skeleton.bone_world_time[bone],
+                                         kBoneWorldGraceSeconds))
+                return false;
             out = skeleton.bone_world[bone];
             return vec3_is_finite(out);
         };
@@ -6838,15 +6053,20 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         }
     }
 
-    // Данные целы — мировые позиции костей читаются, просто игрок за спиной
-    // или за краем экрана. Кэш не трогаем: раньше не спроецировавшаяся кость
-    // крутила fail_streak, и через 30 кадров скелет игрока за спиной
-    // выбрасывался и пересобирался заново — обход модели на ровном месте.
-    if (bones_world >= 4) skeleton.fail_streak = 0;
+    // Valid world positions can remain unprojected while the player is behind
+    // the camera; only prolonged read failures invalidate the cached skeleton.
+    if (bones_world >= 4) {
+        skeleton.fail_streak = 0;
+        skeleton.fail_since = 0.0;
+    }
     if (projected < 4) {
-        if (bones_world < 4 && ++skeleton.fail_streak > 30) {
-            skeleton = CachedSkeleton{};
-            skeleton.retry_cooldown = 30;
+        if (bones_world < 4) {
+            if (skeleton.fail_since <= 0.0) skeleton.fail_since = now;
+            ++skeleton.fail_streak;
+            if (now - skeleton.fail_since >= 0.5) {
+                skeleton = CachedSkeleton{};
+                skeleton.retry_at = now + 0.5;
+            }
         }
         return false;
     }
@@ -6860,8 +6080,10 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         float minY = 1e9f, maxY = -1e9f, minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
         int n = 0;
         for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
-            if (!box.bone_valid[bone]) continue;
-            if (skeleton.bone_world_age[bone] < 1 || skeleton.bone_world_age[bone] > 9) continue;
+            if (!box.bone_valid[bone] ||
+                !espsnapshot::within_age(now, skeleton.bone_world_time[bone],
+                                         kBoneWorldGraceSeconds))
+                continue;
             const Vec3 w = skeleton.bone_world[bone];
             if (!vec3_is_finite(w)) continue;
             if (w.y < minY) minY = w.y;
@@ -7620,14 +6842,11 @@ unsigned long long esp_mem_read_fails_total() { return g_mem.read_fails_total();
 // PlayerManager position field, and validated by the KCC back-reference.
 static bool player_kcc_position(const PlayerAux& aux, Vec3& out) {
     if (!aux.kcc) return false;
-    Vec3 p = rd_v3(aux.kcc + KCC_MOVE + 0x0C);
-    if (!vec3_is_finite(p)) return false;
-    float magnitude = fabsf(p.x) + fabsf(p.y) + fabsf(p.z);
-    if (magnitude < 0.01F || magnitude > 100000.0F) return false;
-    // Тот же пуловой мусор, что и в поле позиции: свежий CharacterController
-    // отдаёт (x, 0, 0), и бокс молча уезжает под карту.
-    if (position_near_world_origin(p)) return false;
-    out = p;
+    Vec3 position{};
+    if (!rd_exact(aux.kcc + KCC_MOVE + 0x0C, position) ||
+        !position_looks_like_world_space(position) || position_near_world_origin(position))
+        return false;
+    out = position;
     return true;
 }
 
@@ -7676,28 +6895,16 @@ static void read_local_aim_reference(uint64_t local_player, const PlayerAux* loc
     g_aim_ref_valid = true;
 }
 
-// Per-frame player list, kept across frames so a transient empty read does
-// not blank the overlay, but dropped on a real world change.
+// Stable player snapshot and the shared per-frame projection state.
 static std::vector<uint64_t> g_frame_transforms;
-// Игроки, пропавшие из реестра в последние пару кадров. Список
-// PlayerManager читается по одному указателю на элемент, и одиночный
-// сбой чтения (или непрочитавшаяся проверка класса) выбрасывал игрока
-// из кадра — его бокс гас и загорался обратно. Держим пропавшего ещё
-// кадр-два: настоящий уход/смерть задерживается на ~30 мс, а мерцание
-// исчезает. Значение — сколько кадров подряд игрока нет в списке.
-static std::unordered_map<uint64_t, int> g_frame_transforms_lost;
-
-// Frame projection state, published by esp_get_boxes() so that world markers
-// (ore / animals) project through exactly the same camera as the player boxes.
+static double g_player_list_last_success = 0.0;
+static double g_last_camera_frame_time = 0.0;
 Mat4 g_frame_vp{};
 bool g_frame_vp_valid = false;
+bool g_frame_camera_fresh = false;
 float g_frame_sw = 0.0F, g_frame_sh = 0.0F;
 Vec3 g_frame_local_pos{};
 bool g_frame_local_valid = false;
-// Camera basis recovered from this frame's VIEW MATRIX (not the transform
-// pose). On devices where the transform pose read fails, this is the only
-// camera orientation available — good enough for the farm's slow turns,
-// though not for the aimbot (the fallback matrix lags a frame).
 bool g_frame_cam_basis_valid = false;
 Vec3 g_frame_cam_pos{}, g_frame_cam_fwd{}, g_frame_cam_right{}, g_frame_cam_up{};
 
@@ -7800,74 +7007,9 @@ bool esp_local_eye_position(float& x, float& y, float& z) {
     return false;
 }
 
-// Players near us this frame (all 360 degrees, not only the ones projected
-// on screen). Feeds the enemy-counter pill in the overlay.
-static int      g_frame_player_count = 0;
-static int      g_frame_bot_count = 0;
-static int      g_frame_transforms_empty_streak = 0;
-// Frames in a row esp_get_boxes() gave up before publishing this frame's
-// camera / local position (see the watchdog at the top of it).
-static int      g_frame_publish_fail_streak = 0;
-// True when the current esp_get_boxes result ended on an unreadable/transient
-// path. The renderer may briefly retain the previous boxes instead of flashing
-// an empty frame. A readable empty player registry is not transient.
-static bool     g_box_frame_transient = true;
-bool esp_box_frame_transient() { return g_box_frame_transient; }
-// Independent from camera/marker publication: successful ore frames must not
-// conceal a dead player list or position pipeline.
-static PlayerEspWatchdog g_player_esp_watchdog;
-// Кадры подряд, в которых позиции игроков не прочитались НИ У КОГО. Серия
-// отличает transient read failure от настоящей перезагрузки мира; одиночный
-// кадр не инвалидирует подтверждённый fixed release path.
-static int      g_local_position_fail_streak = 0;
-// Кадры подряд, в которых состав игроков не пересекается с тем, по которому
-// построены кэши (см. esp_get_boxes). Настоящая перезагрузка мира держится
-// кадров подряд, а одиночный кадр с чужими адресами — это сбой чтения списка, и
-// обнулять по нему все кэши (боксы, метки, раскладку скелета) нельзя.
-// Снапшот хранит именно тот состав, под который собраны кэши: сравнивать с
-// прошлым кадром нельзя — список подменяется уже на первом кадре смены, и
-// следующий кадр пересекается сам с собой (смену состава это бы не заметило).
-static int      g_world_change_streak = 0;
-static std::vector<uint64_t> g_population_snapshot;
-// Кандидат на смену мира: последний не пересёкшийся со снапшотом состав и
-// сколько кадров подряд он идёт идентичным (по членству). Рваные кадры тоже
-// идут сериями по 3+ в глубоких штормах, но каждый кадр с РАЗНЫМ мусором —
-// считать «3 любых» сменой мира нельзя (лог 09-20: +0-9 прорывались).
-static std::vector<uint64_t> s_adopt_cand;
-static int s_adopt_ident_streak = 0;
-// Everything derived from concrete objects in a world/session. Called when the
-// whole player population is replaced.  Structural choices (position field,
-// matrix convention and Transform hierarchy offsets) belong to the release
-// build, not to one PlayerManager lifetime, so an ordinary respawn keeps them.
-static void reset_world_caches() {
-    g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
-    g_player_position_validated = false;
-    g_population_snapshot.clear(); g_world_change_streak = 0;
-    s_adopt_cand.clear(); s_adopt_ident_streak = 0;
-    // Раскладка, выученная по костям, умирает вместе со старым миром: после
-    // перезагрузки она читает мусор из переиспользованной памяти (конечные
-    // числа, но не оттуда). Переучивается с первого же скелета рядом, а метки
-    // до тех пор живут на самопроверяющемся пути.
-    g_skeleton_layout = {}; g_skeleton_layout_valid = false;
-    g_use_direct_player_position = true; g_player_position_offset = PLAYER_POSITION;
-    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
-    // Keep g_local_player until the normal resolver confirms its replacement.
-    // If the old object is absent from the new population, the camera-local
-    // fallback below is used instead of misidentifying a nearby enemy.
-    g_aim_state = {};
-    g_aim_ref_valid = false;
-    g_player_aux.clear();
-    g_player_text.clear();
-    g_player_track.clear();
-    g_player_track_pick.clear();
-    g_frame_transforms_lost.clear();
-    g_mount_latch.clear();
-    g_skeletons.clear();
-    reset_marker_caches();
-    // Камерный страж нового мира ничему не следит: прошлая планета тётушка
-    // задержала бы новую камеру на 3 кадра подтверждения «телепорта».
-    s_fv_guard = {};
-}
+// Player count used by the overlay's counter pill.
+static int g_frame_player_count = 0;
+static int g_frame_bot_count = 0;
 
 void esp_reset() {
     std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
@@ -7881,29 +7023,22 @@ void esp_reset() {
     g_camera_manager_cached = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
-    g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
-    g_frame_publish_fail_streak = 0;
-    g_player_esp_watchdog.reset();
-    g_local_position_fail_streak = 0; g_world_change_streak = 0;
-    g_population_snapshot.clear();
-    g_offset_extent_fail_streak = 0;
+    g_frame_transforms.clear();
+    g_player_list_last_success = 0.0;
+    g_last_camera_frame_time = 0.0;
+    g_frame_camera_fresh = false;
+    g_frame_player_count = 0;
+    g_frame_bot_count = 0;
     g_aim_ref_valid = false;
     g_player_manager_class = 0; g_player_manager_static_fields = 0;
     g_game_controller_class = 0; g_local_player = 0;
-    g_matrix_configuration_validated = false; g_camera_matrix_physical_match = false;
-    g_player_position_offset = PLAYER_POSITION;
-    g_transform_hierarchy_layout = {}; g_transform_hierarchy_layout_valid = false;
-    g_use_direct_player_position = true;
-    g_player_position_validated = false;
-    g_direct_position_fail_streak = 0; g_direct_position_recheck = 0;
+    g_transform_hierarchy_layout = {};
+    g_transform_hierarchy_layout_valid = false;
     g_cam_fov_deg = 0.0F; g_cam_pose_valid = false; g_cam_pose_derived = false;
     g_aim_state = {};
     g_player_aux.clear();
     g_player_text.clear();
     g_player_track.clear();
-    g_player_track_pick.clear();
-    g_frame_transforms_lost.clear();
-    g_mount_latch.clear();
     g_skeletons.clear();
     g_skeleton_layout = {}; g_skeleton_layout_valid = false;
     g_go_name_offset = 0; g_go_name_plain_pointer = false;
@@ -7919,17 +7054,6 @@ void esp_reset() {
     reset_marker_caches();
 }
 
-
-// Last overlay size esp_get_boxes() was called with — the camera-only frame
-// fallback below needs plausible screen dimensions even when the box pipeline
-// bailed out before publishing anything.
-float g_last_overlay_sw = 1080.0F;
-float g_last_overlay_sh = 2400.0F;
-
-// Publish a frame (VP matrix + "local position") straight from the game
-// camera, with no players involved at all. This is what keeps markers and
-// the autofarm alive when the player list is empty or the box pipeline
-// failed: the camera IS where the local player is.
 
 static uint64_t resolve_native_camera_pointer(bool allow_last_confirmed) {
     // Класс GameControllerBase разрешается ЗДЕСЬ, а не только по дороге чтения
@@ -7990,68 +7114,6 @@ static bool read_camera_frame(float aspect, uint64_t& native, Mat4& projection, 
         return true;
     }
     return false;
-}
-
-bool publish_camera_only_frame(float sw, float sh) {
-    if (g_pid <= 0 || !g_il2cpp_base) return false;
-    // Resolves g_game_controller_class as a side effect — without it the
-    // camera lookup below has no class to read statics from.
-    resolve_local_player();
-    if (!g_game_controller_class) return false;
-    if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
-    Mat4 solo_proj{}, solo_view{};
-    uint64_t cam_native = 0;
-    if (!read_camera_frame(sw / sh, cam_native, solo_proj, solo_view)) return false;
-    Vec3 cam_pos{};
-    if (!camera_position_from_view(solo_view, cam_pos)) return false;
-    g_frame_vp = mat_mul(solo_proj, solo_view);
-    g_frame_vp_valid = true;
-    g_frame_sw = sw; g_frame_sh = sh;
-    g_frame_local_pos = cam_pos;
-    g_frame_local_valid = true;
-    g_frame_publish_fail_streak = 0;
-    // Camera basis for the farm, same shape as the main path builds.
-    Vec3 vr = {mat_get(solo_view, 0, 0), mat_get(solo_view, 0, 1), mat_get(solo_view, 0, 2)};
-    Vec3 vu = {mat_get(solo_view, 1, 0), mat_get(solo_view, 1, 1), mat_get(solo_view, 1, 2)};
-    Vec3 vf = {-mat_get(solo_view, 2, 0), -mat_get(solo_view, 2, 1), -mat_get(solo_view, 2, 2)};
-    if (vec3_is_finite(vr) && vec3_is_finite(vu) && vec3_is_finite(vf)) {
-        float fl = sqrtf(vf.x * vf.x + vf.y * vf.y + vf.z * vf.z);
-        if (fl > 0.5F && fl < 2.0F) {
-            g_frame_cam_pos = cam_pos;
-            g_frame_cam_fwd = {vf.x / fl, vf.y / fl, vf.z / fl};
-            g_frame_cam_right = vr;
-            g_frame_cam_up = vu;
-            g_frame_cam_basis_valid = true;
-        }
-    }
-    return true;
-}
-
-static void reset_player_pipeline_resolvers(bool deep) {
-    // Refresh only the resolver anchors. The last confirmed population and its
-    // position tracks are the fallback that prevents read storms from becoming
-    // visible flicker; clearing them every 1.5 seconds was self-sabotage.
-    g_player_manager_static_fields = 0;
-    g_local_position_fail_streak = 0;
-    if (deep) {
-        // Keep the established position path. Re-discovering it during an EIO
-        // burst removed every box even though each track still had a position.
-        g_direct_position_fail_streak = 0;
-        g_direct_position_recheck = 0;
-    }
-}
-
-static void note_player_pipeline_health(bool player_data_ok) {
-    const PlayerEspWatchdogAction action =
-        g_player_esp_watchdog.observe(player_data_ok, mono_seconds());
-    if (action.reset_resolvers) {
-        reset_player_pipeline_resolvers(action.deep_recovery);
-    }
-    if (action.deep_recovery) {
-        // A live camera/local-memory pipeline proves that the process binding is
-        // still valid. Reattaching here used to drop every memory feature and
-        // the FOV circle in a loop. Keep retrying player-only resolvers instead.
-    }
 }
 
 // Боты в списке боксов: только данные для аима (is_bot), оверлей их не рисует.
@@ -8133,1391 +7195,318 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
 }
 
 
-// ---- Наблюдатель мерцаний визуалов (только фиксирует, ничего не меняет) ----
-// Бокс, нарисованный в прошлом кадре и пропущенный в этом (или наоборот),
-// записывается одной строкой: адрес, причина пропуска, дельта отказов чтения
-// за кадр, смена локального. Так видно, ГДЕ именно пропадает бокс: фильтр
-// позиции, дедупликация, проецирование, смена локального или рваное чтение.
-// Бюджет — 4 строки в секунду, остальное считается молча.
-static std::unordered_map<uint64_t, int> s_watch_gap;   // addr -> кадров с прошлого бокса
-static std::vector<uint64_t> s_watch_pop;
-static uint64_t s_watch_local_addr = 0;
-static unsigned long long s_watch_fails = 0;
-static double s_watch_sec = -1e9;
-static int s_watch_budget = 0;
-static int s_watch_hidden = 0;
-
-struct BoxWatchPose {
-    float cx = 0.0F, cy = 0.0F, distance = -1.0F;
-    unsigned long long frame = 0;
-};
-static std::unordered_map<uint64_t, BoxWatchPose> s_watch_box_pose;
-static unsigned long long s_watch_frame = 0;
-static double s_watch_summary_at = -1e9;
-static int s_watch_summary_frames = 0;
-static int s_watch_summary_empty = 0;
-static int s_watch_summary_min = 1000000;
-static int s_watch_summary_max = 0;
-static int s_watch_summary_returns = 0;
-static int s_watch_summary_losses = 0;
-static int s_watch_summary_jumps = 0;
-static int s_watch_summary_local_jumps = 0;
-static int s_watch_summary_camera_jumps = 0;
-static int s_watch_summary_camera_mismatch = 0;
-static int s_watch_summary_early[16]{};
-static unsigned long long s_watch_summary_fails = 0;
-static Vec3 s_watch_prev_local{};
-static bool s_watch_prev_local_valid = false;
-static double s_watch_prev_local_at = 0.0;
-
-static bool watch_allow() {
-    const double now = memio::now_seconds();
-    if (now - s_watch_sec >= 1.0) {
-        s_watch_sec = now;
-        s_watch_budget = 6;
-        if (s_watch_hidden > 0) {
-            s_watch_hidden = 0;
-            --s_watch_budget;
-        }
-    }
-    if (s_watch_budget <= 0) { ++s_watch_hidden; return false; }
-    --s_watch_budget;
-    return true;
-}
-
-static void watch_camera_and_local(const Mat4& view, const Vec3& local) {
-    static Vec3 previous_camera{};
-    static bool have_previous_camera = false;
-    static double previous_at = 0.0;
-    Vec3 camera{};
-    if (!camera_position_from_view(view, camera) || !vec3_is_finite(camera)) return;
-    const double now = memio::now_seconds();
-    if (have_previous_camera) {
-        const float dx = camera.x - previous_camera.x;
-        const float dy = camera.y - previous_camera.y;
-        const float dz = camera.z - previous_camera.z;
-        const float jump = sqrtf(dx * dx + dy * dy + dz * dz);
-        const double dt = now - previous_at;
-        if (dt >= 0.0 && dt < 0.5 && std::isfinite(jump) && jump > 8.0F) {
-            ++s_watch_summary_camera_jumps;
-            if (watch_allow())
-                ;
-        }
-    }
-    const float ldx = local.x - camera.x;
-    const float ldy = local.y - camera.y;
-    const float ldz = local.z - camera.z;
-    const float mismatch = sqrtf(ldx * ldx + ldy * ldy + ldz * ldz);
-    if (std::isfinite(mismatch) && mismatch > 25.0F) {
-        ++s_watch_summary_camera_mismatch;
-        if (watch_allow())
-            ;
-    }
-    previous_camera = camera;
-    previous_at = now;
-    have_previous_camera = true;
-}
-
-enum PositionReadFlags : unsigned short {
-    PositionDirectTried = 1U << 0,
-    PositionDirectReadOk = 1U << 1,
-    PositionDirectValid = 1U << 2,
-    PositionKccTried = 1U << 3,
-    PositionKccOk = 1U << 4,
-    PositionModelTried = 1U << 5,
-    PositionModelReadOk = 1U << 6,
-    PositionModelValid = 1U << 7,
-    PositionCacheUsed = 1U << 8
-};
-
-struct EspSkipLog {
-    uint64_t player = 0;
-    uint64_t duplicate_of = 0;
-    size_t index = 0;
-    size_t population = 0;
-    char reason = 0;
-    char position_source = 0;
-    unsigned short position_read_flags = 0;
-    bool has_position = false;
-    bool camera_basis_valid = false;
-    bool camera_rotation_valid = false;
-    bool camera_from_transform = false;
-    bool has_bottom_world = false;
-    bool has_top_world = false;
-    bool has_box_bounds = false;
-    Vec3 position{};
-    Vec3 camera_position{};
-    Vec3 camera_right{};
-    Vec3 camera_up{};
-    Vec3 camera_forward{};
-    Vec4 camera_rotation{};
-    Vec3 bottom_world{};
-    Vec3 top_world{};
-    float distance = -1.0F;
-    float screen_width = 0.0F;
-    float screen_height = 0.0F;
-    float body_height = 0.0F;
-    float box_cx = 0.0F;
-    float box_cy = 0.0F;
-    float box_half_width = 0.0F;
-    float box_half_height = 0.0F;
-    float screen_margin = 0.0F;
-    unsigned long long read_fails_total = 0;
-    // Биты 1/2 — нижняя/верхняя точка тела была подтянута к ближней плоскости
-    // (см. body_clip.h). Без этого в логе не отличить «обе точки за плоскостью»
-    // от «одну обрезали, бокс нарисован по обрезанной».
-    int body_clipped = 0;
-    W2SProjectionTrace bottom_projection{};
-    W2SProjectionTrace top_projection{};
-};
-
-static void format_debug_vec3(const Vec3* value, char* out, size_t out_size) {
-    if (!value) {
-        std::snprintf(out, out_size, "n/a");
-        return;
-    }
-    std::snprintf(out, out_size, "(%.1f %.1f %.1f)",
-                  (double)value->x, (double)value->y, (double)value->z);
-}
-
-static void format_position_read_flags(unsigned short flags, char* out, size_t out_size) {
-    const char* direct = !(flags & PositionDirectTried) ? "not-tried" :
-        !(flags & PositionDirectReadOk) ? "read-fail" :
-        (flags & PositionDirectValid) ? "valid" : "invalid-world";
-    const char* kcc = !(flags & PositionKccTried) ? "not-tried" :
-        (flags & PositionKccOk) ? "ok" : "read-fail";
-    const char* model = !(flags & PositionModelTried) ? "not-tried" :
-        !(flags & PositionModelReadOk) ? "read-fail" :
-        (flags & PositionModelValid) ? "valid" : "invalid-world";
-    std::snprintf(out, out_size, "direct=%s,kcc=%s,model=%s,cache=%s",
-                  direct, kcc, model, (flags & PositionCacheUsed) ? "used" : "none");
-}
-
-static void format_projection_trace(const W2SProjectionTrace& trace, char* out, size_t out_size) {
-    if (trace.state == W2SProjectionState::NotRun) {
-        std::snprintf(out, out_size, "not-run");
-        return;
-    }
-    if (trace.camera_space) {
-        std::snprintf(out, out_size, "%s:camera=(%.3f %.3f %.3f) screen=(%.1f %.1f)",
-                      w2s_projection_state_name(trace.state),
-                      (double)trace.x, (double)trace.y, (double)trace.z,
-                      (double)trace.screen_x, (double)trace.screen_y);
-    } else {
-        std::snprintf(out, out_size, "%s:clip=(%.3f %.3f %.3f %.3f) clip_w=%.3f screen=(%.1f %.1f)",
-                      w2s_projection_state_name(trace.state),
-                      (double)trace.x, (double)trace.y, (double)trace.z, (double)trace.w,
-                      (double)trace.w, (double)trace.screen_x, (double)trace.screen_y);
-    }
-}
-
-
-// tag: 0 = главный путь (боксы строились), иначе номер раннего выхода.
-static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
-                        const std::vector<char>* skip, int tag) {
-    ++s_watch_frame;
-    const double watch_now = memio::now_seconds();
-    const unsigned long long fails = g_mem.read_fails_total();
-    const unsigned long long fails_delta = fails - s_watch_fails;
-    s_watch_fails = fails;
-    s_watch_summary_fails += fails_delta;
-    ++s_watch_summary_frames;
-    if (tag > 0 && tag < 16) ++s_watch_summary_early[tag];
-
-    int drawn_players = 0;
-    for (const EspBox& box : result) if (!box.is_bot) ++drawn_players;
-    if (drawn_players == 0) ++s_watch_summary_empty;
-    s_watch_summary_min = std::min(s_watch_summary_min, drawn_players);
-    s_watch_summary_max = std::max(s_watch_summary_max, drawn_players);
-
-    if (g_frame_local_valid) {
-        if (s_watch_prev_local_valid) {
-            const float dx = g_frame_local_pos.x - s_watch_prev_local.x;
-            const float dy = g_frame_local_pos.y - s_watch_prev_local.y;
-            const float dz = g_frame_local_pos.z - s_watch_prev_local.z;
-            const float jump = sqrtf(dx * dx + dy * dy + dz * dz);
-            const double dt = watch_now - s_watch_prev_local_at;
-            if (dt >= 0.0 && dt < 0.5 && std::isfinite(jump) && jump > 8.0F) {
-                ++s_watch_summary_local_jumps;
-                if (watch_allow())
-                    ;
-            }
-        }
-        s_watch_prev_local = g_frame_local_pos;
-        s_watch_prev_local_valid = true;
-        s_watch_prev_local_at = watch_now;
-    }
-
-    // Популяция: кто добавился/ушёл.
-    {
-        int added = 0, gone = 0;
-        uint64_t added_first = 0, gone_first = 0;
-        for (uint64_t p : g_frame_transforms) {
-            bool had = false;
-            for (uint64_t q : s_watch_pop) if (q == p) { had = true; break; }
-            if (!had) { ++added; if (!added_first) added_first = p; }
-        }
-        for (uint64_t q : s_watch_pop) {
-            bool has = false;
-            for (uint64_t p : g_frame_transforms) if (p == q) { has = true; break; }
-            if (!has) { ++gone; if (!gone_first) gone_first = q; }
-        }
-        s_watch_pop = g_frame_transforms;
-        if ((added || gone) && watch_allow()) {
-            auto uid_of = [](uint64_t addr) -> const char* {
-                auto it = g_player_track.find(addr);
-                return (it != g_player_track.end() && it->second.uid[0]) ? it->second.uid : "—";
-            };
-        }
-    }
-
-    // Локальный: смена адреса.
-    bool local_flipped = false;
-    {
-        uint64_t addr = 0;
-        if (local_index < g_frame_transforms.size()) addr = g_frame_transforms[local_index];
-        if (addr != s_watch_local_addr) {
-            if (s_watch_local_addr && addr) {
-                local_flipped = true;
-                if (watch_allow())
-                    ;
-            }
-            s_watch_local_addr = addr;
-        }
-    }
-
-    // Нарисованные в этом кадре (боты — не игроки, их пропускаем).
-    std::vector<uint64_t> drawn_now;
-    drawn_now.reserve(result.size());
-    for (const EspBox& box : result) {
-        if (box.is_bot) continue;
-        drawn_now.push_back(box.id);
-        const float cx = (box.x1 + box.x2) * 0.5F;
-        const float cy = (box.y1 + box.y2) * 0.5F;
-        auto pose = s_watch_box_pose.find(box.id);
-        if (pose != s_watch_box_pose.end() && pose->second.frame + 1 == s_watch_frame) {
-            const float screen_dx = cx - pose->second.cx;
-            const float screen_dy = cy - pose->second.cy;
-            const float screen_jump = sqrtf(screen_dx * screen_dx + screen_dy * screen_dy);
-            const float distance_jump = fabsf(box.distance - pose->second.distance);
-            const float distance_limit = std::max(10.0F, fabsf(pose->second.distance) * 0.25F);
-            const float screen_limit = std::max(180.0F, std::min(g_frame_sw, g_frame_sh) * 0.18F);
-            if ((std::isfinite(distance_jump) && distance_jump > distance_limit) ||
-                (std::isfinite(screen_jump) && screen_jump > screen_limit)) {
-                ++s_watch_summary_jumps;
-                if (watch_allow())
-                    ;
-            }
-        }
-        s_watch_box_pose[box.id] = {cx, cy, box.distance, s_watch_frame};
-        auto it = s_watch_gap.find(box.id);
-        if (it != s_watch_gap.end() && it->second > 0) {
-            ++s_watch_summary_returns;
-            if (watch_allow())
-                ;
-        }
-    }
-
-    // Пропущенные в этом кадре (только главный путь; gap 0 = был в прошлом).
-    if (skip && tag == 0) {
-        for (size_t i = 0; i < skip->size() && i < g_frame_transforms.size(); ++i) {
-            const char reason = (*skip)[i];
-            if (!reason) continue;
-            const uint64_t player = g_frame_transforms[i];
-            auto it = s_watch_gap.find(player);
-            if (it == s_watch_gap.end() || it->second != 0) continue;
-            ++s_watch_summary_losses;
-            if (!watch_allow()) continue;
-            // Коды причин (почему бокс пропущен): local = сам стал локальным,
-            // null = нулевой адрес, dup = задавлен дубликатом того же uid,
-            // filter = отбраковал фильтр позиции, dist = дальше 300м,
-            // bottom/top = точка не спроецировалась, h2px = высота < 2px.
-            const char* why = "?";
-            switch (reason) {
-                case 'L': why = "local"; break;
-                case 'Z': why = "null"; break;
-                case 'S': why = "dup"; break;
-                case 'P': why = "filter"; break;
-                case 'D': why = "dist"; break;
-                case 'B': why = "bottom"; break;
-                case 'T': why = "top"; break;
-                case 'H': why = "h2px"; break;
-                case 'O': why = "offscreen"; break;
-                case 'X': why = "dead"; break;
-            }
-        }
-    }
-
-    // Ранний выход: боксов нет вообще.
-    if (tag != 0) {
-        bool had = false;
-        for (const auto& kv : s_watch_gap) if (kv.second == 0) { had = true; break; }
-        if (had && watch_allow())
-            ;
-    }
-
-    // Состарить счётчики, отметить нарисованные, прибрать протухшие.
-    for (auto& kv : s_watch_gap) ++kv.second;
-    for (uint64_t id : drawn_now) s_watch_gap[id] = 0;
-    for (auto it = s_watch_gap.begin(); it != s_watch_gap.end();) {
-        if (it->second > 600) it = s_watch_gap.erase(it); else ++it;
-    }
-    for (auto it = s_watch_box_pose.begin(); it != s_watch_box_pose.end();) {
-        if (it->second.frame + 600 < s_watch_frame) it = s_watch_box_pose.erase(it);
-        else ++it;
-    }
-
-    if (watch_now - s_watch_summary_at >= 1.0) {
-        char exits[160]{};
-        size_t used = 0;
-        for (int i = 1; i < 16; ++i) {
-            if (!s_watch_summary_early[i] || used + 16 >= sizeof(exits)) continue;
-            used += (size_t)snprintf(exits + used, sizeof(exits) - used,
-                                     "%s%d:%d", used ? "," : "", i, s_watch_summary_early[i]);
-        }
-        s_watch_summary_at = watch_now;
-        s_watch_summary_frames = s_watch_summary_empty = 0;
-        s_watch_summary_min = 1000000; s_watch_summary_max = 0;
-        s_watch_summary_returns = s_watch_summary_losses = 0;
-        s_watch_summary_jumps = s_watch_summary_local_jumps = 0;
-        s_watch_summary_camera_jumps = s_watch_summary_camera_mismatch = 0;
-        s_watch_summary_fails = 0;
-        memset(s_watch_summary_early, 0, sizeof(s_watch_summary_early));
-    }
-}
-
-// ---- Здоровье прямого пути позиции -----------------------------------------
-//
-// Профиль сборки отдаёт смещение поля позиции (PLAYER_POSITION), и пока игра
-// не обновляется, этого достаточно. После обновления поле уезжает — и прямой
-// путь начинает отдавать конечный мусор, который не проходит гейт мировых
-// координат. В логе 11:52-11:54 так было у КАЖДОГО игрока каждый кадр
-// (pos_reads={direct=invalid-world,...}), и ESP всё это время ехал на
-// kcc-фолбэке: снаружи это не видно вообще, поэтому без своей строки
-// устаревший профиль не отличить от здорового конвейера.
-//
-// Цепочка discover/recheck (find_direct_player_position_offset и компания)
-// написана была ровно для этого, но не вызывалась ниоткуда: профильное
-// смещение держалось вечно. Здесь — детект, лог и попытка переключить
-// смещение среди уже известных.
-static int    s_direct_dead_players = 0;   // игроков с прямой попыткой чтения
-static int    s_direct_dead_count   = 0;   // из них — без мировой позиции
-static int    s_direct_dead_frames  = 0;
-static double s_direct_dead_since   = 0.0;
-static double s_direct_dead_log_at  = -1e9;
-
-// Диапазон развёртки вокруг профильного смещения. После обновления игры поле
-// позиции уезжает внутри того же класса, далеко не уходит — но из всех восьми
-// известных смещений оно при этом выпадает.
-static const uint64_t k_position_scan_first = 0x1A0;
-static const uint64_t k_position_scan_last  = 0x300;
-static const uint64_t k_position_scan_step  = 0x4;
-
-// Сколько игроков отдают на этом смещении ту же точку, что и их kcc. kcc —
-// эталон, проверенный всей работой фолбэка: прямое поле либо совпадает с ней,
-// либо позицией не является. Прежняя эвристика (сколько игроков дали
-// правдоподобную позицию плюс разброс) таким доказательством не была: в логе
-// 19:16 она не подтвердила ни одного смещения из восьми за 3.5 минуты, и ESP
-// всё это время ехал на kcc, хотя поле просто уехало.
-static int count_position_offset_matches(const std::vector<uint64_t>& players,
-                                         const std::vector<Vec3>& reference,
-                                         const std::vector<char>& have_reference,
-                                         uint64_t offset) {
-    int matches = 0;
-    for (size_t i = 0; i < players.size(); ++i) {
-        if (!have_reference[i] || !players[i]) continue;
-        Vec3 position = rd_v3(players[i] + offset);
-        if (!vec3_is_finite(position)) continue;
-        const float dx = position.x - reference[i].x;
-        const float dy = position.y - reference[i].y;
-        const float dz = position.z - reference[i].z;
-        if (dx * dx + dy * dy + dz * dz < 9.0F) ++matches;   // < 3 м: тик синхронизации
-    }
-    return matches;
-}
-
-static void revalidate_dead_direct_position(const std::vector<uint64_t>& players) {
-    // Эталон — kcc-позиция тех же игроков этого же кадра.
-    std::vector<Vec3> reference(players.size());
-    std::vector<char> have_reference(players.size(), 0);
-    size_t reference_count = 0;
-    for (size_t i = 0; i < players.size(); ++i) {
-        if (!players[i]) continue;
-        auto aux = g_player_aux.find(players[i]);
-        if (aux == g_player_aux.end() || !aux->second.kcc) continue;
-        Vec3 kcc{};
-        if (player_kcc_position(aux->second, kcc)) {
-            reference[i] = kcc;
-            have_reference[i] = 1;
-            ++reference_count;
-        }
-    }
-
-    uint64_t best_offset = 0;
-    int best_matches = 0;
-    if (reference_count > 0) {
-        for (uint64_t offset : k_known_position_offsets) {
-            const int matches = count_position_offset_matches(players, reference, have_reference, offset);
-            if (matches > best_matches) { best_matches = matches; best_offset = offset; }
-        }
-        const int need = reference_count > 1 ? 2 : 1;
-        if (best_matches < need) {
-            for (uint64_t offset = k_position_scan_first; offset <= k_position_scan_last;
-                 offset += k_position_scan_step) {
-                bool known = false;
-                for (uint64_t k : k_known_position_offsets) {
-                    if (k == offset) { known = true; break; }
-                }
-                if (known) continue;
-                const int matches = count_position_offset_matches(players, reference, have_reference, offset);
-                if (matches > best_matches) { best_matches = matches; best_offset = offset; }
-            }
-        }
-        if (best_matches < (reference_count > 1 ? 2 : 1)) best_offset = 0;
-    }
-
-    if (!best_offset && reference_count == 0) {
-        // Эталона нет вовсе (kcc не отдался ни у одного игрока) — старая
-        // эвристика по разбросу, лучше чем ничего.
-        double best_score = 0.0;
-        for (uint64_t offset : k_known_position_offsets) {
-            double score = 0.0;
-            if (!evaluate_player_position_offset(players, offset, score)) continue;
-            const double count = floor(score / 1000000.0);
-            const double best_count = floor(best_score / 1000000.0);
-            // Только разостное подтверждение: одному игроку правдоподобную
-            // мировую позицию отдаёт и чужое поле, и на пустом сервере это
-            // вырождалось бы в миграцию боксов по мусорному смещению.
-            if (count >= 2.0 && count > best_count) { best_offset = offset; best_score = score; }
-        }
-    }
-    if (!best_offset) {
-        // Попытка повторяется каждые 5 c, а ситуация пока не меняется: в логе
-        // 19:16 это дало 45 одинаковых строк. Одна в минуту — достаточно.
-        static double s_fail_log_at = -1e9;
-        const double now = mono_seconds();
-        if (now - s_fail_log_at >= 60.0) {
-            s_fail_log_at = now;
-        }
-        return;
-    }
-    g_use_direct_player_position = true;
-    g_player_position_offset = best_offset;
-    g_player_position_validated = true;
-    g_matrix_configuration_validated = false;
-    g_body_caches_dirty = true;   // кеши поз/скелетов держат мировые координаты
-    g_direct_position_fail_streak = 0;
-    g_direct_position_fail_since = 0.0;
-}
-
-static void note_direct_position_health(const std::vector<uint64_t>& players,
-                                        const std::vector<char>& sources) {
-    if (!(g_use_direct_player_position && g_player_position_offset != 0 &&
-          s_direct_dead_players > 0 && s_direct_dead_count == s_direct_dead_players)) {
-        s_direct_dead_frames = 0;
-        s_direct_dead_since = 0.0;
-        return;
-    }
-    if (s_direct_dead_since == 0.0) s_direct_dead_since = mono_seconds();
-    ++s_direct_dead_frames;
-    const double now = mono_seconds();
-    const double dead_for = now - s_direct_dead_since;
-    if (dead_for >= 5.0 && now - s_direct_dead_log_at >= 30.0) {
-        s_direct_dead_log_at = now;
-        size_t kcc_n = 0, model_n = 0, cache_n = 0;
-        for (char s : sources) {
-            if (s == 'K') ++kcc_n;
-            else if (s == 'M') ++model_n;
-            else if (s == 'C') ++cache_n;
-        }
-    }
-    // Раз в ~5 c мертвого пути пробуем известные смещения: событие редкое,
-    // а поиск читает позиции всех игроков на каждое смещение.
-    if (s_direct_dead_frames >= 300) {
-        s_direct_dead_frames = 0;
-        revalidate_dead_direct_position(players);
-    }
-}
-
-
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
+    const bool had_previous_camera = g_frame_vp_valid && g_frame_local_valid;
+    const Mat4 previous_vp = g_frame_vp;
+    const float previous_sw = g_frame_sw, previous_sh = g_frame_sh;
+    const Vec3 previous_camera_position = g_frame_local_pos;
+    const double previous_camera_time = g_last_camera_frame_time;
+
+    std::vector<EspBox> boxes;
+    g_frame_player_count = 0;
     g_frame_bot_count = 0;
-    g_box_frame_transient = true;
+    g_aim_ref_valid = false;
     g_aim_lead = {};
     g_aim_velocity = {};
     g_aim_inherited_velocity = {};
     g_aim_ballistic_params = {};
-    std::vector<EspBox> result;
-    auto transient_return = [&](int tag) {
-        watch_boxes(result, (size_t)-1, nullptr, tag);
-        return result;
-    };
-
-    // Watchdog: every frame that fails to publish a camera + local position
-    // counts up, and a few seconds of that means some cached offset or class
-    // pointer did not survive the last world reload. Rebuilding everything is
-    // cheap and rare, and it is what keeps a death / respawn from killing the
-    // whole ESP until the app is restarted.
-    if (++g_frame_publish_fail_streak > 240) {
-        g_frame_publish_fail_streak = 0;
-        // A camera publication gap does not prove that the player population
-        // changed. The old recovery cleared every player/position cache here,
-        // turning a temporary camera EIO burst into a long full ESP outage.
-        // Retry only camera/matrix state and keep the last confirmed players.
-        g_matrix_configuration_validated = false;
-        g_camera_matrix_physical_match = false;
-        s_fv_guard = {};
-        // ESP recovery must never tear down an otherwise healthy attachment:
-        // viewmodel/FOV/weapon controllers share it. Process replacement and
-        // sustained memory-read failure are handled independently in process.cpp.
-    }
-
-    // Markers reuse this frame's camera; invalidate it until it is rebuilt so
-    // an early return here can never leave them projecting through a stale one.
     g_frame_vp_valid = false;
+    g_frame_camera_fresh = false;
     g_frame_local_valid = false;
     g_frame_cam_basis_valid = false;
-    g_frame_player_count = 0;
 
-    if (g_pid <= 0 || !g_il2cpp_base) {
-            return result;
-    }
-
-    // Фрикам — до всех ранних выходов: сводки и покадровая запись нужны и в
-    // пустой местности (раньше тик стоял за выходом «нет игроков» и там не
-    // бежал вовсе — остаточные мерцания было нечем смотреть), а сами
-    // early-out'ы тику не помеха (у него свои проверки живости трансформа).
+    if (g_pid <= 0 || !g_il2cpp_base) return boxes;
     freecam_tick();
 
-    uint64_t native_cam = 0;
-    Mat4 projection{}, view{}, vp{};
-    float sw = overlay_width >= 100 ? (float)overlay_width : 1080.0F;
-    float sh = overlay_height >= 100 ? (float)overlay_height : 2400.0F;
-    if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
-    if (!std::isfinite(sh) || sh < 100.0F || sh > 10000.0F) sh = 2400.0F;
-    g_last_overlay_sw = sw;
-    g_last_overlay_sh = sh;
+    float sw = overlay_width >= 100 ? static_cast<float>(overlay_width) : 1080.0F;
+    float sh = overlay_height >= 100 ? static_cast<float>(overlay_height) : 2400.0F;
+    if (!std::isfinite(sw) || sw > 10000.0F) sw = 1080.0F;
+    if (!std::isfinite(sh) || sh > 10000.0F) sh = 2400.0F;
 
-    std::vector<uint64_t>& s_transforms = g_frame_transforms;
     bool player_list_ok = false;
-    std::vector<uint64_t> refreshed = read_configured_player_transforms(&player_list_ok);
-    // One incomplete registry sample must not remove a player. This matters at
-    // low FPS because one bad frame stays visible much longer. Two consecutive
-    // stable snapshots must agree on the absence; an unreadable list keeps the
-    // previous snapshot without advancing the confirmation.
+    std::vector<uint64_t> current_players = read_configured_player_transforms(&player_list_ok);
+    const double now = mono_seconds();
     if (player_list_ok) {
-        for (uint64_t player : refreshed) g_frame_transforms_lost.erase(player);
-
-        for (uint64_t previous : s_transforms) {
-            bool present = false;
-            for (uint64_t player : refreshed) {
-                if (player == previous) { present = true; break; }
-            }
-            if (present) continue;
-
-            int& missing_snapshots = g_frame_transforms_lost[previous];
-            if (++missing_snapshots < 2) {
-                refreshed.push_back(previous);
-                continue;
-            }
-
-            g_player_track.erase(previous);
-            g_player_aux.erase(previous);
-            g_player_text.erase(previous);
-            g_mount_latch.erase(previous);
-            g_skeletons.erase(previous);
-            g_frame_transforms_lost.erase(previous);
-        }
-        s_transforms = std::move(refreshed);
-        g_frame_transforms_empty_streak = s_transforms.empty()
-            ? g_frame_transforms_empty_streak + 1 : 0;
-    }
-    if (s_transforms.empty()) {
-        // Alone on the server: no player boxes, but markers and the farm still
-        // need this frame's camera. A validated empty list is healthy; a failed
-        // resolver is not, even though this camera-only frame can publish.
-        note_player_pipeline_health(player_list_ok);
-        publish_camera_only_frame(sw, sh);
-        if (g_aim_bones_requested && g_state.aim_touch &&
-            g_state.aim_mode != AIM_MODE_SILENT) {
-            const uint64_t local_player = resolve_local_player();
-            const PlayerAux* local_aux = nullptr;
-            bool local_crouched = false;
-            if (valid_obj(local_player)) {
-                PlayerAux& aux = player_aux(local_player);
-                local_aux = &aux;
-                local_crouched = player_is_crouched(aux);
-            }
-            read_local_aim_reference(local_player, local_aux, local_crouched);
-            update_aim_ballistics(local_player);
-        }
-        append_bot_boxes(result); // боты — и без игроков
-        g_box_frame_transient = !player_list_ok;
-        return transient_return(1);
+        g_frame_transforms = std::move(current_players);
+        g_player_list_last_success = now;
+    } else if (!espsnapshot::within_age(now, g_player_list_last_success, 0.40)) {
+        g_frame_transforms.clear();
     }
 
-    if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
-    const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
-    prune_player_aux(s_transforms);
-    prune_player_text(s_transforms);
-    prune_player_track(s_transforms);
-    prune_mount_latch(s_transforms);
-    if (want_bones) prune_skeleton_cache(s_transforms);
-    else if (!g_skeletons.empty()) g_skeletons.clear();
+    uint64_t native_camera = 0;
+    Mat4 projection{}, view{};
+    Mat4 view_projection{};
+    Vec3 camera_position{};
+    bool camera_fresh = read_camera_frame(sw / sh, native_camera, projection, view);
+    if (camera_fresh) {
+        view_projection = mat_mul(projection, view);
+        camera_fresh = matrix_is_finite(view_projection) &&
+                       camera_position_from_view(view, camera_position);
+    }
+
+    if (!camera_fresh) {
+        const bool same_viewport = fabsf(sw - previous_sw) < 1.0F &&
+                                   fabsf(sh - previous_sh) < 1.0F;
+        if (!had_previous_camera || !same_viewport ||
+            !espsnapshot::within_age(now, previous_camera_time, 0.25))
+            return boxes;
+        view_projection = previous_vp;
+        camera_position = previous_camera_position;
+        sw = previous_sw;
+        sh = previous_sh;
+        g_frame_vp = previous_vp;
+        g_frame_sw = previous_sw;
+        g_frame_sh = previous_sh;
+        g_frame_local_pos = previous_camera_position;
+        g_frame_vp_valid = true;
+        g_frame_local_valid = true;
+    } else {
+        g_frame_vp = view_projection;
+        g_frame_vp_valid = true;
+        g_frame_sw = sw;
+        g_frame_sh = sh;
+        g_frame_local_pos = camera_position;
+        g_frame_local_valid = true;
+        g_last_camera_frame_time = now;
+        g_frame_camera_fresh = true;
+
+        Vec3 camera_right{}, camera_up{}, camera_forward{};
+        if (camera_basis_from_view(view, camera_right, camera_up, camera_forward)) {
+            g_frame_cam_pos = camera_position;
+            g_frame_cam_right = camera_right;
+            g_frame_cam_up = camera_up;
+            g_frame_cam_fwd = camera_forward;
+            g_frame_cam_basis_valid = true;
+        }
+    }
+
+    const std::vector<uint64_t>& players = g_frame_transforms;
+    prune_player_aux(players);
+    prune_player_text(players);
+    prune_player_track(players);
+
+    const bool retain_skeletons = g_skeleton_enabled || g_aim_bones_requested;
+    const bool want_bones = g_skeleton_enabled ||
+                            (g_aim_bones_requested && g_frame_camera_fresh);
+    if (retain_skeletons) prune_skeleton_cache(players);
+    else g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
 
-    // The selected build profile already contains the PlayerManager position
-    // field. Use it directly; KCC/model below cover objects whose synced field
-    // has not been initialized yet.
-    if (!g_player_position_validated) {
-        g_player_position_offset = PLAYER_POSITION;
-        g_use_direct_player_position = true;
-        g_player_position_validated = true;
+    size_t local_index = players.size();
+    if (g_local_player) {
+        const auto local = std::find(players.begin(), players.end(), g_local_player);
+        if (local != players.end()) local_index = static_cast<size_t>(local - players.begin());
     }
-
-    bool transform_camera_mode = false; // light fix: always use native cam matrices, avoid dead-body-as-camera on death
-    if (!transform_camera_mode) {
-        // The uploaded log showed multi-second outages almost exclusively at
-        // the managed-camera chain (early=3). Read through stable cached
-        // anchors and fall back to the last confirmed native camera when one
-        // pointer read fails; the matrix read still validates that fallback.
-        if (!read_camera_frame(sw / sh, native_cam, projection, view))
-            return transient_return(5);
-        // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
-        g_matrix_configuration_validated = true;
-        g_camera_matrix_physical_match = true;
-        // Растяг экрана (Aspect Ratio, меню «Визуалы → Ещё настройки»):
-        // горизонтальный масштаб проекции — это cot(fov/2) / aspect, поэтому
-        // aspect ДЕЛИМ на коэффициент: горизонтальный FOV растёт, края
-        // уходят за кадр, а модели врагов становятся шире/жирнее (круги-
-        // прицелы овальные — норма для фичи). Через умножение эффект был
-        // обратный — картинка сплющивалась (наблюдение с устройства 04.10).
-        // Пишем КАЖДЫЙ кадр тем же g_mem, что и аим: движок может возвращать
-        // aspect на место при смене вида; наш же w2s берёт матрицу из того
-        // поля, так что проекция ESP растягивается вместе с игрой. Базу
-        // берём из геометрии экрана (sw/sh), а не из памяти — там уже может
-        // лежать наша же запись. При возврате слайдера в 1.00 аспект один
-        // раз восстанавливается в ровный sw/sh.
-        {
-            const float stretch = g_screen_stretch_x;
-            static float s_stretch_last = 1.0F;
-            if (sh > 1.0F) {
-                const float base = sw / sh;
-                if (stretch > 1.005F) {
-                    const float want = base / stretch;
-                    wr_buf(native_cam + CAMERA_ASPECT, &want, sizeof(want));
-                } else if (s_stretch_last > 1.005F) {
-                    wr_buf(native_cam + CAMERA_ASPECT, &base, sizeof(base));
-                }
-            }
-            s_stretch_last = stretch;
-        }
-        // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
-        vp = mat_mul(projection, view);
-    }
-
-    bool has_local_position = false;
-    Vec3 local{};
-    size_t local_entity_index = s_transforms.size();
-    // Positions are read once per frame here and reused below: the box loop
-    // must see exactly the same values the local player was picked with.
-    std::vector<Vec3> positions(s_transforms.size());
-    std::vector<char> position_ok(s_transforms.size(), 0);
-    std::vector<char> position_source(s_transforms.size(), 0);
-    std::vector<unsigned short> position_read_flags(s_transforms.size(), 0);
-    std::vector<char> skip_reason(s_transforms.size(), 0); // наблюдатель мерцаний: код пропуска
-    size_t live_player_positions = 0;
-    s_direct_dead_players = 0;
-    s_direct_dead_count = 0;
-
-    Vec3 camera_position{};
-    if (!camera_position_from_view(view, camera_position)) {
-        append_bot_boxes(result);
-        return transient_return(8);
-    }
-    local = camera_position;
-    has_local_position = true;
-    Vec3 projection_camera_right{}, projection_camera_up{}, projection_camera_forward{};
-    const bool projection_camera_basis_valid = camera_basis_from_view(
-        view, projection_camera_right, projection_camera_up, projection_camera_forward);
-
-    for (size_t index = 0; index < s_transforms.size(); ++index) {
-        const uint64_t player = s_transforms[index];
-        if (!player) continue;
-
-        Vec3 candidate{};
-        char source = 0;
-        unsigned short read_flags = PositionDirectTried;
-        const bool direct_read_ok = read_entity_position(player, candidate);
-        if (direct_read_ok) read_flags |= PositionDirectReadOk;
-        // Пуловой мусор свежего PlayerManager отдаёт в поле позиции вектор
-        // (x, 0.0, 0.0): world-space-гейт его пропускает, и бокс уходит под
-        // карту. В логе 16:05 — pos=(10.9 0.0 0.0), reason=bottom, «ПРОПАЛ»,
-        // возврат через 155 кадров (2.6 c). Сентинель position_near_world_origin
-        // был написан ровно под это, но подключён только в player_saved_position,
-        // а конвейер боксов принимал такую точку как живую.
-        bool read_ok = direct_read_ok && position_looks_like_world_space(candidate) &&
-                       !position_near_world_origin(candidate);
-        if (read_ok) {
-            read_flags |= PositionDirectValid;
-            source = 'D';
-        }
-        if (g_use_direct_player_position && g_player_position_offset != 0) {
-            ++s_direct_dead_players;
-            if (direct_read_ok && !read_ok) ++s_direct_dead_count;
-        }
-        if (!read_ok) {
-            const PlayerAux& aux = player_aux(player);
-            read_flags |= PositionKccTried;
-            read_ok = player_kcc_position(aux, candidate);
-            if (read_ok) {
-                read_flags |= PositionKccOk;
-                source = 'K';
-                if (!g_use_direct_player_position) candidate.y += 1.60F;
-            } else {
-                read_flags |= PositionModelTried;
-                const bool model_read_ok = player_model_position(player, candidate);
-                if (model_read_ok) {
-                    read_flags |= PositionModelReadOk;
-                    candidate.y += g_use_direct_player_position ? -0.90F : 0.90F;
-                    read_ok = position_looks_like_world_space(candidate) &&
-                              !position_near_world_origin(candidate);
-                    if (read_ok) {
-                        read_flags |= PositionModelValid;
-                        source = 'M';
-                    }
-                }
-            }
-        }
-
-        auto tracked = g_player_track.find(player);
-        if (!read_ok) {
-            // A read failure never removes a visible player. Keep the last
-            // accepted world position until the confirmed list retires him.
-            if (tracked == g_player_track.end() || !tracked->second.has_last) {
-                position_read_flags[index] = read_flags;
-                continue;
-            }
-            candidate = tracked->second.last;
-            read_flags |= PositionCacheUsed;
-            source = 'C';
-        } else {
-            ++live_player_positions;
-            PlayerTrack& track = track_player(player, candidate);
-            tracked = g_player_track.find(player);
-
-            // lastSavedPosition у удалённых игроков обновляется сетевыми тиками,
-            // а оверлей рисуется 60 Гц. Между тиками продвигаем только обычный
-            // direct-сэмпл по измеренной скорости. KCC/model и транспорт уже
-            // дают живой Transform, поэтому повторная экстраполяция им навредит.
-            if (source == 'D' && player != g_local_player &&
-                !player_is_mounted(player) && !player_mount_engaged(player) &&
-                track.have_vel_ref) {
-                candidate = playermotion::predict(candidate, track.vel,
-                                                  track.vel_ref_t, mono_seconds());
-            }
-        }
-
-        position_read_flags[index] = read_flags;
-        positions[index] = candidate;
-        position_ok[index] = 1;
-        position_source[index] = source;
-        if (tracked != g_player_track.end()) {
-            tracked->second.filt.drawn = candidate;
-            tracked->second.filt.drawn_t = mono_seconds();
-            tracked->second.filt.has_drawn = true;
-        }
-    }
-
-    note_direct_position_health(s_transforms, position_source);
-
-    // Local identity only excludes our own PlayerManager. Distance always uses
-    // the camera from this exact projection frame, never a stale player field.
-    for (size_t index = 0; index < s_transforms.size(); ++index) {
-        if (s_transforms[index] == g_local_player) {
-            local_entity_index = index;
-            break;
-        }
-    }
-    if (local_entity_index == s_transforms.size()) {
-        for (size_t index = 0; index < s_transforms.size(); ++index) {
-            if (player_is_local(s_transforms[index]) == 1) {
-                local_entity_index = index;
-                g_local_player = s_transforms[index];
+    if (local_index == players.size()) {
+        for (size_t i = 0; i < players.size(); ++i) {
+            if (valid_obj(players[i]) && player_is_local(players[i]) == 1) {
+                local_index = i;
+                g_local_player = players[i];
                 break;
             }
         }
     }
-    g_local_position_fail_streak = 0;
+    if (local_index == players.size()) g_local_player = 0;
 
-    // The camera from this projection frame is the sole distance origin.
-    watch_camera_and_local(view, local);
-    note_player_pipeline_health(player_list_ok && live_player_positions > 0);
-
-    g_frame_vp = vp;
-    g_frame_vp_valid = !transform_camera_mode;
-    g_frame_sw = sw; g_frame_sh = sh;
-    g_frame_local_pos = local;
-    g_frame_local_valid = has_local_position;
-    g_frame_publish_fail_streak = 0; // this frame is healthy
-
-    // Fallback camera basis straight from the view matrix (rows: right, up,
-    // -forward). Kept separate from g_cam_* — the pose path stays authoritative
-    // for the aimbot; this one only feeds the farm when the pose read fails.
-    g_frame_cam_basis_valid = false;
-    if (!transform_camera_mode) {
-        Vec3 vr = {mat_get(view, 0, 0), mat_get(view, 0, 1), mat_get(view, 0, 2)};
-        Vec3 vu = {mat_get(view, 1, 0), mat_get(view, 1, 1), mat_get(view, 1, 2)};
-        Vec3 vf = {-mat_get(view, 2, 0), -mat_get(view, 2, 1), -mat_get(view, 2, 2)};
-        Vec3 vpos{};
-        if (vec3_is_finite(vr) && vec3_is_finite(vu) && vec3_is_finite(vf) &&
-            camera_position_from_view(view, vpos)) {
-            float fl = sqrtf(vf.x * vf.x + vf.y * vf.y + vf.z * vf.z);
-            if (fl > 0.5F && fl < 2.0F) {
-                g_frame_cam_pos = vpos;
-                g_frame_cam_fwd = {vf.x / fl, vf.y / fl, vf.z / fl};
-                g_frame_cam_right = vr;
-                g_frame_cam_up = vu;
-                g_frame_cam_basis_valid = true;
-            }
-        }
+    PlayerGroup local_group{};
+    bool have_local_group = false;
+    if (local_index < players.size()) {
+        read_player_group(players[local_index], local_group);
+        have_local_group = local_group.any();
     }
 
-
-    Vec3 transform_camera_position{};
-    Vec4 transform_camera_rotation{};
-    if (transform_camera_mode) {
-        if (local_entity_index >= s_transforms.size() || !read_entity_pose(s_transforms[local_entity_index], transform_camera_position, transform_camera_rotation)) {
-            return transient_return(9);
-        }
-        local = transform_camera_position; has_local_position = true;
+    const uint64_t local_player = local_index < players.size() ? players[local_index] : 0;
+    PlayerAux* local_aux = nullptr;
+    bool local_crouched = false;
+    if (local_player && g_aim_bones_requested && g_frame_camera_fresh) {
+        PlayerAux& aux = player_aux(local_player);
+        local_aux = &aux;
+        local_crouched = player_is_crouched(aux);
+        Vec3 local_position{};
+        if (read_entity_position(local_player, local_position) ||
+            player_kcc_position(aux, local_position))
+            track_player(local_player, local_position);
     }
-
-    Vec3 diagnostic_camera_position = transform_camera_mode ? transform_camera_position : camera_position;
-    Vec3 diagnostic_camera_right = projection_camera_right;
-    Vec3 diagnostic_camera_up = projection_camera_up;
-    Vec3 diagnostic_camera_forward = projection_camera_forward;
-    bool diagnostic_camera_basis_valid = projection_camera_basis_valid;
-    const bool diagnostic_camera_rotation_valid = transform_camera_mode &&
-        std::isfinite(transform_camera_rotation.x) && std::isfinite(transform_camera_rotation.y) &&
-        std::isfinite(transform_camera_rotation.z) && std::isfinite(transform_camera_rotation.w);
-    if (transform_camera_mode) {
-        diagnostic_camera_basis_valid = false;
-        if (diagnostic_camera_rotation_valid) {
-            Vec4 normalized_rotation = transform_camera_rotation;
-            if (normalize_quaternion(normalized_rotation)) {
-                diagnostic_camera_right = rotate_vector(normalized_rotation, {1.0F, 0.0F, 0.0F});
-                diagnostic_camera_up = rotate_vector(normalized_rotation, {0.0F, 1.0F, 0.0F});
-                diagnostic_camera_forward = rotate_vector(normalized_rotation, {0.0F, 0.0F, 1.0F});
-                diagnostic_camera_basis_valid = vec3_is_finite(diagnostic_camera_right) &&
-                    vec3_is_finite(diagnostic_camera_up) && vec3_is_finite(diagnostic_camera_forward);
-            }
-        }
-    }
-
-    // Our own team / clan, read once per frame and compared against every
-    // player below. Without it nobody can be an ally.
-    PlayerGroup local_group;
-    bool local_group_valid = false;
-    if (local_entity_index < s_transforms.size()) {
-        read_player_group(s_transforms[local_entity_index], local_group);
-        local_group_valid = local_group.any();
-    }
-
-    // Firing reference for the aimbot (local look direction + eye point).
-    {
-        uint64_t local_player = (local_entity_index < s_transforms.size()) ? s_transforms[local_entity_index] : 0;
-        const PlayerAux* local_aux = nullptr;
-        bool local_crouched = false;
-        if (local_player && g_aim_bones_requested) {
-            PlayerAux& la = player_aux(local_player);
-            local_aux = &la;
-            local_crouched = player_is_crouched(la);
-        }
+    if (g_frame_camera_fresh)
         read_local_aim_reference(local_player, local_aux, local_crouched);
-        if (g_aim_bones_requested && g_state.aim_touch &&
-            g_state.aim_mode != AIM_MODE_SILENT)
-            update_aim_ballistics(local_player);
-    }
+    if (g_frame_camera_fresh && local_player && g_aim_bones_requested && g_state.aim_touch &&
+        g_state.aim_mode != AIM_MODE_SILENT)
+        update_aim_ballistics(local_player);
 
-    // Draw every remote PlayerManager returned by the player registry.
-    // No UID, name, mount-point or movement heuristic is allowed to hide one.
-    for (size_t i = 0; i < s_transforms.size(); ++i) {
-        EspSkipLog diagnostic{};
-        diagnostic.player = s_transforms[i];
-        diagnostic.index = i;
-        diagnostic.population = s_transforms.size();
-        diagnostic.position_source = position_source[i];
-        diagnostic.position_read_flags = position_read_flags[i];
-        diagnostic.has_position = position_ok[i] != 0;
-        if (diagnostic.has_position) diagnostic.position = positions[i];
-        diagnostic.camera_position = diagnostic_camera_position;
-        diagnostic.camera_right = diagnostic_camera_right;
-        diagnostic.camera_up = diagnostic_camera_up;
-        diagnostic.camera_forward = diagnostic_camera_forward;
-        diagnostic.camera_basis_valid = diagnostic_camera_basis_valid;
-        diagnostic.camera_rotation_valid = diagnostic_camera_rotation_valid;
-        diagnostic.camera_from_transform = transform_camera_mode;
-        diagnostic.camera_rotation = transform_camera_rotation;
-        diagnostic.screen_width = sw;
-        diagnostic.screen_height = sh;
-        auto mark_skip = [&](char reason) {
-            skip_reason[i] = reason;
-            diagnostic.reason = reason;
-            diagnostic.read_fails_total = g_mem.read_fails_total();
-        };
-        if (i == local_entity_index) { skip_reason[i] = 'L'; continue; }
-        if (!s_transforms[i]) { skip_reason[i] = 'Z'; continue; }
-        if (!position_ok[i]) { mark_skip('P'); continue; }
-        Vec3 feet = positions[i];
-        // На транспорте поле позиции замирает в точке посадки, и бокс едет
-        // «по памяти» либо отстаёт. Пока пассажир в седле, позиция берётся из
-        // трансформа, привязанного к сиденью; состояние видно в логе по
-        // префиксу «транспорт:».
-        apply_mounted_position(s_transforms[i], feet);
-        diagnostic.position = feet;
+    boxes.reserve(players.size() + 8);
+    for (size_t i = 0; i < players.size(); ++i) {
+        const uint64_t player = players[i];
+        if (!valid_obj(player) || i == local_index) continue;
 
-        float distance = -1.0F;
-        if (has_local_position) {
-            float dx = feet.x - local.x, dy = feet.y - local.y, dz = feet.z - local.z;
-            distance = sqrtf(dx * dx + dy * dy + dz * dz);
-            if (!std::isfinite(distance)) { diagnostic.distance = distance; mark_skip('D'); continue; }
-        }
-        diagnostic.distance = distance;
+        PlayerAux& aux = player_aux(player);
+        Vec3 feet{};
+        bool mounted = false;
+        if (!player_world_position(player, aux, feet, mounted)) continue;
 
-        // Призрачные копии из пула объектов: игра держит в реестре второй
-        // объект того же игрока (копия после посадки в транспорт, остаток
-        // респауна). У копии тот же uid — подавляем всё, кроме объекта,
-        // который рисовали в прошлый раз. Иначе копия попадает в счётчик
-        // игроков «фантомом»: бокс у неё на замороженной точке посадки или за
-        // экраном, а число сверху мигает 1/0, когда копия приходит и уходит.
-        {
-            auto track_it = g_player_track.find(s_transforms[i]);
-            if (track_it != g_player_track.end() && track_it->second.uid[0]) {
-                uint64_t& pick = g_player_track_pick[track_it->second.uid];
-                if (pick && pick != s_transforms[i]) {
-                    bool pick_alive = false;
-                    for (uint64_t p : s_transforms) if (p == pick) { pick_alive = true; break; }
-                    // Труп в реестре uid не удерживает: игрок уже респавнился, и
-                    // показывать надо свежий объект. Две копии трупа между собой
-                    // по-прежнему не меняются — выбор не дёргается зря.
-                    const bool pick_corpse = pick_alive && player_track_is_corpse(pick);
-                    const bool candidate_corpse = player_track_is_corpse(s_transforms[i]);
-                    if (pick_alive && !(pick_corpse && !candidate_corpse)) {
-                        diagnostic.duplicate_of = pick;
-                        mark_skip('S');
-                        continue;
-                    }
-                }
-                pick = s_transforms[i];
-            }
-        }
-
-        // Counted before any screen-space checks: the pill counter must see
-        // players behind us too (360 degrees), not only the ones on screen.
+        const float dx = feet.x - camera_position.x;
+        const float dy = feet.y - camera_position.y;
+        const float dz = feet.z - camera_position.z;
+        const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(distance)) continue;
         ++g_frame_player_count;
 
-        // Crouch-aware body height from the character controller.
-        PlayerAux& aux = player_aux(s_transforms[i]);
         const bool crouched = player_is_crouched(aux);
         float body_height = crouched ? aux.crouch_height : aux.normal_height;
-        if (!(body_height > 0.6F && body_height < 2.6F)) body_height = PLAYER_HEIGHT;
-        diagnostic.body_height = body_height;
+        if (!std::isfinite(body_height) || body_height < 0.6F || body_height > 2.6F)
+            body_height = PLAYER_HEIGHT;
 
-        Vec3 body_bottom = {feet.x, feet.y, feet.z};
-        Vec3 body_top = {feet.x, feet.y + body_height, feet.z};
-        if (transform_camera_mode || !g_use_direct_player_position) { body_bottom.y = feet.y - 1.60F; body_top.y = feet.y + 0.20F; }
+        Vec3 bottom = feet;
+        Vec3 top{feet.x, feet.y + body_height, feet.z};
+        const bodyclip::Segment clipped = bodyclip::clip_segment(
+            bottom, top, bodyclip::plane_from_vp(view_projection), bodyclip::kNearDepth);
+        if (!clipped.visible) continue;
 
-        // Ближняя плоскость: в упор верхняя (а при взгляде снизу — нижняя)
-        // точка уходит за неё, и без отсечения весь бокс выбрасывался целиком,
-        // хотя вторая точка была в кадре. Подробнее — в body_clip.h.
-        const Vec4 body_plane = transform_camera_mode
-            ? bodyclip::plane_from_camera(transform_camera_position,
-                                          rotate_vector(transform_camera_rotation, {0.0F, 0.0F, 1.0F}))
-            : bodyclip::plane_from_vp(vp);
-        const bodyclip::Segment body_seg =
-            bodyclip::clip_segment(body_bottom, body_top, body_plane, bodyclip::kNearDepth);
-        if (!body_seg.visible) { mark_skip('B'); continue; }
-        diagnostic.body_clipped = (body_seg.moved_bottom ? 1 : 0) | (body_seg.moved_top ? 2 : 0);
+        Vec2 screen_bottom{}, screen_top{};
+        if (!w2s(view_projection, bottom, sw, sh, screen_bottom, false) ||
+            !w2s(view_projection, top, sw, sh, screen_top, false))
+            continue;
 
-        diagnostic.bottom_world = body_bottom;
-        diagnostic.top_world = body_top;
-        diagnostic.has_bottom_world = true;
-        diagnostic.has_top_world = true;
+        const float margin = std::max(sw, sh) * 0.25F;
+        if (clipped.moved_bottom)
+            screen_bottom = bodyclip::clamp_to_margin(screen_bottom, sw, sh, margin);
+        if (clipped.moved_top)
+            screen_top = bodyclip::clamp_to_margin(screen_top, sw, sh, margin);
 
-        Vec2 sf{}, sh2{};
-        bool bottom_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_bottom, sw, sh, sf, false, &diagnostic.bottom_projection)
-            : w2s_with_trace(vp, body_bottom, sw, sh, sf, false, &diagnostic.bottom_projection);
-        if (!bottom_visible) { mark_skip('B'); continue; }
-        bool top_visible = transform_camera_mode
-            ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, body_top, sw, sh, sh2, false, &diagnostic.top_projection)
-            : w2s_with_trace(vp, body_top, sw, sh, sh2, false, &diagnostic.top_projection);
-        if (!top_visible) { mark_skip('T'); continue; }
+        const float pixel_height = fabsf(screen_top.y - screen_bottom.y);
+        if (!std::isfinite(pixel_height) || pixel_height < 0.5F) continue;
+        const float center_x = (screen_bottom.x + screen_top.x) * 0.5F;
+        const float top_y = std::min(screen_bottom.y, screen_top.y);
+        const float bottom_y = std::max(screen_bottom.y, screen_top.y);
+        const float ratio = (PLAYER_BOX_WIDTH_RATIO > 0.05F && PLAYER_BOX_WIDTH_RATIO < 1.5F)
+                          ? PLAYER_BOX_WIDTH_RATIO : 0.45F;
+        const float half_width = pixel_height * ratio * 0.5F;
 
-        const float screen_margin = std::max(sw, sh) * 0.25F;
-        // Подтянутая к плоскости точка улетает на тысячи пикселей за экран
-        // (screen = f(1/near)). Прижимаем только её и только когда её реально
-        // двигали: честную проекцию трогать нельзя, иначе дальний игрок вместо
-        // mark_skip('O') начал бы рисоваться прижатым к кромке.
-        if (body_seg.moved_bottom) sf = bodyclip::clamp_to_margin(sf, sw, sh, screen_margin);
-        if (body_seg.moved_top) sh2 = bodyclip::clamp_to_margin(sh2, sw, sh, screen_margin);
+        EspBox box{};
+        box.id = player;
+        box.x1 = center_x - half_width;
+        box.y1 = top_y;
+        box.x2 = center_x + half_width;
+        box.y2 = bottom_y;
+        box.distance = distance;
+        box.crouched = crouched;
+        box.health = -1.0F;
+        box.death_flag = -1;
+        uint8_t respawning = 0;
+        if (rd_exact(player + PLAYER_MANAGER_RESPAWNING, respawning))
+            box.respawning = respawning != 0;
+        box.dead = box.respawning;
 
-        float height = fabsf(sh2.y - sf.y);
-        if (!std::isfinite(height) || height <= 0.001F) { mark_skip('H'); continue; }
-        float cx = (sf.x + sh2.x) * 0.5F;
-        float cy = (sf.y + sh2.y) * 0.5F;
-        float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
-        float half_h = height * 0.5F;
-        diagnostic.box_cx = cx;
-        diagnostic.box_cy = cy;
-        diagnostic.box_half_width = half_w;
-        diagnostic.box_half_height = half_h;
-        diagnostic.screen_margin = screen_margin;
-        diagnostic.has_box_bounds = true;
-        // Test the box edges, not only its centre. At 5-10 m a player can
-        // cover much of the viewport while the centre is already past the old
-        // margin, which made close ESP vanish despite still intersecting it.
-        if (cx + half_w < -screen_margin || cx - half_w > sw + screen_margin ||
-            cy + half_h < -screen_margin || cy - half_h > sh + screen_margin) {
-            mark_skip('O');
+        uint64_t death_handler = rd_ptr(player + PLAYER_DEATH_HANDLER);
+        if (valid_obj(death_handler)) {
+            const uint64_t handler = rd_ptr(death_handler + DEATH_HANDLER_REF_TARGET);
+            uint8_t death_flag = 0;
+            if (valid_obj(handler) && rd_exact(handler + DEATH_HANDLER_DEATH, death_flag)) {
+                box.death_flag = death_flag ? 1 : 0;
+                box.dead = box.dead || death_flag != 0;
+            }
+        }
+        if (box.dead) {
+            --g_frame_player_count;
             continue;
         }
 
-        constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
-        const Vec3 world_corners[8] = {
-            {feet.x - box_half_width, body_bottom.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_bottom.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_bottom.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_bottom.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_top.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_top.y, feet.z - box_half_depth},
-            {feet.x + box_half_width, body_top.y, feet.z + box_half_depth},
-            {feet.x - box_half_width, body_top.y, feet.z + box_half_depth}
-        };
-        EspBox box{};
-        // The base lead follows this target's smoothed world-space velocity.
-        {
-            auto vt = g_player_track.find(s_transforms[i]);
-            if (vt != g_player_track.end() && vt->second.have_vel_ref) {
-                const Vec3 velocity = vt->second.vel;
-                const double age = mono_seconds() - vt->second.vel_ref_t;
-                if (age >= 0.0 && age <= 0.35 && aim_ballistics::finite(velocity)) {
-                    g_aim_velocity = velocity;
-                    g_aim_lead.x = velocity.x * g_aim_lead_seconds;
-                    g_aim_lead.y = velocity.y * g_aim_lead_seconds;
-                    g_aim_lead.z = velocity.z * g_aim_lead_seconds;
-                } else {
-                    g_aim_velocity = {};
-                    g_aim_lead = {};
+        if (g_state.esp_chams) {
+            constexpr float kHalfWidth = 0.35F;
+            constexpr float kHalfDepth = 0.35F;
+            const Vec3 corners[8] = {
+                {feet.x - kHalfWidth, bottom.y, feet.z - kHalfDepth},
+                {feet.x + kHalfWidth, bottom.y, feet.z - kHalfDepth},
+                {feet.x + kHalfWidth, bottom.y, feet.z + kHalfDepth},
+                {feet.x - kHalfWidth, bottom.y, feet.z + kHalfDepth},
+                {feet.x - kHalfWidth, top.y, feet.z - kHalfDepth},
+                {feet.x + kHalfWidth, top.y, feet.z - kHalfDepth},
+                {feet.x + kHalfWidth, top.y, feet.z + kHalfDepth},
+                {feet.x - kHalfWidth, top.y, feet.z + kHalfDepth}
+            };
+            for (int corner = 0; corner < 8; ++corner) {
+                Vec2 screen{};
+                const bool projected = w2s(view_projection, corners[corner], sw, sh, screen, false);
+                box.corner_visible[corner] = projected && screen.x >= 0.0F && screen.x <= sw &&
+                                             screen.y >= 0.0F && screen.y <= sh;
+                box.corners[corner][0] = projected ? screen.x : -1.0F;
+                box.corners[corner][1] = projected ? screen.y : -1.0F;
+            }
+        }
+
+        if (g_state.esp_name || g_state.esp_weapon || g_state.esp_team || g_aim_bones_requested) {
+            PlayerTextCache& text = g_player_text[player];
+            const double text_now = mono_seconds();
+            if (text_now >= text.revalidate_at) {
+                text.revalidate_at = text_now + 0.5;
+                if (g_state.esp_name) {
+                    char name[sizeof(text.name)]{};
+                    if (player_display_name(player, name, sizeof(name))) {
+                        memcpy(text.name, name, sizeof(text.name));
+                        text.has_name = true;
+                    }
                 }
+                if (g_state.esp_weapon) {
+                    char weapon[sizeof(text.weapon)]{};
+                    bool definite = false;
+                    if (player_weapon_name(player, weapon, sizeof(weapon), definite)) {
+                        memcpy(text.weapon, weapon, sizeof(text.weapon));
+                        text.has_weapon = true;
+                    } else if (definite) {
+                        text.weapon[0] = '\0';
+                        text.has_weapon = false;
+                    }
+                }
+                PlayerGroup group{};
+                read_player_group(player, group);
+                text.ally = have_local_group && groups_are_allied(local_group, group);
+                snprintf(text.tag, sizeof(text.tag), "%s", group.tag);
+                text.has_tag = text.tag[0] != '\0';
+            }
+            box.has_name = text.has_name;
+            if (text.has_name) memcpy(box.name, text.name, sizeof(box.name));
+            box.has_weapon = text.has_weapon;
+            if (text.has_weapon) memcpy(box.weapon, text.weapon, sizeof(box.weapon));
+            box.ally = text.ally;
+            box.has_tag = text.has_tag;
+            if (text.has_tag) memcpy(box.tag, text.tag, sizeof(box.tag));
+        }
+
+        if (g_aim_bones_requested && g_frame_camera_fresh) {
+            PlayerTrack& track = track_player(player, feet);
+            const double age = mono_seconds() - track.vel_ref_t;
+            if (!mounted && track.have_vel_ref && age >= 0.0 && age <= 0.35 &&
+                aim_ballistics::finite(track.vel)) {
+                g_aim_velocity = track.vel;
+                g_aim_lead = {track.vel.x * g_aim_lead_seconds,
+                              track.vel.y * g_aim_lead_seconds,
+                              track.vel.z * g_aim_lead_seconds};
             } else {
                 g_aim_velocity = {};
                 g_aim_lead = {};
             }
         }
-        box.id = s_transforms[i];
-        box.crouched = crouched;
-        // Мёртвый игрок. Два независимых признака: health <= 0 и respawning.
-        // Оба кладём в бокс, чтобы по логу было видно, который из них живой.
-        // Почему здоровье нельзя читать «как получится». rd<float>() при
-        // неудачном чтении возвращает НОЛЬ (game_internal.h: «T v{}» — значение
-        // просто остаётся нулевым), а ноль проходил проверку «здоровье в
-        // диапазоне». То есть любой сбойный syscall помечал игрока мёртвым, и
-        // сборка 829a1dc перестала брать цели ВООБЩЕ: мёртвыми оказывались все
-        // подряд, а строка «мёртвых N» печаталась только из ветки «кости не
-        // нашлись» — в логе не было ни одной строки, и причину жалобы 19.09
-        // «аим вообще не нацеливается на игроков» стало нечем подтвердить.
-        // Теперь: результат чтения проверяется (rd_exact), неудача — не
-        // приговор, а признаку «здоровье = 0» мы верим, только если хотя бы
-        // раз видели живое здоровье. Если смещение не то и всем читается ноль,
-        // фильтр молча выключается: аим продолжает работать, а срез памяти
-        // vitals в логе показывает, где здоровье лежит на самом деле.
-        static float g_hp_max_seen = -1.f;   // максимум здоровья за всё время
-        box.respawning = false;
-        {
-            uint8_t flag = 0;
-            if (rd_exact(s_transforms[i] + PLAYER_MANAGER_RESPAWNING, flag))
-                box.respawning = flag != 0;
-        }
-        box.health = -1.f;
-        {
-            const uint64_t vitals = rd_ptr(s_transforms[i] + go_active::PLAYER_VITALS);
-            if (vitals >= 0x10000) {
-                // Где здоровье на самом деле. Прошлые две сборки читали
-                // GenericVitals.KQN (0xB8) — и срез памяти из лога 15:56
-                // показал, что там у ВСЕХ игроков ровно 0.0, хотя соседнее
-                // поле m_MaxHealth (0x88) читается как честные 100.0. Значит
-                // объект найден верно, а KQN — не текущее здоровье.
-                //
-                // Правильная цепочка взята из дизассемблера, а не подобрана:
-                //   * GenericVitals.COL() (RVA 0x65391f8) кладёт m_MaxHealth
-                //       s0 = [this + 0x88]
-                //     в сеттер наблюдаемой величины:
-                //       x8 = [this + 0x68]        -- brS.Entity
-                //       x0 = [x8 + 0x98]          -- brz.Health
-                //       setter(x0, s0)
-                //   * сам сеттер (RVA 0xb0f6238) пишет новое значение в
-                //     [x0 + 0x20], а старое относит в [x0 + 0x24]:
-                //       stp s1, s0, [x0, #0x20]
-                //   * в dump.cs этому ровно соответствует
-                //       public class brz : brS  ->  public ? Health;  // 0x98
-                //     а 0x68 у brS — это public brz Entity.
-                // Итого: здоровье = [[[vitals + 0x68] + 0x98] + 0x20].
-                const uint64_t entity = rd_ptr(vitals + go_active::PMP_ENTITY);
-                if (entity >= 0x10000) {
-                    const uint64_t hv = rd_ptr(entity + go_active::PMK_HEALTH);
-                    if (hv >= 0x10000) {
-                        // Слот значения: дизассемблер сеттера показывает +0x20
-                        // (старое значение при этом относит в +0x24), а по
-                        // раскладке AsyncReactiveProperty<T> из дампа значение
-                        // должно лежать в +0x18. Тип brz.Health в дампе не
-                        // разрешён (там просто «?»), поэтому берём тот слот,
-                        // где лечит правдоподобное здоровье, — и печатаем оба,
-                        // чтобы следующая сборка уже знала точно.
-                        const float hp20 = rd<float>(hv + go_active::HEALTH_VALUE);
-                        const float hp18 = rd<float>(hv + go_active::ARP_LATEST_VALUE);
-                        auto plausible = [](float v) {
-                            return std::isfinite(v) && v >= 0.f && v <= 100000.f;
-                        };
-                        // Не прочиталось ни там ни там — здоровье НЕИЗВЕСТНО, а
-                        // не «ноль». Именно подстановка нуля вместо неудачи и
-                        // помечала живых игроков мёртвыми (жалоба 19.09).
-                        if (plausible(hp20))      { box.health = hp20; box.health_slot = 0x20; }
-                        else if (plausible(hp18)) { box.health = hp18; box.health_slot = 0x18; }
-                        else                      { box.health = -1.f; box.health_slot = 0; }
-                        if (box.health > g_hp_max_seen) g_hp_max_seen = box.health;
-                        // Срез объекта Health больше не печатаем: слот
-                        // подтверждён логом 16:32 (+0x20 = 100.0 у живых,
-                        // 0.0 у части игроков, +0x24 = прошлое значение).
-                        // Здоровье остаётся только для лога «поза»: решением
-                        // о смерти оно больше не управляет ни при каких
-                        // обстоятельствах (жалоба «смысла читать HP нет»).
-                    }
-                }
-            }
-        }
-        // Мёртвый решается ПОСЛЕ чтения скелета — см. ниже, перед push_back.
-        // Раньше это решение стояло здесь, но fill_skeleton_box вызывается
-        // ниже по циклу, а box создаётся заново каждый кадр (EspBox box{}),
-        // поэтому в этой точке костей всегда 0 и правило не срабатывало ни
-        // разу: в логе 17:06 каждая строка «поза» давала костей=0, а счётчик
-        // пропущенных мёртвых был 0 вместо 142.
 
-        box.aim_source = 0;
-        box.x1 = cx - half_w; box.y1 = cy - half_h;
-        box.x2 = cx + half_w; box.y2 = cy + half_h;
-        box.distance = distance;
-        // Display strings (cached, update-on-success so labels never flicker).
-        {
-            PlayerTextCache& tc = g_player_text[s_transforms[i]];
-            if (++tc.revalidate >= 30) {
-                tc.revalidate = 0;
-                char tmp[32] = {};
-                if (player_display_name(s_transforms[i], tmp, sizeof(tmp))) {
-                    memcpy(tc.name, tmp, sizeof(tc.name));
-                    tc.has_name = true;
-                }
-                char weapon_tmp[48] = {};
-                bool weapon_definite = false;
-                if (player_weapon_name(s_transforms[i], weapon_tmp, sizeof(weapon_tmp), weapon_definite)) {
-                    memcpy(tc.weapon, weapon_tmp, sizeof(tc.weapon));
-                    tc.has_weapon = true;
-                } else if (weapon_definite) {
-                    // The synced weapon slot says the hands are empty — drop the
-                    // stale label instead of showing the previous weapon forever.
-                    tc.weapon[0] = '\0';
-                    tc.has_weapon = false;
-                }
-                PlayerGroup group;
-                read_player_group(s_transforms[i], group);
-                tc.ally = local_group_valid && groups_are_allied(local_group, group);
-                snprintf(tc.tag, sizeof(tc.tag), "%s", group.tag);
-                tc.has_tag = tc.tag[0] != '\0';
-            }
-            box.has_name = tc.has_name;
-            if (tc.has_name) memcpy(box.name, tc.name, sizeof(box.name));
-            box.has_weapon = tc.has_weapon;
-            if (tc.has_weapon) memcpy(box.weapon, tc.weapon, sizeof(box.weapon));
-            box.ally = tc.ally;
-            box.has_tag = tc.has_tag;
-            if (tc.has_tag) memcpy(box.tag, tc.tag, sizeof(box.tag));
-        }
-        for (size_t corner = 0; corner < 8; ++corner) {
-            Vec2 sc{};
-            bool projected = transform_camera_mode
-                ? w2s_transform_camera(transform_camera_position, transform_camera_rotation, world_corners[corner], sw, sh, sc, false)
-                : w2s(vp, world_corners[corner], sw, sh, sc, false);
-            box.corner_visible[corner] = projected && sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
-            box.corners[corner][0] = projected ? sc.x : -1.0F;
-            box.corners[corner][1] = projected ? sc.y : -1.0F;
-        }
-        if (want_bones && !transform_camera_mode) {
-            fill_skeleton_box(s_transforms[i], vp, sw, sh, box);
-            // Dummy rig stays at the boarding point while the box rides the
-            // vehicle — drawing both is the two-position flicker.
-            auto sk = g_skeletons.find(s_transforms[i]);
-            if (sk != g_skeletons.end() && box.has_skeleton &&
-                sk->second.bone_world_age[BONE_HIPS] >= 1) {
-                float hx = sk->second.bone_world[BONE_HIPS].x - feet.x;
-                float hz = sk->second.bone_world[BONE_HIPS].z - feet.z;
-                if (hx * hx + hz * hz > 3.0F * 3.0F) {
-                    box.has_skeleton = false;
-                    for (int b = 0; b < ESP_BONE_COUNT; ++b) box.bone_valid[b] = false;
-                }
+        if (want_bones)
+            fill_skeleton_box(player, view_projection, sw, sh, box);
+        if (!g_frame_camera_fresh) {
+            for (int slot = 0; slot < 3; ++slot) {
+                box.aim_valid[slot] = false;
+                box.aim_world_valid[slot] = false;
             }
         }
+        g_aim_velocity = {};
+        g_aim_lead = {};
 
-        // Head slot: prefer the centre of the server-side Head hit volume over
-        // the rig-derived estimate. This is the exact volume the shot is tested
-        // against, so it removes the constant model/hitbox offset that makes
-        // long-range head shots land low. Only accepted when it lies within
-        // the body (plausibility vs feet) so a stale transform cannot hijack it.
-        if (g_aim_bones_requested && !transform_camera_mode) {
-            Vec3 hb{};
-            if (player_head_hitbox_world(aux, hb)) {
-                float dy = hb.y - feet.y;
-                float dx = hb.x - feet.x, dz = hb.z - feet.z;
-                if (dy > 0.5F && dy < 2.4F && (dx * dx + dz * dz) < 1.0F) {
-                    bool agree = true;
-                    if (box.aim_valid[0]) {
-                        // Compare against the rig head point in screen space:
-                        // reject if wildly different (different body).
-                        Vec2 hs{};
-                        if (w2s(vp, hb, sw, sh, hs, false)) {
-                            float ex = hs.x - box.aim_pts[0][0], ey = hs.y - box.aim_pts[0][1];
-                            float bh = fabsf(box.y2 - box.y1);
-                            agree = (ex * ex + ey * ey) < (bh * 0.25F) * (bh * 0.25F) + 4.0F;
-                        }
-                    }
-                    if (agree && set_aim_point(box, 0, hb, vp, sw, sh) && box.aim_source == 0) box.aim_source = 1;
-                }
-            }
-        }
-
-        // Запасные точки (по трансформу головы и по росту от пяток) выключены:
-        // просили «аим полностью по скелету и костям». Раньше при нечитаемом
-        // скелете цель бралась от роста персонажа — это давало точку выше/ниже
-        // настоящей головы и вносило ещё одно расхождение с нарисованным
-        // скелетом. Теперь цель либо по костям, либо её нет вовсе (это
-        // видно в логе ниже).
-        // (блок сохранён, чтобы вернуть запасные точки одной правкой условия)
-        if (false && g_aim_bones_requested && !transform_camera_mode &&
-            !(box.aim_valid[0] && box.aim_valid[1] && box.aim_valid[2])) {
-            Vec3 head{};
-            bool have_head = false;
-            // (2) game-maintained head transform (moves with crouch/animation)
-            if (player_head_world(aux, head)) {
-                float dy = head.y - feet.y;
-                float hx = head.x - feet.x, hz = head.z - feet.z;
-                have_head = dy > 0.4F && dy < 2.4F && (hx * hx + hz * hz) < 1.5F * 1.5F;
-            }
-            const float n_down = 0.12F;                    // head -> neck
-            const float c_down = crouched ? 0.26F : 0.34F; // head -> chest
-            if (have_head) {
-                if (!box.aim_valid[0]) { Vec3 t = head; t.y += 0.03F; if (set_aim_point(box, 0, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
-                if (!box.aim_valid[1]) { Vec3 t = head; t.y -= n_down; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
-                if (!box.aim_valid[2]) { Vec3 t = head; t.y -= c_down; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 2; }
-            }
-            // (3) feet + pose height estimate
-            if (!box.aim_valid[0]) { Vec3 t = feet; t.y += body_height - 0.12F; if (set_aim_point(box, 0, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
-            if (!box.aim_valid[1]) { Vec3 t = feet; t.y += body_height - 0.26F; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
-            if (!box.aim_valid[2]) { Vec3 t = feet; t.y += body_height * 0.72F; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
-        }
-        // Мёртвый — по позе, а не по здоровью.
-        //
-        // Здоровье цели читать бессмысленно (жалоба 19.09, и лог это
-        // подтвердил): цепочка vitals->Entity->Health->+0x20 читается верно
-        // (у живых 100.0, у некоторых 0.0), но нули там принадлежат СПЯЩИМ
-        // игрокам, а у только что убитого здоровье на клиенте остаётся
-        // прежним. Поэтому смотрим на кости: труп лежит. У стоящего игрока
-        // размах скелета по вертикали 1.5-1.8 м при горизонтали 0.4 м; у
-        // лежащего — высота падает до 0.3-0.5 м, а горизонталь вырастает до
-        // полутора. Костей должно быть не меньше половины: по обрубку из
-        // четырёх-пяти костей позу не определишь.
-        //
-        // Здесь, а не раньше: fill_skeleton_box уже отработал и заполнил
-        // skel_bones/skel_up/skel_flat для этого кадра.
-        box.dead = box.respawning;
-        // Собственный флаг смерти игры — первым делом: поза (ниже) ловит
-        // только лежачих, а труп может ещё стоять. Чтение сорвалось — флаг
-        // неизвестен (-1) и НЕ считается смертью: пометить живого игрока
-        // мёртвым хуже, чем один кадр повести по трупу.
-        {
-            const uint64_t ref = rd_ptr(s_transforms[i] + go_active::PLAYER_DEATH_HANDLER);
-            if (ref >= 0x10000) {
-                const uint64_t dh = rd_ptr(ref + go_active::DEATH_HANDLER_REF_TARGET);
-                if (dh >= 0x10000) {
-                    const uint32_t f = rd<uint8_t>(dh + go_active::DEATH_HANDLER_DEATH);
-                    if (f == 1) { box.death_flag = 1; box.dead = true; }
-                    else if (f == 0) box.death_flag = 0;
-                }
-            }
-        }
-        // Поза «лежит» — только как запасной признак и очень строго.
-        // Порог высоты 0.85 ложно ловил ПРИСЕВШЕГО игрока: в логе 00:53
-        // живой (здоровье 100, флаг смерти 0) сидел с высотой скелета
-        // 0.77-0.86 м и бокс мерцал «мёртв/жив» на каждом пересечении
-        // порога. Теперь: присевшего игра знает сама (поза/состояние KCC)
-        // и поза его не трогает; труп по высоте — 0.3-0.5 м, порог 0.60;
-        // горизонталь трупа — от метра, у сидящего 0.51-0.61 м; и гистерезис
-        // 0.35 с, чтобы шум скелета на один-два кадра не гасил бокс.
-        if (!crouched && !box.dead && box.skel_bones >= 11 &&
-            box.skel_up >= 0.f && box.skel_flat >= 0.f) {
-            const bool lying = box.skel_up < 0.60f ||
-                               (box.skel_flat > 1.0f && box.skel_flat > box.skel_up * 1.5f);
-            static std::unordered_map<uint64_t, double> s_lying_since;
-            const double t_lie = memio::now_seconds();
-            auto it = s_lying_since.find(s_transforms[i]);
-            if (lying) {
-                if (it == s_lying_since.end()) s_lying_since.emplace(s_transforms[i], t_lie);
-                else if (t_lie - it->second >= 0.35) box.dead = true;
-            } else if (it != s_lying_since.end()) {
-                s_lying_since.erase(it);
-            }
-            if (s_lying_since.size() > 256) s_lying_since.clear();
-        }
-        // Что именно решило судьбу игрока — в лог: без этого порог непроверяем.
-        // Печатаем только тех, у кого кости РЕАЛЬНО измерены: в логе 17:06
-        // первые три игрока списка оказывались спящими (костей=0, высота=-1),
-        // и по такому логу порог не проверить.
-        {
-            static double s_pose_at = 0.0;
-            static int    s_pose_left = 0;
-            const double t3 = memio::now_seconds();
-            if (t3 >= s_pose_at) { s_pose_at = t3 + 8.0; s_pose_left = 3; }
-            if (s_pose_left > 0 && box.skel_bones >= 6) {
-                --s_pose_left;
-            }
-        }
-        // A confirmed corpse must disappear immediately. The five-second list
-        // grace protects living players from read gaps, not dead PlayerManagers.
-        if (box.dead) {
-            mark_skip('X');
-            if (g_frame_player_count > 0) --g_frame_player_count;
-            // Метка для подавления дубликатов выше: этот объект — труп, uid он
-            // не удерживает, и свежий объект игрока получает бокс.
-            auto corpse_track = g_player_track.find(s_transforms[i]);
-            if (corpse_track != g_player_track.end()) {
-                corpse_track->second.corpse = true;
-                corpse_track->second.corpse_at = mono_seconds();
-            }
-            continue;
-        }
-        result.push_back(box);
-        auto live_track = g_player_track.find(s_transforms[i]);
-        if (live_track != g_player_track.end()) {
-            live_track->second.corpse = false;
-            live_track->second.corpse_at = 0.0;
-        }
+        boxes.push_back(box);
     }
 
-    append_bot_boxes(result);
-    g_box_frame_transient = false;
-    watch_boxes(result, local_entity_index, &skip_reason, 0);
-
-    return result;
+    if (g_frame_camera_fresh) append_bot_boxes(boxes);
+    g_aim_lead = {};
+    g_aim_velocity = {};
+    return boxes;
 }
+
+bool esp_frame_camera_fresh() { return g_frame_camera_fresh; }
 
 int esp_nearby_player_count() { return g_frame_player_count; }
 int esp_nearby_bot_count() {
@@ -9635,8 +7624,10 @@ int esp_skeleton_diag(char* out, size_t cap, int max_players) {
             say("    кэш скелета: валиден=%d собрано=%d тумблер=%d отказов=%d\n",
                 (int)it->second.valid, it->second.bone_count,
                 it->second.bone_transform[BONE_HIPS] != 0, it->second.fail_streak);
+            const double diag_now = mono_seconds();
             for (int b = 0; b < ESP_BONE_COUNT; ++b)
-                if (it->second.bone_world_age[b] >= 1 && it->second.bone_world_age[b] <= 9)
+                if (espsnapshot::within_age(diag_now, it->second.bone_world_time[b],
+                                            kBoneWorldGraceSeconds))
                     ++world_bones;
         } else {
             say("    кэш скелета: НЕТ (построение не дошло до фиксации)\n");

@@ -5,6 +5,7 @@
 #include "game_internal.h"
 #include "game_offsets_active.h"   // оффсеты (go_active)
 #include "manes_aim_source.h"
+#include "esp_snapshot_policy.h"
 #include "lang.h"
 #include <algorithm>
 #include <cstring>
@@ -28,10 +29,9 @@ using namespace go_active;
 //        -> the Mineable* component  -> entityType tells us what it is
 //     -> the identity's GameObject transform -> world position
 //
-// The class of each behaviour is only inspected once (cached per Il2CppClass),
-// and the whole registry is re-scanned every few seconds rather than per frame;
-// each frame only re-reads the positions, and only for animals, since ore nodes
-// never move.
+// Registry classification is incremental and cached. World positions are sampled
+// on monotonic intervals under a small per-frame budget; projection still uses
+// the current camera each frame.
 
 static bool g_markers_ore_enabled = false;
 static bool g_markers_animal_enabled = false;
@@ -48,9 +48,6 @@ static bool g_markers_cupboard_enabled = false;
 // Аим по ботам: скан и позиции ботов живут, даже когда их маркеры выключены.
 static bool g_bot_aim_enabled = false;
 static float g_marker_max_distance = 150.0F;
-static bool g_marker_frame_transient = false;
-static bool g_marker_scan_unavailable = false;
-bool esp_marker_frame_transient() { return g_marker_frame_transient; }
 
 static bool marker_visuals_enabled() {
     return g_markers_ore_enabled || g_markers_animal_enabled ||
@@ -60,11 +57,10 @@ static bool marker_visuals_enabled() {
            g_markers_backpack_enabled || g_markers_sleeper_enabled ||
            g_markers_house_enabled || g_markers_cupboard_enabled;
 }
-// Когда можно начинать следующий проход скана маркеров, в mono_seconds().
-// Раньше здесь был счётчик кадров (180, при пустом списке 30) из расчёта на
-// 60 fps; устройство пользователя рисует 118 кадров/с, поэтому скан шёл вдвое
-// чаще задуманного — 1.5 с вместо 3 с, а при пустом списке 0.25 с вместо 0.5 с.
+// Scan cadence uses monotonic time so it does not depend on frame rate.
 static double g_marker_next_scan = 0.0;
+static double g_marker_next_layout_probe = 0.0;
+static size_t g_marker_position_cursor = 0;
 static uint64_t g_network_client_class = 0;
 static uint64_t g_network_identity_class = 0;
 
@@ -88,7 +84,11 @@ static uint64_t g_network_identity_class = 0;
 // Узел разбирается целиком (проверка времени только между узлами): оборви мы
 // его на середине, следующий кадр начал бы с того же узла и его уже собранные
 // компоненты попали бы в список второй раз.
-constexpr double kMarkerScanBudgetSec = 0.006;   // 6 мс на порцию при бюджете кадра 16.7 мс
+constexpr double kMarkerScanBudgetSec = 0.003;
+constexpr double kMarkerPositionBudgetSec = 0.002;
+constexpr double kMovingMarkerIntervalSec = 0.05;
+constexpr double kStaticMarkerIntervalSec = 0.50;
+constexpr double kMarkerPositionGraceSec = 0.25;
 // A busy server can have well over 512 relevant components. Stopping at 512
 // made the visible subset depend on Dictionary iteration order: after a resize
 // existing markers could disappear and only return in a later pass. Keep a
@@ -99,12 +99,6 @@ static int32_t g_marker_scan_cursor = -1;    // -1: цикл не начат
 static int32_t g_marker_scan_total  = 0;
 static uint64_t g_marker_scan_identity_class = 0;
 static std::vector<uint8_t> g_marker_scan_buffer;
-// Тайминг цикла рескана. В логе 11:52-11:54 раз в секунду кадр уходил в
-// 70-93 мс, и esp занимал его почти целиком; по этой строке видно, рескан ли
-// это (реестр/порции/мс) или конвейер игроков, — без неё причина рывка
-// неотличима от «устройство подвисло».
-static double s_scan_cycle_at = 0.0;
-static int    s_scan_cycle_chunks = 0;
 // g_marker_scan_pending (список, который собирается сейчас) и marker_scan_abort()
 // объявлены ниже, вместе с MarkerEntity; фильтр категорий меняется раньше по
 // файлу, поэтому здесь только объявление.
@@ -150,22 +144,14 @@ struct MarkerEntity {
     uint64_t id = 0;            // source component pointer, distinct within NetworkIdentity
     botlife::State life{};
     uint64_t transform = 0;     // native Transform of the GameObject
-    Vec3     position{};
-    bool     position_valid = false;
-    // Transform reads can briefly fail while Unity swaps/pools an object. Keep
-    // the last confirmed position for a short, time-based grace period so a
-    // single bad tick cannot make every marker label jump to the ground or
-    // disappear for one frame.
-    double   position_last_ok = 0.0;
-    int      position_fail_frames = 0;
-    int      pos_cooldown = 0;  // frames until the next position re-read (far animals)
-    // Боты: точная кость головы модели (NPCBrainHumanoid.modelInfo.head) и своя
-    // скорость для упреждения. head_transform = 0, если NPCBrainHumanoid или
-    // модель не нашлись — тогда аим считает точку от ног и роста, как раньше.
+    Vec3 position{};
+    bool position_valid = false;
+    double position_sample_time = 0.0;
+    double position_retry_time = 0.0;
+    double position_failure_time = 0.0;
     uint64_t head_transform = 0;
-    Vec3     head_position{};
-    bool     head_valid = false;
-    double   head_last_ok = 0.0;
+    Vec3 head_position{};
+    bool head_valid = false;
     botlead::Track lead{};
     int      kind = ESP_MARKER_ORE;
     // Fixed labels point into static strings; ground pickups build their own
@@ -1175,9 +1161,7 @@ bool marker_world_position(uint64_t transform, Vec3& out) {
 }
 
 static MarkerScanResult rebuild_marker_entities() {
-    const double t_chunk = mono_seconds();
     auto unavailable = []() {
-        g_marker_scan_unavailable = true;
         marker_scan_abort();
         return MarkerScanResult::Unavailable;
     };
@@ -1186,9 +1170,6 @@ static MarkerScanResult rebuild_marker_entities() {
         // завершения сборки, поэтому маркеры не мигают.
         g_marker_scan_pending.clear();
         g_marker_scan_buffer.clear();
-        s_scan_cycle_at = t_chunk;
-        s_scan_cycle_chunks = 0;
-
         uint64_t dictionary = resolve_network_client_spawned();
         if (!dictionary) return unavailable();
         // Needed to read prefab names (wolves / rats); harmless if it fails, the
@@ -1200,7 +1181,6 @@ static MarkerScanResult rebuild_marker_entities() {
         if (!rd_exact(dictionary + DICT_COUNT, count) || count < 0) return unavailable();
         if (count == 0) {
             g_marker_entities.clear();
-            g_marker_scan_unavailable = false;
             marker_scan_abort();
             return MarkerScanResult::Complete;
         }
@@ -1212,7 +1192,6 @@ static MarkerScanResult rebuild_marker_entities() {
         if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, g_marker_scan_buffer.data(),
                     g_marker_scan_buffer.size()))
             return unavailable();
-        g_marker_scan_unavailable = false;
         g_marker_scan_total  = count;
         g_marker_scan_cursor = 0;
     }
@@ -1432,21 +1411,6 @@ static MarkerScanResult rebuild_marker_entities() {
                         entity.head_transform =
                             managed_object_native(rd_ptr(model_info + MODELINFO_HEAD));
                 }
-                for (const MarkerEntity& old : g_marker_entities) {
-                    if (old.id != component || old.identity != identity) continue;
-                    if (old.life.handler == death_handler) entity.life.dead = old.life.dead;
-                    // Голова и скорость переживают рескан: без этого после
-                    // каждого цикла (~1-2 с) упреждение пропадало бы на время
-                    // набора оценки заново.
-                    if (old.head_transform && old.head_transform == entity.head_transform) {
-                        entity.head_position = old.head_position;
-                        entity.head_valid = old.head_valid;
-                        entity.head_last_ok = old.head_last_ok;
-                    }
-                    entity.lead = old.lead;
-                    break;
-                }
-                marker_bot_dead(entity);
             }
             entity.label = look.label;
             if (!look.label) memcpy(entity.text, pickup_text, sizeof(entity.text));
@@ -1458,18 +1422,27 @@ static MarkerScanResult rebuild_marker_entities() {
             entity.transform = native_component_transform(managed_object_native(component));
             if (!entity.transform) // component without its own renderer: use the identity
                 entity.transform = native_component_transform(managed_object_native(identity));
-            Vec3 sampled{};
-            if (marker_world_position(entity.transform, sampled)) {
-                entity.position = sampled;
-                entity.position_valid = true;
-                entity.position_last_ok = mono_seconds();
-                entity.position_fail_frames = 0;
-            } else if (entity.position_valid &&
-                       mono_seconds() - entity.position_last_ok <= 0.35) {
-                ++entity.position_fail_frames;
-            } else {
-                entity.position_valid = false;
+            for (const MarkerEntity& old : g_marker_entities) {
+                if (old.id != component || old.identity != identity) continue;
+                if (entity.kind == ESP_MARKER_BOT && old.life.handler == entity.life.handler)
+                    entity.life.dead = old.life.dead;
+                if (old.transform == entity.transform) {
+                    entity.position = old.position;
+                    entity.position_valid = old.position_valid;
+                    entity.position_sample_time = old.position_sample_time;
+                    entity.position_retry_time = old.position_retry_time;
+                    entity.position_failure_time = old.position_failure_time;
+                    if (entity.kind == ESP_MARKER_BOT) {
+                        entity.lead = old.lead;
+                        if (old.head_transform == entity.head_transform) {
+                            entity.head_position = old.head_position;
+                            entity.head_valid = old.head_valid;
+                        }
+                    }
+                }
+                break;
             }
+            if (entity.kind == ESP_MARKER_BOT) marker_bot_dead(entity);
             if (entity.transform) g_marker_scan_pending.push_back(entity);
             if (g_marker_scan_pending.size() >= kMarkerEntityLimit) break;
         }
@@ -1480,7 +1453,6 @@ static MarkerScanResult rebuild_marker_entities() {
         // Порция израсходована (вышло время), цикл не закончен — продолжим на
         // следующем кадре с этого же узла.
         g_marker_scan_cursor = i;
-        ++s_scan_cycle_chunks;
         return MarkerScanResult::Pending;
     }
     // Конец цикла: словарь пройден либо уперлись в защитный лимит списка.
@@ -1494,8 +1466,8 @@ static MarkerScanResult rebuild_marker_entities() {
                   return a.id < b.id;
               });
     g_marker_entities.swap(g_marker_scan_pending);
+    g_marker_position_cursor = 0;
     marker_scan_abort();
-    ++s_scan_cycle_chunks;
     return MarkerScanResult::Complete;
 }
 
@@ -1508,7 +1480,8 @@ static void schedule_next_marker_scan(MarkerScanResult result, double now) {
 void reset_marker_caches() {
     g_marker_entities.clear();
     g_marker_next_scan = 0.0;
-    g_marker_scan_unavailable = false;
+    g_marker_next_layout_probe = 0.0;
+    g_marker_position_cursor = 0;
     marker_scan_abort();   // незавершённая порция после перезагрузки мира не нужна
     g_marker_class_kind.clear();
     g_network_client_class = 0;
@@ -1520,353 +1493,190 @@ void reset_marker_caches() {
     farm_scan_reset();
 }
 
-// Точка головы бота из модели (NPCBrainHumanoid.modelInfo.head) — та же кость,
-// что у игроков в слоте 0. Позиция принимается только правдоподобная
-// относительно маркера: голова выше корня и рядом с ним. Сбой чтения держит
-// последнюю подтверждённую точку не дольше, чем позицию самого маркера.
-static void marker_track_bot_head(MarkerEntity& entity, double now) {
+// Use the model head transform when it produces a point close to the bot root.
+static void marker_track_bot_head(MarkerEntity& entity) {
+    entity.head_valid = false;
     if (!entity.head_transform || !entity.position_valid) return;
+
     Vec3 head{};
-    const bool ok = marker_world_position(entity.head_transform, head) &&
-                    vec3_is_finite(head) &&
-                    head.y > entity.position.y + 0.4F && head.y < entity.position.y + 2.6F &&
-                    (head.x - entity.position.x) * (head.x - entity.position.x) +
-                    (head.z - entity.position.z) * (head.z - entity.position.z) <
-                        2.5F * 2.5F;
-    if (ok) {
-        entity.head_position = head;
-        entity.head_valid = true;
-        entity.head_last_ok = now;
-    } else if (entity.head_valid && now - entity.head_last_ok > 0.35) {
-        entity.head_valid = false;
-    }
+    if (!marker_world_position(entity.head_transform, head) ||
+        head.y <= entity.position.y + 0.4F || head.y >= entity.position.y + 2.6F)
+        return;
+    const float dx = head.x - entity.position.x;
+    const float dz = head.z - entity.position.z;
+    if (dx * dx + dz * dz >= 2.5F * 2.5F) return;
+
+    entity.head_position = head;
+    entity.head_valid = true;
 }
 
-// Position tracking for markers that move (animals always, bots when drawn
-// or aimed, vehicles — a driven car outruns the rescan in seconds): near
-// ones every frame, far ones a few times a second. Shared by
-// esp_get_markers() and esp_bot_aim_maintain(); when both run in one frame the
-// cooldown simply ticks twice and far bots re-read twice as often — harmless.
-static void marker_track_position(MarkerEntity& entity) {
-    bool want_read = !entity.position_valid;
-    if (entity.kind == ESP_MARKER_ANIMAL || entity.kind == ESP_MARKER_BOT ||
-        entity.kind == ESP_MARKER_VEHICLE) {
-        if (--entity.pos_cooldown <= 0) {
-            want_read = true;
-            float ddx = entity.position.x - g_frame_local_pos.x;
-            float ddz = entity.position.z - g_frame_local_pos.z;
-            float d2 = ddx * ddx + ddz * ddz;
-            entity.pos_cooldown = (!entity.position_valid || d2 < 60.0F * 60.0F) ? 1
-                                : (d2 < 150.0F * 150.0F) ? 6 : 15;
-        }
-    }
-    if (want_read) {
-        Vec3 sampled{};
-        if (marker_world_position(entity.transform, sampled) &&
-            // A pooled Unity transform can briefly report its default/ground
-            // pose while the networked object is being reparented. Do not let
-            // that one sample move a label under the terrain; accept it only
-            // after the normal time filter gets another coherent read.
-            !(entity.position_valid && sampled.y < entity.position.y - 1.25F &&
-              ((sampled.x - entity.position.x) * (sampled.x - entity.position.x) +
-               (sampled.z - entity.position.z) * (sampled.z - entity.position.z)) < 4.0F)) {
-            entity.position = sampled;
-            entity.position_valid = true;
-            entity.position_last_ok = mono_seconds();
-            entity.position_fail_frames = 0;
-            if (entity.kind == ESP_MARKER_BOT) {
-                botlead::update(entity.lead, entity.position, entity.position_last_ok);
-                marker_track_bot_head(entity, entity.position_last_ok);
-            }
-        } else if (entity.position_valid &&
-                   mono_seconds() - entity.position_last_ok <= 0.35) {
-            // Keep the last coherent sample. The object is often between two
-            // Unity transform states for less than a frame during replication.
-            ++entity.position_fail_frames;
-        } else {
-            entity.position_valid = false;
-        }
-    }
+static bool marker_position_moves(const MarkerEntity& entity) {
+    return entity.kind == ESP_MARKER_ANIMAL || entity.kind == ESP_MARKER_BOT ||
+           entity.kind == ESP_MARKER_VEHICLE;
 }
 
-struct MarkerWatchSample {
-    Vec3 world{};
-    float x = 0.0F, y = 0.0F, distance = -1.0F;
-    int kind = -1;
-    bool visible = false;
-    unsigned long long frame = 0;
-};
+static double marker_sample_interval(const MarkerEntity& entity) {
+    return marker_position_moves(entity) ? kMovingMarkerIntervalSec
+                                         : kStaticMarkerIntervalSec;
+}
 
-static std::unordered_map<uint64_t, MarkerWatchSample> s_marker_watch;
-static unsigned long long s_marker_watch_frame = 0;
-static double s_marker_watch_summary_at = -1e9;
-static double s_marker_watch_budget_at = -1e9;
-static int s_marker_watch_budget = 0;
-static int s_marker_watch_frames = 0;
-static int s_marker_watch_min = 1000000;
-static int s_marker_watch_max = 0;
-static int s_marker_watch_losses = 0;
-static int s_marker_watch_returns = 0;
-static int s_marker_watch_jumps = 0;
-static int s_marker_watch_position_invalid = 0;
-static int s_marker_watch_frame_early = 0;
-
-static bool marker_watch_allow() {
-    const double now = mono_seconds();
-    if (now - s_marker_watch_budget_at >= 1.0) {
-        s_marker_watch_budget_at = now;
-        s_marker_watch_budget = 4;
+static bool marker_position_usable(const MarkerEntity& entity, double now) {
+    if (!entity.position_valid) return false;
+    if (entity.position_failure_time > 0.0 &&
+        !espsnapshot::within_age(now, entity.position_failure_time,
+                                kMarkerPositionGraceSec))
+        return false;
+    if (marker_position_moves(entity)) {
+        const double reference_time = entity.position_failure_time > 0.0
+                                    ? entity.position_failure_time
+                                    : entity.position_sample_time;
+        if (!espsnapshot::within_age(now, reference_time, kMarkerPositionGraceSec))
+            return false;
     }
-    if (s_marker_watch_budget <= 0) return false;
-    --s_marker_watch_budget;
     return true;
 }
 
-static uint64_t marker_watch_key(const MarkerEntity& entity) {
-    return entity.id ? entity.id : entity.identity;
-}
-
-
-static void marker_watch_observe(const MarkerEntity& entity, bool visible,
-                                 const char* reason, float distance,
-                                 float screen_x, float screen_y) {
-    const uint64_t key = marker_watch_key(entity);
-    if (!key) return;
-    const char* marker_name = entity.label ? entity.label : entity.text;
-    if (!marker_name) marker_name = "?";
-    auto found = s_marker_watch.find(key);
-    if (found != s_marker_watch.end()) {
-        MarkerWatchSample& old = found->second;
-        if (old.visible != visible) {
-            if (visible) ++s_marker_watch_returns;
-            else ++s_marker_watch_losses;
-            if (marker_watch_allow())
-                ;
-        }
-        if (visible && old.visible && old.frame + 1 == s_marker_watch_frame) {
-            const float wx = entity.position.x - old.world.x;
-            const float wy = entity.position.y - old.world.y;
-            const float wz = entity.position.z - old.world.z;
-            const float world_jump = sqrtf(wx * wx + wy * wy + wz * wz);
-            const float dist_jump = fabsf(distance - old.distance);
-            const float sx = screen_x - old.x, sy = screen_y - old.y;
-            const float screen_jump = sqrtf(sx * sx + sy * sy);
-            const float dist_limit = std::max(10.0F, fabsf(old.distance) * 0.25F);
-            const float world_limit = entity.kind == ESP_MARKER_ORE ? 1.5F : 15.0F;
-            const float screen_limit = std::max(180.0F, std::min(g_frame_sw, g_frame_sh) * 0.18F);
-            if ((std::isfinite(world_jump) && world_jump > world_limit) ||
-                (std::isfinite(dist_jump) && dist_jump > dist_limit) ||
-                (std::isfinite(screen_jump) && screen_jump > screen_limit)) {
-                ++s_marker_watch_jumps;
-                if (marker_watch_allow())
-                    ;
-            }
-        }
-    }
-    MarkerWatchSample& sample = s_marker_watch[key];
-    sample.world = entity.position;
-    sample.x = screen_x; sample.y = screen_y; sample.distance = distance;
-    sample.kind = entity.kind; sample.visible = visible; sample.frame = s_marker_watch_frame;
-        // Ровно «POSITION»: PROJECTION — это провал w2s, а не битая позиция,
-        // и в общий счётчик bad-position он не идёт. Иначе строка диагностики
-        // врала: в логе 16:05 bad-position доходил до 486 за секунду, хотя
-        // событий POSITION не было ни одного — все они были PROJECTION.
-        if (!visible && reason && std::strcmp(reason, "POSITION") == 0)
-            ++s_marker_watch_position_invalid;
-}
-
-static void marker_watch_finish(int visible_count) {
-    ++s_marker_watch_frames;
-    s_marker_watch_min = std::min(s_marker_watch_min, visible_count);
-    s_marker_watch_max = std::max(s_marker_watch_max, visible_count);
-    for (auto& entry : s_marker_watch) {
-        MarkerWatchSample& sample = entry.second;
-        if (sample.visible && sample.frame + 1 < s_marker_watch_frame) {
-            sample.visible = false;
-            ++s_marker_watch_losses;
-            if (marker_watch_allow())
-                ;
-        }
-    }
-    for (auto it = s_marker_watch.begin(); it != s_marker_watch.end();) {
-        if (it->second.frame + 600 < s_marker_watch_frame) it = s_marker_watch.erase(it);
-        else ++it;
-    }
+static bool marker_track_position(MarkerEntity& entity, bool allow_read = true) {
     const double now = mono_seconds();
-    if (now - s_marker_watch_summary_at >= 1.0) {
-        s_marker_watch_summary_at = now;
-        s_marker_watch_frames = 0; s_marker_watch_min = 1000000; s_marker_watch_max = 0;
-        s_marker_watch_losses = s_marker_watch_returns = s_marker_watch_jumps = 0;
-        s_marker_watch_position_invalid = s_marker_watch_frame_early = 0;
+    const double interval = marker_sample_interval(entity);
+    if (now < entity.position_retry_time ||
+        (entity.position_valid &&
+         !espsnapshot::due(now, entity.position_sample_time, interval)))
+        return marker_position_usable(entity, now);
+
+    if (!allow_read) return marker_position_usable(entity, now);
+
+    Vec3 sampled{};
+    if (!marker_world_position(entity.transform, sampled)) {
+        if (entity.position_failure_time <= 0.0) entity.position_failure_time = now;
+        entity.position_retry_time = now + std::min(interval, 0.10);
+        entity.head_valid = false;
+        return marker_position_usable(entity, now);
+    }
+
+    entity.position = sampled;
+    entity.position_valid = true;
+    entity.position_sample_time = now;
+    entity.position_retry_time = now + interval;
+    entity.position_failure_time = 0.0;
+    if (entity.kind == ESP_MARKER_BOT) {
+        botlead::update(entity.lead, sampled, now);
+        marker_track_bot_head(entity);
+    }
+    return true;
+}
+
+static bool marker_visual_enabled(const MarkerEntity& entity) {
+    switch (entity.kind) {
+        case ESP_MARKER_ORE: return g_markers_ore_enabled;
+        case ESP_MARKER_ANIMAL: return g_markers_animal_enabled;
+        case ESP_MARKER_LOOT: return g_markers_loot_enabled;
+        case ESP_MARKER_SCRAP: return g_markers_scrap_enabled;
+        case ESP_MARKER_PICKUP: return g_markers_pickup_enabled;
+        case ESP_MARKER_VEHICLE: return g_markers_vehicle_enabled;
+        case ESP_MARKER_BOT: return g_markers_bot_enabled;
+        case ESP_MARKER_TURRET: return g_markers_turret_enabled;
+        case ESP_MARKER_BACKPACK: return g_markers_backpack_enabled;
+        case ESP_MARKER_SLEEPER: return g_markers_sleeper_enabled;
+        case ESP_MARKER_HOUSE: return g_markers_house_enabled;
+        case ESP_MARKER_CUPBOARD: return g_markers_cupboard_enabled;
+        default: return false;
     }
 }
 
 std::vector<EspMarker> esp_get_markers() {
-    ++s_marker_watch_frame;
-    g_marker_frame_transient = false;
     std::vector<EspMarker> result;
     if (!marker_visuals_enabled() && !g_bot_aim_enabled) {
-        if (!g_marker_entities.empty()) g_marker_entities.clear();
+        g_marker_entities.clear();
         g_marker_next_scan = 0.0;
+        g_marker_position_cursor = 0;
         marker_scan_abort();
-        g_marker_scan_unavailable = false;
-        s_marker_watch.clear();
         return result;
     }
-    if (g_pid <= 0 || !g_il2cpp_base) {
-        g_marker_frame_transient = true;
-        ++s_marker_watch_frame_early;
-        marker_watch_finish(0);
+    if (g_pid <= 0 || !g_il2cpp_base || !g_frame_vp_valid || !g_frame_local_valid)
         return result;
-    }
-    // The box pipeline publishes the frame while players are visible; when it
-    // bailed out for ANY reason (empty player list, failed position read,
-    // world reload), build a camera-only frame right here. Markers must never
-    // depend on other players being around.
-    if (!g_frame_vp_valid || !g_frame_local_valid) {
-        if (!publish_camera_only_frame(g_last_overlay_sw, g_last_overlay_sh)) {
-            g_marker_frame_transient = true;
-            ++s_marker_watch_frame_early;
-            marker_watch_finish(0);
-            return result;
+
+    const double scan_now = mono_seconds();
+    if (scan_now >= g_marker_next_scan)
+        schedule_next_marker_scan(rebuild_marker_entities(), scan_now);
+
+    if (!g_skeleton_layout_valid && !g_marker_entities.empty() &&
+        (scan_now >= g_marker_next_layout_probe || layout_scan_in_progress())) {
+        bool any_position = false;
+        std::vector<uint64_t> seeds;
+        seeds.reserve(8);
+        for (const MarkerEntity& entity : g_marker_entities) {
+            if (entity.transform && seeds.size() < 8) seeds.push_back(entity.transform);
+            Vec3 sample{};
+            if (entity.transform && marker_world_position(entity.transform, sample)) {
+                any_position = true;
+                break;
+            }
+        }
+        if (!any_position && !seeds.empty()) {
+            size_t position_count = 0;
+            size_t candidate_count = 0;
+            const bool learned = discover_layout_from_native_transforms(
+                seeds, position_count, candidate_count);
+            g_marker_next_layout_probe = scan_now + (learned ? 30.0 : 1.0);
+            if (!learned && layout_scan_in_progress()) g_marker_next_layout_probe = scan_now;
         }
     }
 
-    {
-        const double now = mono_seconds();
-        if (now >= g_marker_next_scan)
-            schedule_next_marker_scan(rebuild_marker_entities(), now);
-    }
-    if (g_marker_scan_unavailable) {
-        g_marker_frame_transient = true;
-        ++s_marker_watch_frame_early;
-        marker_watch_finish(0);
-        return result;
-    }
-
-    // No usable layout (fresh join / respawn, nobody around): learn it from
-    // the ENTITY transforms themselves. The layout discovery only needs a
-    // couple of native transforms scattered across the map — ore nodes are
-    // exactly that. This is what makes markers self-sufficient: previously
-    // the layout could only be learned from other players' skeletons, and
-    // solo after a world reload every position read failed (POS_INVALID).
-    {
-        static int s_solo_learn_cooldown = 0;
-        bool positions_dead = false;
-        if (!g_marker_entities.empty()) {
-            size_t checked = 0, dead = 0;
-            for (MarkerEntity& probe : g_marker_entities) {
-                if (++checked > 6) break;
-                Vec3 test{};
-                if (!marker_world_position(probe.transform, test)) ++dead;
+    const size_t entity_count = g_marker_entities.size();
+    if (entity_count != 0) {
+        const size_t start = g_marker_position_cursor % entity_count;
+        g_marker_position_cursor = start;
+        const double budget_start = mono_seconds();
+        for (size_t step = 0; step < entity_count; ++step) {
+            const size_t index = (start + step) % entity_count;
+            if (mono_seconds() - budget_start >= kMarkerPositionBudgetSec) {
+                g_marker_position_cursor = index;
+                break;
             }
-            positions_dead = checked > 0 && dead >= checked - (checked > 4 ? 1 : 0);
-        }
-        if (positions_dead && --s_solo_learn_cooldown <= 0) {
-            s_solo_learn_cooldown = 60; // ~1 s between attempts
-            std::vector<uint64_t> seeds;
-            for (const MarkerEntity& e : g_marker_entities) {
-                if (e.transform) seeds.push_back(e.transform);
-                if (seeds.size() >= 8) break;
+            MarkerEntity& entity = g_marker_entities[index];
+            if (marker_visual_enabled(entity) ||
+                (entity.kind == ESP_MARKER_BOT && g_bot_aim_enabled)) {
+                if (!marker_bot_dead(entity)) marker_track_position(entity);
             }
-            size_t pos_count = 0, cand_count = 0;
-            const bool learned = discover_layout_from_native_transforms(seeds, pos_count, cand_count);
-            // Перебор раскладок разбит на кадры (иначе он съедал по 100-200 мс
-            // одним куском). Пока он идёт, продолжаем его на КАЖДОМ кадре,
-            // иначе полный проход растянулся бы на секунды ожидания.
-            if (!learned && layout_scan_in_progress()) s_solo_learn_cooldown = 1;
-            if (learned) {
-                // Re-read every cached position with the fresh layout.
-                for (MarkerEntity& e : g_marker_entities) {
-                    Vec3 sampled{};
-                    if (marker_world_position(e.transform, sampled)) {
-                        e.position = sampled;
-                        e.position_valid = true;
-                        e.position_last_ok = mono_seconds();
-                        e.position_fail_frames = 0;
-                    } else if (e.position_valid &&
-                               mono_seconds() - e.position_last_ok > 0.35) {
-                        e.position_valid = false;
-                    }
-                }
-            }
+            g_marker_position_cursor = (index + 1) % entity_count;
         }
     }
 
+    const double position_now = mono_seconds();
     const float max_distance = g_marker_max_distance;
+    const float screen_margin = std::max(g_frame_sw, g_frame_sh) * 0.25F;
     for (MarkerEntity& entity : g_marker_entities) {
-        if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
-        if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
-        if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
-        if (entity.kind == ESP_MARKER_SCRAP && !g_markers_scrap_enabled) continue;
-        if (entity.kind == ESP_MARKER_PICKUP && !g_markers_pickup_enabled) continue;
-        if (entity.kind == ESP_MARKER_VEHICLE && !g_markers_vehicle_enabled) continue;
-        if (entity.kind == ESP_MARKER_BOT && !g_markers_bot_enabled) continue;
-        if (entity.kind == ESP_MARKER_TURRET && !g_markers_turret_enabled) continue;
-        if (entity.kind == ESP_MARKER_BACKPACK && !g_markers_backpack_enabled) continue;
-        if (entity.kind == ESP_MARKER_SLEEPER && !g_markers_sleeper_enabled) continue;
-        if (entity.kind == ESP_MARKER_HOUSE && !g_markers_house_enabled) continue;
-        if (entity.kind == ESP_MARKER_CUPBOARD && !g_markers_cupboard_enabled) continue;
-        if (marker_bot_dead(entity)) continue;
-        // Ore nodes never move, so their position is only read on a rescan.
-        // Animals and bots DO move — throttled re-reads, see marker_track_position.
-        marker_track_position(entity);
-        if (!entity.position_valid) {
-            g_marker_frame_transient = true;
-            marker_watch_observe(entity, false, "POSITION", -1.0F, 0.0F, 0.0F);
+        if (!marker_visual_enabled(entity) || marker_bot_dead(entity) ||
+            !marker_position_usable(entity, position_now))
             continue;
-        }
 
-        float dx = entity.position.x - g_frame_local_pos.x;
-        float dy = entity.position.y - g_frame_local_pos.y;
-        float dz = entity.position.z - g_frame_local_pos.z;
-        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (!std::isfinite(distance) || distance > max_distance) {
-            marker_watch_observe(entity, false, "DISTANCE", distance, 0.0F, 0.0F);
-            continue;
-        }
+        const float dx = entity.position.x - g_frame_local_pos.x;
+        const float dy = entity.position.y - g_frame_local_pos.y;
+        const float dz = entity.position.z - g_frame_local_pos.z;
+        const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (!std::isfinite(distance) || distance > max_distance) continue;
 
-        Vec2 screen{};
         Vec3 anchor = entity.position;
-        // above the model: animals are tall, crates sit low on the ground
-        // Пилюля бота висит на высоте шеи — в той точке, куда целится аим.
         anchor.y += (entity.kind == ESP_MARKER_ANIMAL)  ? 1.2F
                   : (entity.kind == ESP_MARKER_LOOT)    ? 0.6F
                   : (entity.kind == ESP_MARKER_SCRAP)   ? 0.6F
                   : (entity.kind == ESP_MARKER_PICKUP)  ? 0.4F
                   : (entity.kind == ESP_MARKER_BOT)     ? 1.4F
                   : (entity.kind == ESP_MARKER_VEHICLE) ? 1.2F
-                  : (entity.kind == ESP_MARKER_TURRET)   ? 1.3F
-                  : (entity.kind == ESP_MARKER_SLEEPER)  ? 0.8F
-                  : (entity.kind == ESP_MARKER_BACKPACK) ? 0.5F
-                  : (entity.kind == ESP_MARKER_CUPBOARD) ? 1.0F
-                  : (entity.kind == ESP_MARKER_HOUSE)    ? 0.6F : 0.9F;
+                  : (entity.kind == ESP_MARKER_TURRET)  ? 1.3F
+                  : (entity.kind == ESP_MARKER_SLEEPER) ? 0.8F
+                  : (entity.kind == ESP_MARKER_BACKPACK)? 0.5F
+                  : (entity.kind == ESP_MARKER_CUPBOARD)? 1.0F
+                  : (entity.kind == ESP_MARKER_HOUSE)   ? 0.6F : 0.9F;
+        Vec2 screen{};
         if (!w2s(g_frame_vp, anchor, g_frame_sw, g_frame_sh, screen, false) ||
-            !std::isfinite(screen.x) || !std::isfinite(screen.y)) {
-            marker_watch_observe(entity, false, "PROJECTION", distance, screen.x, screen.y);
+            !std::isfinite(screen.x) || !std::isfinite(screen.y) ||
+            screen.x < -screen_margin || screen.x > g_frame_sw + screen_margin ||
+            screen.y < -screen_margin || screen.y > g_frame_sh + screen_margin)
             continue;
-        }
-        // Край экрана держим так же щедро, как боксы (25% большей стороны), и с
-        // гистерезисом: метка, видимая в прошлом кадре, гаснет только когда
-        // уходит ещё на 25% малой стороны дальше. Зона ±64 px мигала — в логе
-        // 11:53:17 бот на одной и той же мировой точке трижды за 0.3 с уходил в
-        // OFFSCREEN и возвращался: камера за кадр сдвигала проекцию на пару
-        // пикселей, а метка сидела точно на границе. Прореживание (22 px) и
-        // лимит 64 метки ниже ограничивают цену широкой зоны.
-        const float edge_enter = std::max(g_frame_sw, g_frame_sh) * 0.25F;
-        const float edge_hold  = edge_enter + std::min(g_frame_sw, g_frame_sh) * 0.25F;
-        auto watch_prev = s_marker_watch.find(marker_watch_key(entity));
-        const bool was_visible = watch_prev != s_marker_watch.end() && watch_prev->second.visible;
-        const float edge = was_visible ? edge_hold : edge_enter;
-        if (screen.x < -edge || screen.x > g_frame_sw + edge ||
-            screen.y < -edge || screen.y > g_frame_sh + edge) {
-            marker_watch_observe(entity, false, "OFFSCREEN", distance, screen.x, screen.y);
-            continue;
-        }
 
-
-        marker_watch_observe(entity, true, "VISIBLE", distance, screen.x, screen.y);
-        EspMarker marker;
+        EspMarker marker{};
         marker.id = entity.id;
         marker.x = screen.x;
         marker.y = screen.y;
@@ -1877,44 +1687,33 @@ std::vector<EspMarker> esp_get_markers() {
         marker.color_rgb[0] = entity.color_rgb[0];
         marker.color_rgb[1] = entity.color_rgb[1];
         marker.color_rgb[2] = entity.color_rgb[2];
-        // Подпись маркера — на текущем языке (в русском это она и есть,
-        // в английском — перевод по таблице имён; неизвестное остаётся как
-        // есть, поэтому подпись никогда не пропадает).
         snprintf(marker.name, sizeof(marker.name), "%s",
                  lang::visual(entity.label ? entity.label : entity.text));
         result.push_back(marker);
     }
 
-    // Порядок стабильный: ничьи (перечитываемый шум зверей/ботов или два узла
-    // на одной глубине) держат порядок сканирования реестра, а не тасуются
-    // каждый кадр — иначе прореживание ниже прыгало бы между соседними пилюлями.
     std::stable_sort(result.begin(), result.end(), [](const EspMarker& a, const EspMarker& b) {
         return floorf(a.distance * 2.0F) < floorf(b.distance * 2.0F);
     });
 
-    // Rock clusters put several nodes within a couple of metres, which would
-    // stack their pills on top of each other: keep the nearest one of each
-    // label per screen neighbourhood. 22 px, а не 30: два соседних объекта в
-    // полутора метрах друг от друга на дистанции 50 м дают ~28 px на экране —
-    // у каждого должна быть своя метка, иначе одна прыгает между ними, пока
-    // игрок стрейфится. Узлы кластера ближе ~1 м друг к другу на дальности остаются склеены.
     std::vector<EspMarker> thinned;
     thinned.reserve(result.size());
     for (const EspMarker& marker : result) {
         bool covered = false;
         for (const EspMarker& kept : thinned) {
             if (kept.kind != marker.kind) continue;
-            // Pickup labels carry a stack size, so two piles of berries never
-            // compare equal — for that category position alone decides.
             if (marker.kind != ESP_MARKER_PICKUP && strcmp(kept.name, marker.name) != 0) continue;
-            float dx = kept.x - marker.x, dy = kept.y - marker.y;
-            if (dx * dx + dy * dy < 22.0F * 22.0F) { covered = true; break; }
+            const float dx = kept.x - marker.x;
+            const float dy = kept.y - marker.y;
+            if (dx * dx + dy * dy < 22.0F * 22.0F) {
+                covered = true;
+                break;
+            }
         }
         if (covered) continue;
         thinned.push_back(marker);
-        if (thinned.size() >= 64) break; // keep the screen readable
+        if (thinned.size() >= 64) break;
     }
-    marker_watch_finish((int)thinned.size());
     return thinned;
 }
 
@@ -1940,7 +1739,8 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
     if (!g_bot_aim_enabled) return out;
     const double now = mono_seconds();
     for (MarkerEntity& entity : g_marker_entities) {
-        if (entity.kind != ESP_MARKER_BOT || marker_bot_dead(entity) || !entity.position_valid) continue;
+        if (entity.kind != ESP_MARKER_BOT || marker_bot_dead(entity) ||
+            !marker_position_usable(entity, now)) continue;
         float dx = entity.position.x - g_frame_local_pos.x;
         float dy = entity.position.y - g_frame_local_pos.y;
         float dz = entity.position.z - g_frame_local_pos.z;
@@ -1949,8 +1749,8 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
         BotAimEnt bot;
         bot.id = entity.identity;
         bot.x = entity.position.x; bot.y = entity.position.y; bot.z = entity.position.z;
-        const double age = now - entity.position_last_ok;
-        bot.pos_age = (age > 0.0 && std::isfinite(age)) ? (float)age : 0.0F;
+        const double age = now - entity.position_sample_time;
+        bot.pos_age = (age > 0.0 && std::isfinite(age)) ? static_cast<float>(age) : 0.0F;
         bot.head_valid = entity.head_valid;
         if (bot.head_valid) {
             bot.hx = entity.head_position.x;
