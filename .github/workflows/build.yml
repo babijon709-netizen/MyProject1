@@ -11,7 +11,7 @@ on:
 
   workflow_dispatch:
 
-# write — шаг «Release binary» кладёт бинарник в релиз nightly.
+# Release assets avoid the repository's exhausted Actions artifact quota.
 permissions:
   contents: write
 
@@ -55,29 +55,31 @@ jobs:
         shell: bash
         run: |
           "${ANDROID_NDK_HOME}/ndk-build" \
+            -j"$(nproc)" \
             NDK_PROJECT_PATH="${GITHUB_WORKSPACE}" \
             APP_BUILD_SCRIPT="${GITHUB_WORKSPACE}/jni/Android.mk" \
             NDK_APPLICATION_MK="${GITHUB_WORKSPACE}/jni/Application.mk" \
             V=1
 
-          test -f "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen"
-
-          mkdir -p dist
-          cp "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen" dist/benzware.sh
-          cp "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen" dist/xvcen-arm64-v8a
-          chmod 755 dist/benzware.sh dist/xvcen-arm64-v8a
+      - name: Package benzware.sh
+        id: package
+        shell: bash
+        run: |
+          test -s "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen"
+          install -Dm755 "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen" dist/benzware.sh
+          install -m755 dist/benzware.sh dist/xvcen-arm64-v8a
 
           file dist/benzware.sh
-          sha256sum dist/benzware.sh dist/xvcen-arm64-v8a
+          (
+            cd dist || exit 1
+            sha256sum benzware.sh xvcen-arm64-v8a > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
 
       - name: Release binary
         id: release
-        if: always() && hashFiles('dist/benzware.sh') != ''
-        # Бинарник уходит в релиз, а не в артефакт Actions: ассет релиза лежит
-        # в хранилище репозитория, которое не зависит от квоты артефактов (она
-        # забита и пересчитывается 6-12 ч, отсюда «Failed to CreateArtifact»).
-        # Тег один и тот же, файлы перезаписываются --clobber.
-        continue-on-error: true
+        if: github.event_name != 'pull_request'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -85,20 +87,39 @@ jobs:
             gh release create nightly \
               --target "${GITHUB_SHA}" \
               --title "nightly (${GITHUB_REF_NAME})" \
-              --notes "Автосборка ветки ${GITHUB_REF_NAME}, коммит ${GITHUB_SHA}" \
+              --notes "Android arm64-v8a build from ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}" \
               --prerelease
-          gh release upload nightly dist/benzware.sh dist/xvcen-arm64-v8a --clobber
-          echo "url=https://github.com/${GITHUB_REPOSITORY}/releases/tag/nightly" >> "$GITHUB_OUTPUT"
-          echo "file=https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/benzware.sh" >> "$GITHUB_OUTPUT"
+          gh release upload nightly dist/benzware.sh dist/xvcen-arm64-v8a dist/SHA256SUMS --clobber
+          gh release edit nightly \
+            --title "nightly (${GITHUB_REF_NAME})" \
+            --notes "Android arm64-v8a build from ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}. Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          echo "url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/nightly" >> "$GITHUB_OUTPUT"
+          echo "file=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/nightly/benzware.sh" >> "$GITHUB_OUTPUT"
 
-      - name: Итог сборки
-        if: always() && hashFiles('dist/benzware.sh') != ''
+      - name: Build summary
+        if: always() && steps.package.outcome == 'success'
+        shell: bash
+        env:
+          RELEASE_OUTCOME: ${{ steps.release.outcome }}
+          RELEASE_URL: ${{ steps.release.outputs.url }}
+          RELEASE_FILE: ${{ steps.release.outputs.file }}
         run: |
-          if [ "${{ steps.release.outcome }}" = "success" ]; then
-            echo "релиз  : ${{ steps.release.outputs.url }}"
-            echo "скачать: ${{ steps.release.outputs.file }}"
-          else
-            echo "::error::релиз nightly не залился — смотри лог шага выше"
-          fi
-          sha256sum dist/benzware.sh dist/xvcen-arm64-v8a
+          {
+            echo "### Android arm64-v8a"
+            echo
+            printf "Commit: \`%s\`\n\n" "${GITHUB_SHA}"
+            if [ "${RELEASE_OUTCOME}" = "success" ]; then
+              printf '[Download benzware.sh](%s)\n\n' "${RELEASE_FILE}"
+              printf '[Nightly release](%s)\n\n' "${RELEASE_URL}"
+            elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+              echo "Pull request build only; release publication is skipped."
+            else
+              echo "Release publication failed; see the Release binary step."
+            fi
+            echo
+            echo '```text'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat dist/SHA256SUMS
           file dist/benzware.sh
