@@ -1,0 +1,714 @@
+CROSS-VERSION TOP: RELEASE 11949 -> BETA 11957
+
+полный список кандидатов для расширения чита.
+
+исходные материалы:
+- release: dump11949.7z
+- beta: dumpbeta11957.7z
+- проверены dump.cs, il2cpp.h, script.json и оба libil2cpp.so
+- репозиторий /home/user/MyProject1 не изменялся
+
+важно:
+- RVA ниже — runtime virtual address из script.json/dump.cs.
+- RVA не равен file Offset из комментария dump.cs.
+- beta dump.cs не сохраняет [Command], [TargetRpc] и [ClientRpc].
+- beta network-методы сопоставлены по declaring class, сигнатуре, нормализованному AArch64 fingerprint и Mirror reader/writer helpers.
+
+ОБОЗНАЧЕНИЯ
+
+F1 — имя поля и object offset полностью совпадают в release и beta.
+F2 — поле находится в производном классе со сдвинутым layout; offset beta нужно брать отдельно.
+R1 — уникальное native-сопоставление: один beta RVA после фильтрации по классу, сигнатуре и AArch64 fingerprint.
+R2 — точное правило re-identification: declaring class + canonical signature + native fingerprint; при коллизии дополнительно использовать Mirror reader/writer и обращения к полям.
+R3 — generated Mirror wrapper; сопоставлять по serialized reader sequence, арности и implementation call target.
+
+client/server:
+- h — локальный якорь или локальный эффект подтверждён.
+- m — локальная часть ясна, но остаётся проверка серверной валидации.
+- l — серверная фиксация маловероятна без дополнительного server-side условия.
+- n/a — только чтение, визуал или локальная функция.
+
+1. rage и weapon control
+
+001. указатель hitscan-конфига
+     anchor: FPHitscan.config +0x130 -> +0x130 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: запись в asset/config; сервер может использовать собственную копию.
+
+002. изменение урона hitscan
+     anchor: HitscanWeaponConfig.damage +0x18 -> +0x18 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: итоговый урон всё равно зависит от server-side hit result.
+
+003. увеличение максимальной дальности оружия
+     anchor: HitscanWeaponConfig.MaxDistance +0x2C -> +0x2C [F1]
+     client/server: h/m; сложность: низкая
+     caveat: локальный trace и server-side projectile validation могут различаться.
+
+004. bullet speed и travel time
+     anchor: HitscanWeaponConfig.BulletSpeed +0x30 -> +0x30 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: полезно для prediction; это не гарантированный server-side damage bypass.
+
+005. fire rate
+     anchor: HitscanWeaponConfig.fireRate +0x34 -> +0x34 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: меняет локальный cadence.
+
+006. количество projectiles за выстрел
+     anchor: HitscanWeaponConfig.projectilesPerShot +0x38 -> +0x38 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: локальный spread и серверное число shot-проектилей могут отличаться.
+
+007. no-spread / dispersion
+     anchor: HitscanWeaponConfig.BaseDispersion +0x3C -> +0x3C; FPHitscan backing field +0x294 -> +0x294 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: +0x294 нужно подтвердить через property, которая читает Vector2.
+
+008. no-recoil
+     anchor: HitscanWeaponConfig.recoilConfig +0x70 -> +0x70; FPHitscan WeaponRecoil +0x200 -> +0x200 [F1]
+     client/server: h/m; сложность: средняя
+     caveat: recoil разделён на config и runtime state.
+
+009. подавление misfire
+     anchor: HitscanWeaponConfig.misfireChance +0x54 -> +0x54; falloff +0x58 -> +0x58 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: локальная надёжность оружия.
+
+010. ускорение reload
+     anchor: FPWeaponBase.reloadPeriod +0x104 -> +0x104; reloadOffset +0x108 -> +0x108; reloadSkip +0x10C -> +0x10C [F1]
+     client/server: h/l; сложность: низкая
+     caveat: общий anchor для fast-reload.
+
+011. burst length и burst pause
+     anchor: FPHitscan.m_BurstLength +0x144 -> +0x144; m_BurstDuration +0x148 -> +0x148; m_BurstPause +0x14C -> +0x14C [F1]
+     client/server: h/l; сложность: низкая
+     caveat: зависит от fire mode.
+
+012. снятие aim gate
+     anchor: FPHitscan.m_MinAimValueToFire +0x13C -> +0x13C [F1]
+     client/server: h/l; сложность: низкая
+     caveat: у лука отдельный aim gate.
+
+013. снятие aim-assist ограничения
+     anchor: FPWeaponBase.useAimAssist +0xF8 -> +0xF8; canAim +0xF9 -> +0xF9 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: меняет локальное состояние weapon.
+
+014. sprint во время reload
+     anchor: FPWeaponBase.canSprintWhileReloading +0xFA -> +0xFA [F1]
+     client/server: h/l; сложность: низкая
+     caveat: movement authority всё ещё может отклонить состояние.
+
+015. увеличение melee reach
+     anchor: FPMelee.m_MaxReach +0x128 -> +0x130 [F2]
+     client/server: h/l; сложность: низкая
+     caveat: beta добавила hitsPerAttack и сдвинула производные поля на +8.
+
+016. увеличение melee hit radius
+     anchor: FPMelee.hitRadius +0x12C -> +0x134 [F2]
+     client/server: h/l; сложность: низкая
+     caveat: использовать beta field block, а не release offset.
+
+017. melee damage per hit
+     anchor: FPMelee.m_DamagePerHit +0x138 -> +0x140 [F2]
+     client/server: h/l; сложность: низкая
+     caveat: server-side hit/damage checks остаются отдельными.
+
+018. melee impact force
+     anchor: FPMelee.m_ImpactForce +0x13C -> +0x144 [F2]
+     client/server: h/l; сложность: низкая
+     caveat: итоговая physics зависит от authority.
+
+019. always-critical tool hits
+     anchor: FPTool.alwaysCrit +0x168 -> +0x170 [F2]
+     client/server: h/l; сложность: средняя
+     caveat: FPTool наследует сдвинутый beta FPMelee layout.
+
+020. обход расхода tool ammo
+     anchor: FPTool.useAmmo +0x169 -> +0x171; attacksPerAmmo +0x16C -> +0x174 [F2]
+     client/server: h/l; сложность: низкая
+     caveat: consumption может выполняться на сервере.
+
+021. bow range
+     anchor: FPBow.m_MaxDistance +0x128 -> +0x128 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: блок полей лука стабилен.
+
+022. bow aim power и aim speed
+     anchor: FPBow.aimPower +0x148 -> +0x148; aimSpeed +0x144 -> +0x144 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: использовать вместе с aim-gate.
+
+023. bow shot interval
+     anchor: FPBow.m_MinTimeBetweenShots +0x138 -> +0x138 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: локальное расписание выстрелов.
+
+024. spear throw range и delay
+     anchor: FPSpear.m_MaxDistance +0x164 -> +0x16C; m_SpawnDelay +0x18C -> +0x194 [F2]
+     client/server: h/m; сложность: низкая
+     caveat: beta spear fields сдвинуты из-за изменённого melee base.
+
+025. rocket launcher range и shot interval
+     anchor: FPRocketLauncher.m_MaxDistance +0x130 -> +0x130; m_MinTimeBetweenShots +0x140 -> +0x140 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: projectile validation отдельная.
+
+026. weapon FOV и world zoom
+     anchor: FPObject.normalFOV +0x80 -> +0x80; aimFOV +0x84 -> +0x84; aimWorldZoom +0x88 -> +0x88 [F1]
+     client/server: h/n/a; сложность: низкая
+     caveat: визуальная локальная функция.
+
+027. instant draw / holster
+     anchor: FPObject.drawPeriod +0xA0 -> +0xA0; holsterPeriod +0xA4 -> +0xA4 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: animation state может дополнительно блокировать action.
+
+028. уменьшение camera shake
+     anchor: FPCameraController.m_DamageShake +0x60 -> +0x60; m_LandShake +0x68 -> +0x68 [F1]
+     client/server: h/n/a; сложность: средняя
+     caveat: заменить или подавить локальные shake-компоненты.
+
+029. подавление first-person bob
+     anchor: FPMotion.m_WalkBob +0x50 -> +0x50; m_AimBob +0x58 -> +0x58; m_RunBob +0x60 -> +0x60 [F1]
+     client/server: h/n/a; сложность: низкая
+     caveat: только визуальная часть.
+
+030. fast-reload
+     anchor: FPWeaponBase +0x104/+0x108/+0x10C; FPObject.drawPeriod +0xA0; offsets одинаковы в beta [F1]
+     client/server: h/l; сложность: средняя
+     caveat: existing but incomplete; расширять weapon-specific reload state, а не один глобальный pointer.
+
+2. movement, vitals, anti-cheat state и общие client-функции
+
+031. movement speed modifier
+     anchor: KCC.speedModifier +0x28C -> +0x28C [F1]
+     client/server: h/l; сложность: низкая
+     caveat: authority reconciliation может вернуть значение.
+
+032. noclip toggle
+     anchor: KCC.noclip +0x29C -> +0x29C [F1]
+     client/server: h/l; сложность: низкая
+     caveat: collision и server movement работают отдельно.
+
+033. visibility state
+     anchor: KCC.visibility +0x298 -> +0x298 [F1]
+     client/server: h/n/a; сложность: низкая
+     caveat: полезно для локального visibility/debug и фильтра entity state.
+
+034. run / jump / crouch flags
+     anchor: KCC.m_EnableRunning +0x9C; m_EnableJumping +0x9D; m_EnableCrouching +0x9E -> те же offsets [F1]
+     client/server: h/l; сложность: низкая
+     caveat: input и серверная movement-проверка независимы.
+
+035. slope и movement correction tuning
+     anchor: KCC.maxSlope +0xB4; applySpeed +0xB8; decaySpeed +0xBC -> те же offsets [F1]
+     client/server: h/l; сложность: низкая
+     caveat: в основном movement feel.
+
+036. reconciliation thresholds
+     anchor: KCC.minorCorrectionThreshold +0xCC; reconciliationThreshold +0xD0 -> те же offsets [F1]
+     client/server: h/l; сложность: средняя
+     caveat: tuning candidate, не гарантированный bypass.
+
+037. violation level
+     anchor: PlayerManager.violationLevel +0x1DC -> +0x1DC [F1]
+     client/server: h/l; сложность: низкая
+     caveat: локальное значение не является серверной записью.
+
+038. speedhack counters
+     anchor: PlayerManager.speedhackPauseTime +0x1E0; speedhackDistance +0x1E4 -> те же offsets [F1]
+     client/server: h/l; сложность: низкая
+     caveat: server-side accounting независим.
+
+039. flyhack counters
+     anchor: PlayerManager.flyhackPauseTime +0x210; flyhackDistanceVertical +0x214; flyhackInAirSeconds +0x218; flyhackDistanceHorizontal +0x21C -> те же offsets [F1]
+     client/server: h/l; сложность: низкая
+     caveat: отделять чтение от обычного movement-кода.
+
+040. last-position state
+     anchor: PlayerManager.lastTickPosition +0x1E8; lastSavedPosition +0x1F4; lastDeathPosition +0x200 -> те же offsets [F1]
+     client/server: h/m; сложность: низкая
+     caveat: полезно для teleport/position diagnostics.
+
+041. local max health
+     anchor: GenericVitals.m_MaxHealth +0x88 -> +0x88 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: health authority обычно server-side.
+
+042. PvE damage flag
+     anchor: GenericVitals.m_PveDamage +0x98 -> +0x98 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: меняет локальный damage filtering, если сервер не читает поле.
+
+043. temperature control
+     anchor: PlayerVitals.m_Temperature +0x144 -> +0x144 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: локальное vitals value.
+
+044. radiation level
+     anchor: PlayerVitals.m_RadiationLevel +0x148 -> +0x148 [F1]
+     client/server: h/l; сложность: низкая
+     caveat: локальное vitals value.
+
+045. radiation poison
+     anchor: PlayerVitals.m_RadiationPoison +0x14C -> +0x14C [F1]
+     client/server: h/l; сложность: низкая
+     caveat: локальное vitals value.
+
+046. health regeneration и depletion tuning
+     anchor: PlayerVitals.m_HealthRegeneration +0x118; m_ThirstDepletion +0x128; m_HungerDepletion +0x130; m_OxygenDepletion +0x138 -> те же offsets [F1]
+     client/server: h/l; сложность: средняя
+     caveat: вложенные config objects требуют собственных field anchors.
+
+047. death/ragdoll state
+     anchor: PlayerDeathHandler.death +0xF0; m_EnableRagdoll +0xD8; m_Ragdoll +0xE0 -> те же offsets [F1]
+     client/server: h/l; сложность: низкая
+     caveat: visual state и server life state различаются.
+
+048. sleep movement parameters
+     anchor: PlayerSleepHandler.m_SleepSpeed +0x90; m_SleepFinishPause +0x94; m_GetUpHour +0x98 -> те же offsets [F1]
+     client/server: h/l; сложность: низкая
+     caveat: transition контролирует state machine.
+
+049. input suppression и sprint state
+     anchor: PlayerInputHandler booleans +0x68/+0x69; nullable input +0x6C/+0x78; sprint mode +0xA8 -> те же offsets [F1]
+     client/server: h/n/a; сложность: средняя
+     caveat: beta переименовала поля, offsets остались.
+
+050. local player/entity roots
+     anchor: PlayerManager.worldCameraRoot +0x68; characterModel +0x150; nicklabel +0x130 -> те же offsets [F1]
+     client/server: h/n/a; сложность: низкая
+     caveat: общий ESP/name/visibility anchor.
+
+051. hitbox root
+     anchor: KCC.hitBoxRecorderRoot +0x70; KCC.head +0x88 -> те же offsets [F1]
+     client/server: h/n/a; сложность: низкая
+     caveat: полезно для target selection и ESP.
+
+3. inventory, interaction и network candidates
+
+052. inventory container action
+     anchor: PlayerInventoryServer.QCI(ContainerKind,int,int,int), release RVA 0x69181D0 -> beta RVA 0x699E4D4 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: semantic label основан на сигнатуре; IL нужно проверить перед окончательным именованием.
+
+053. inventory single-int action
+     anchor: PlayerInventoryServer.QCv(int), 0x69182E0 -> 0x69A9534 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: release command подтверждён.
+
+054. inventory container/slot action A
+     anchor: PlayerInventoryServer.QCZ(ContainerKind,int), 0x69183AC -> R2
+     client/server: h/m; сложность: средняя
+     caveat: в beta несколько методов с такой формой; использовать implementation call target и Mirror reader.
+
+055. inventory container/slot action B
+     anchor: PlayerInventoryServer.QgV(ContainerKind,int), 0x6919F50 -> R2
+     client/server: h/m; сложность: средняя
+     caveat: не выбирать первый beta method с такой сигнатурой.
+
+056. inventory item-index action
+     anchor: PlayerInventoryServer.QCp(ContainerKind,int), 0x6920238 -> R2
+     client/server: h/m; сложность: средняя
+     caveat: та же signature collision.
+
+057. inventory two-int action
+     anchor: PlayerInventoryServer.QgR(int,int), 0x6921074 -> R2
+     client/server: h/m; сложность: средняя
+     caveat: использовать обращения к полям и соседний generated reader.
+
+058. inventory transfer/swap candidate
+     anchor: PlayerInventoryServer.QCm(ContainerKind,int,ContainerKind,int,int,int), 0x6924D5C -> 0x69AE384 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: самый сильный transfer candidate в release command set.
+
+059. inventory container/slot action C
+     anchor: PlayerInventoryServer.QCS(ContainerKind,int), 0x6924E9C -> R2
+     client/server: h/m; сложность: средняя
+     caveat: signature collision.
+
+060. inventory quantity action
+     anchor: PlayerInventoryServer.QCA(ContainerKind,int,int), 0x692A930 -> R2
+     client/server: h/m; сложность: средняя
+     caveat: beta candidates имеют EWp/EWV-подобную форму; разрешать через reader order.
+
+061. inventory quantity action D
+     anchor: PlayerInventoryServer.QCt(ContainerKind,int,int), 0x692FAD4 -> R2
+     client/server: h/m; сложность: средняя
+     caveat: рядом с command в release есть CompilerGenerated metadata.
+
+062. inventory boolean action
+     anchor: PlayerInventoryServer.QgL(bool), 0x6930100 -> 0x69BA6CC [R1]
+     client/server: h/m; сложность: средняя
+     caveat: native match точный, semantic meaning требует IL.
+
+063. inventory no-argument action
+     anchor: PlayerInventoryServer.QCb(), 0x69348A8 -> 0x69BE558 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: server validation остаётся отдельной.
+
+064. loot result payload
+     anchor: PlayerLoot.QQS(string,int[],int[],float[],short[],int[],int[],short[],ItemMods[],bool[],uint,string,bool[]), 0x6962764 -> 0x6A244C8 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side state/UI payload, не server authority primitive.
+
+065. loot item result pair
+     anchor: PlayerLoot.QQA(int,int), 0x696417C -> 0x6A2598C [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: native match точный.
+
+066. loot open/close result
+     anchor: PlayerLoot.wqL(), 0x6964A58 -> 0x6A24B3C [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: beta method name меняется; использовать native fingerprint.
+
+067. loot command
+     anchor: PlayerLoot.QQt(), 0x6966990 -> 0x6A27A28 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: release [Command], beta attribute stripped.
+
+068. interaction uint/bool command
+     anchor: PlayerInteraction.QFe(uint,bool), 0x696C3F0 -> R2
+     client/server: h/m; сложность: средняя
+     caveat: три beta candidate с одинаковой формой; использовать reader и implementation.
+
+069. interaction vector ClientRpc
+     anchor: PlayerInteraction.QFL(Vector3), 0x696948C -> 0x69EBE6C [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: release содержит одновременно Command и ClientRpc metadata.
+
+070. interaction uint-array command
+     anchor: PlayerInteraction.QFw(uint[]), 0x696F6A0 -> R2
+     client/server: h/m; сложность: средняя
+     caveat: два beta candidate; array reader helper снимает неоднозначность.
+
+071. interaction uint/int command
+     anchor: PlayerInteraction.QFo(uint,int), 0x6968FD4 -> R2
+     client/server: h/m; сложность: средняя
+     caveat: три beta candidate с одинаковой формой.
+
+072. string/int interaction command
+     anchor: PlayerInteraction.QFB(string,int), 0x6970A78 -> 0x69F4148 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: native match точный.
+
+073. mining hit command
+     anchor: PlayerInteraction.QFd(uint,MineableObjectHitInfoCompact), 0x6971818 -> 0x69E2A30 [R1]
+     client/server: h/m; сложность: высокая
+     caveat: concrete signature сильнее общего fingerprint.
+
+074. eye-ray interaction command
+     anchor: PlayerInteraction.QFS(Ray,VsX), 0x69718F8 -> 0x69D9138 [R1]
+     client/server: h/m; сложность: высокая
+     caveat: большой уникальный method body; хороший anchor для re-identification.
+
+075. multi-array interaction state
+     anchor: PlayerInteraction.QFJ(string[],string[],bool[],bool[],int[],bool), 0x6973C90 -> 0x69DF8F8 [R1]
+     client/server: h/m; сложность: высокая
+     caveat: release содержит Command и TargetRpc.
+
+076. interaction bool/bool/bool/string target payload
+     anchor: PlayerInteraction.QFg(bool,bool,bool,string), 0x696AC8C -> 0x69E82BC [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side notification/state.
+
+077. interaction string/bool/bool/arrays target payload
+     anchor: PlayerInteraction.QFG(string,bool,bool,string[],int[]), 0x696CB04 -> 0x69E6144 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side data.
+
+078. interaction six-argument command
+     anchor: PlayerInteraction.QFU(uint,int,string,int,string,int), 0x697D550 -> 0x69DF0FC [R1]
+     client/server: h/m; сложность: высокая
+     caveat: native match точный.
+
+079. interaction five-argument command
+     anchor: PlayerInteraction.QFF(uint,string,int,string,int), 0x697E8E8 -> 0x69DA52C [R1]
+     client/server: h/m; сложность: высокая
+     caveat: native match точный.
+
+080. interaction uint/byte target payload
+     anchor: PlayerInteraction.QFc(uint,byte), 0x696D01C -> 0x69E8694 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side payload.
+
+081. interaction vector target payload
+     anchor: PlayerInteraction.QaC(Vector3), 0x696DFE8 -> 0x69D7D60 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: native match точный.
+
+082. interaction uint/int/int helper
+     anchor: PlayerInteraction.QaG(uint,int,int), 0x696F3C8 -> 0x69E04E8 [R1]
+     client/server: h/m; сложность: высокая
+     caveat: protected implementation; связывать с generated reader.
+
+083. placement/deployable command
+     anchor: PlayerBuilder.Qrk(uint,string), 0x6A86200 -> 0x6ADACC4 [R1]
+     client/server: h/m; сложность: высокая
+     caveat: semantic label предварительный, основан на class и signature.
+
+084. placement integer command
+     anchor: PlayerBuilder.QOQ(uint,int,int), 0x6A8852C -> 0x6AE1138 [R1]
+     client/server: h/m; сложность: высокая
+     caveat: native match точный.
+
+085. building placement transform command
+     anchor: PlayerBuilder.QrS(bool,int,Vector3,Quaternion,uint,int,int,int), 0x6A90B24 -> 0x6AE9CA8 [R1]
+     client/server: h/m; сложность: высокая
+     caveat: самый сильный candidate для placement path.
+
+086. placement no-argument command
+     anchor: PlayerBuilder.QrW(), 0x6A988B8 -> 0x6AE53E0 [R1]
+     client/server: h/m; сложность: высокая
+     caveat: native match точный.
+
+087. builder target integer pair
+     anchor: PlayerBuilder.Qrv(int,int), 0x6A9CCA4 -> 0x6AEC26C [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side response.
+
+088. builder target transform
+     anchor: PlayerBuilder.Qrc(int,int,Vector3,Quaternion), 0x6A95C58 -> 0x6ADB128 [R1]
+     client/server: h/n/a; сложность: высокая
+     caveat: target-side placement result.
+
+089. builder target integer
+     anchor: PlayerBuilder.QrZ(int), 0x6A9F1D4 -> 0x6ADB278 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side response.
+
+090. sleeping-bag result payload
+     anchor: PlayerBuilder.QrX(SleepingBagData[],float), 0x6AA7CAC -> 0x6ADB924 [R1]
+     client/server: h/n/a; сложность: высокая
+     caveat: exact array/float signature.
+
+4. player vitals и manager RPC/Command anchors
+
+091. damage event payload
+     anchor: PlayerVitals.gdX(float,bool,VEM.DamageType), 0x6809B30 -> 0x6867B54 [R1]; beta type: AvT.DamageType
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side damage feedback.
+
+092. five-float vitals payload
+     anchor: PlayerVitals.gdt(float,float,float,float,float), 0x6809CF8 -> 0x68688AC [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side payload.
+
+093. three-float vitals payload
+     anchor: PlayerVitals.gsR(float,float,float), 0x680A324 -> 0x686B95C [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: native match точный.
+
+094. int/float/int/int vitals payload
+     anchor: PlayerVitals.gsV(int,float,int,int), 0x680A52C -> 0x686C760 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: native match точный.
+
+095. reasoned health event
+     anchor: PlayerVitals.gdW(float,ReasonedValueReasonHealthEvent), 0x680A138 -> 0x68680F0 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: type name остаётся стабильным.
+
+096. player manager integer/string command
+     anchor: PlayerManager.Qle(int,string), 0x698AB20 -> 0x6A15A30 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: release [Command], beta attribute stripped.
+
+097. player manager short/int/bool payload
+     anchor: PlayerManager.QPk(short,int,bool), 0x698AC00 -> 0x6A0EECC [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: release содержит TargetRpc и ClientRpc.
+
+098. player manager string/int/int/string payload
+     anchor: PlayerManager.QPo(string,int,int,string), 0x698E994 -> 0x6A04188 [R1]
+     client/server: h/n/a; сложность: высокая
+     caveat: native match точный.
+
+099. player manager uint payload
+     anchor: PlayerManager.QPc(uint), 0x6993BBC -> 0x6A08A40 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side payload.
+
+100. vehicle/vector target payload
+     anchor: PlayerManager.QqW(string,uint,Vector3), 0x6994510 -> 0x6A1D9F0 [R1]
+     client/server: h/n/a; сложность: высокая
+     caveat: native match точный.
+
+101. player manager string-array payload
+     anchor: PlayerManager.QPq(string,string[],byte), 0x6989774 -> 0x6A00F3C [R1]
+     client/server: h/n/a; сложность: высокая
+     caveat: exact array signature.
+
+102. player manager bool/bool/uint payload
+     anchor: PlayerManager.QPJ(bool,bool,uint), 0x6997C0C -> 0x6A18D40 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: target-side payload.
+
+103. three-string command
+     anchor: PlayerManager.QlT(string,string,string), 0x699B108 -> 0x6A15DC0 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: server validation из dump metadata не определена.
+
+104. string/byte target payload
+     anchor: PlayerManager.QPl(string,byte), 0x69925A8 -> 0x6A043CC [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: native match точный.
+
+105. debug vector payload
+     anchor: PlayerManager.Qio(Vector3), 0x699F274 -> 0x69FC264 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: release содержит Conditional("DEBUG"); сохранять gating.
+
+106. boolean command
+     anchor: PlayerManager.QfX(bool), 0x69A7694 -> 0x6A1A950 [R1]
+     client/server: h/m; сложность: средняя
+     caveat: native match точный.
+
+107. authority-free command
+     anchor: PlayerManager.QfE(), 0x699CA9C -> 0x6A044AC [R1]
+     client/server: h/m; сложность: средняя
+     caveat: release явно содержит requiresAuthority = false; server handler проверять отдельно.
+
+5. doors, locks, building, deployables и vehicles
+
+108. состояние opened у двери
+     anchor: Door.opened +0xEC -> +0xEC [F1]
+     client/server: h/m; сложность: низкая
+     caveat: SyncVar; локальная запись не гарантирует propagation.
+
+109. door open RPC
+     anchor: Door.QnZ(bool), 0x6A68DBC -> 0x6AD471C [R1]
+     client/server: h/m; сложность: средняя
+     caveat: release [ClientRpc], beta Ebs(bool) найден по уникальному native fingerprint.
+
+110. lock type
+     anchor: Lock.lockType +0x94 -> +0x94 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: стабильное SyncVar поле.
+
+111. lock state
+     anchor: Lock.locked +0x98 -> +0x98 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: стабильное SyncVar поле.
+
+112. lock state RPC
+     anchor: Lock.LMc(bool), 0x6039414 -> 0x609166C [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: beta method: Uug(bool).
+
+113. authorized key list
+     anchor: Lock.LMY(), 0x6039630 -> 0x6092154 [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: beta method: Uue().
+
+114. lock string RPC
+     anchor: Lock.LMm(string), 0x603A6C0 -> 0x6091ECC [R1]
+     client/server: h/n/a; сложность: средняя
+     caveat: beta method: Uua(string).
+
+115. building piece health
+     anchor: BuildingPiece.health +0x3B8 -> +0x3B8 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: сильный world ESP/damage anchor.
+
+116. building stability
+     anchor: BuildingPiece.stability +0x2C4 -> +0x2C4 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: поле стабильно в обеих версиях.
+
+117. building grade и skin
+     anchor: BuildingPiece.grade +0x2C8; skin +0x2CC -> те же offsets [F1]
+     client/server: h/m; сложность: низкая
+     caveat: полезно для world information и grade manipulation.
+
+118. deployable/tax/privilege flags
+     anchor: BuildingPiece.m_Deployable +0x1C8; m_Taxable +0x1C9; m_IgnoreBuildingPrivilege +0x1CA -> те же offsets [F1]
+     client/server: h/m; сложность: средняя
+     caveat: placement code может пересчитать значения.
+
+119. building lock и decay pointers
+     anchor: BuildingPiece.m_Lock +0x2E0; m_Decay +0x2E8 -> те же offsets [F1]
+     client/server: h/n/a; сложность: низкая
+     caveat: общий object traversal anchor.
+
+120. cupboard capacity
+     anchor: Cupboard.m_Capacity +0xB4 -> +0xB4 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: container behavior может clamp-ить значение.
+
+121. cupboard authorization list
+     anchor: Cupboard.authorizedPlayers +0xD8 -> +0xD8 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: list contents — отдельные objects, не inline data.
+
+122. cupboard protection timer
+     anchor: Cupboard.protectedTime +0xE8 -> +0xE8 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: timer может обновляться server state.
+
+123. SAM infinite ammo
+     anchor: AutoSamTurret.m_InfiniteAmmo +0xB8 -> +0xB8 [F1]
+     client/server: h/m; сложность: низкая
+     caveat: стабильное deployable поле.
+
+124. SAM PvE operation
+     anchor: AutoSamTurret.m_WorksOnPve +0xBA -> +0xBA [F1]
+     client/server: h/m; сложность: низкая
+     caveat: стабильное deployable поле.
+
+125. SAM capacity и aim tolerance
+     anchor: AutoSamTurret.m_Capacity +0xBC; m_FireAimTolerance +0x130 -> те же offsets [F1]
+     client/server: h/m; сложность: низкая
+     caveat: два независимых tuning point.
+
+126. turret online state и aim roots
+     anchor: AutoTurretBase online +0x158; gunYaw +0x130; gunPitch +0x138; player +0x178 -> те же offsets [F1]
+     client/server: h/n/a; сложность: средняя
+     caveat: общий turret ESP/targeting anchor.
+
+127. vehicle fuel requirement
+     anchor: VehicleManager.m_RequiresFuel +0xA0; m_FuelCapacity +0xB0; m_SecondsPerFuel +0xB4 -> те же offsets [F1]
+     client/server: h/m; сложность: низкая
+     caveat: local vehicle config/state.
+
+128. vehicle access flags
+     anchor: VehicleManager.m_AnyoneCanDrive +0x320; m_AnyoneCanRide +0x321; m_AnyoneCanUseStorage +0x322 -> те же offsets [F1]
+     client/server: h/m; сложность: низкая
+     caveat: общий vehicle candidate.
+
+129. car top speed
+     anchor: KinematicCarController.m_Topspeed +0x4C -> +0x4C [F1]
+     client/server: h/m; сложность: низкая
+     caveat: vehicle motor может clamp-ить результат.
+
+130. helicopter force и throttle
+     anchor: KinematicHelicopterController._maxEngineForce +0x48; _throttleRatePerSecond +0x4C; _turnForce +0x54; _forwardForce +0x58 -> те же offsets [F1]
+     client/server: h/m; сложность: средняя
+     caveat: общий vehicle-control group.
+
+131. sliding-door sync state
+     anchor: SlidingDoor state block +0xB0/+0xB8/+0xC0/+0xC4 -> те же offsets [F1]
+     client/server: h/m; сложность: средняя
+     caveat: bool/double/float/bool определять по field order.
+
+132. loot object traversal
+     anchor: PlayerLoot.player +0x70; inventory +0x80; active loot object +0x88 -> те же offsets [F1]
+     client/server: h/n/a; сложность: низкая
+     caveat: общий ESP и loot interaction root.
+
+ПОРЯДОК РЕАЛИЗАЦИИ
+
+1. сначала использовать rows 1-14, 26-35, 50-51 и 115-126: это стабильные offsets с низким semantic risk.
+2. затем проверить rows 15-25 и 36-49; главный offset trap — FPMelee и derived weapons.
+3. после этого подключать R1 methods из rows 52-107 по конкретным beta RVA.
+4. R2 methods разрешать только после извлечения beta Mirror reader/writer adjacency; нельзя выбирать первый метод с совпадающей сигнатурой.
+5. fast-reload оставить existing but incomplete и привязать к weapon-specific reload block.
+
+ИТОГ ПО МАТЕРИАЛАМ
+
+- dump.cs: inheritance, fields, signatures, release network attributes и release/beta RVA.
+- il2cpp.h: native object layout и generated type declarations.
+- script.json: ScriptMethod.Address, native symbol/signature и declaring group.
+- libil2cpp.so: normalized AArch64 fingerprints для concrete R1 matches.
