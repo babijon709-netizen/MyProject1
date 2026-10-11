@@ -51,36 +51,6 @@ int main() {
     memory_command_angles(10.0f, 20.0f, false, 0.0f, 0.0f, 1.0f, 2.0f,
                           command_yaw, command_pitch);
     assert(command_yaw == 11.0f && command_pitch == 18.0f);
-    assert(touch_response_window(1.0f / 60.0f) == 0.55f);
-    assert(touch_response_window(0.1f) == 0.75f);
-    assert(touch_response_window(std::numeric_limits<float>::quiet_NaN()) == 0.55f);
-    const float quantum_limited = touch_lock_deadband(0.06f, 100.0f, 0.04f);
-    assert(std::fabs(quantum_limited - 0.02f) < 0.00001f);
-    const float geometry_limited = touch_lock_deadband(0.06f, 100.0f, 0.0f);
-    assert(geometry_limited > 0.0028f && geometry_limited < 0.003f);
-    assert(touch_camera_response_acknowledged(0.012f, 0.006f));
-    assert(!touch_camera_response_acknowledged(0.012f, -0.006f));
-    assert(!touch_camera_response_acknowledged(0.04f, 0.015f));
-    assert(touch_camera_response_acknowledged(0.04f, 0.02f));
-    float accumulated_response = touch_accumulate_camera_response(0.0f, 0.004f, 0.012f);
-    assert(std::fabs(accumulated_response - 0.004f) < 0.00001f);
-    assert(!touch_camera_response_acknowledged(0.012f, accumulated_response));
-    accumulated_response = touch_accumulate_camera_response(accumulated_response, 0.003f, 0.012f);
-    assert(touch_camera_response_acknowledged(0.012f, accumulated_response));
-    assert(touch_accumulate_camera_response(accumulated_response, -0.003f, 0.012f) == 0.0f);
-    accumulated_response = touch_accumulate_camera_response(0.004f, -0.003f, -0.012f);
-    assert(std::fabs(accumulated_response + 0.003f) < 0.00001f);
-    int jitter_streak = 0;
-    assert(touch_jitter_gate(0.3f, jitter_streak, 0.45f, 2) == 0.0f);
-    assert(jitter_streak == 1);
-    assert(touch_jitter_gate(0.3f, jitter_streak, 0.45f, 2) == 0.3f);
-    assert(jitter_streak == 2);
-    assert(touch_jitter_gate(-0.3f, jitter_streak, 0.45f, 2) == 0.0f);
-    assert(jitter_streak == -1);
-    assert(touch_jitter_gate(0.5f, jitter_streak, 0.45f, 2) == 0.5f);
-    assert(jitter_streak == 0);
-    assert(touch_jitter_gate(0.0f, jitter_streak, 0.45f, 2) == 0.0f);
-    assert(jitter_streak == 0);
     assert(memory_step(0.02f, 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
     assert(memory_step(0.04f, 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
     assert(memory_step(0.08f, 1.0f / 60.0f, 10.0f, 5.0f) > 0.0f);
@@ -92,10 +62,6 @@ int main() {
     assert(close <= 12.0f);
     assert(memory_step(-30.0f, 1.0f / 60.0f, 10.0f, 5.0f) < 0.0f);
 
-    const float limit = touch_step_limit_pixels(2400.0f, 0.1f, 8.0f);
-    assert(limit == 80.0f);
-    assert(touch_step_limit_pixels(2400.0f, 0.0f, 8.0f) == 192.0f);
-    assert(touch_step_limit_pixels(std::numeric_limits<float>::infinity(), 0.1f, 8.0f) == 0.0f);
     assert(memory_step(std::numeric_limits<float>::infinity(), 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
     float invalid_yaw = std::numeric_limits<float>::quiet_NaN();
     float invalid_pitch = 0.0f;

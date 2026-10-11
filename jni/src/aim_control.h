@@ -74,68 +74,6 @@ inline void memory_command_angles(float accumulator_yaw, float accumulator_pitch
     out_pitch = wrap_degrees(base_pitch - delta_pitch);
 }
 
-inline float touch_response_window(float dt) {
-    if (!(dt > 0.0f) || !finite(dt)) dt = 1.0f / 60.0f;
-    if (dt > 0.1f) dt = 0.1f;
-    return std::min(0.75f, std::max(0.55f, dt * 8.0f));
-}
-
-inline float touch_lock_deadband(float degrees_per_pixel, float range_metres,
-                                 float input_quantum_degrees) {
-    float deadband = finite(degrees_per_pixel)
-        ? std::fabs(degrees_per_pixel) * 0.5f
-        : 0.0f;
-    if (range_metres > 1.0f && finite(range_metres)) {
-        const float range_deadband = std::atan(0.005f / range_metres) * 57.2957795f;
-        deadband = deadband > 0.0f ? std::min(deadband, range_deadband) : range_deadband;
-    }
-    if (input_quantum_degrees > 0.0f && finite(input_quantum_degrees))
-        deadband = std::max(deadband, input_quantum_degrees * 0.5f);
-    return deadband;
-}
-
-inline bool touch_camera_response_acknowledged(float expected_degrees,
-                                               float observed_degrees) {
-    if (!finite(expected_degrees) || !finite(observed_degrees) ||
-        expected_degrees * observed_degrees <= 0.0f) return false;
-    const float threshold = std::min(0.02f,
-        std::max(0.002f, std::fabs(expected_degrees) * 0.5f));
-    return std::fabs(observed_degrees) >= threshold;
-}
-
-inline float touch_accumulate_camera_response(float accumulated_degrees,
-                                              float observed_degrees,
-                                              float expected_degrees) {
-    if (!finite(accumulated_degrees) || !finite(observed_degrees) ||
-        !finite(expected_degrees) || std::fabs(expected_degrees) < 0.001f) {
-        return 0.0f;
-    }
-    if (accumulated_degrees * expected_degrees < 0.0f)
-        accumulated_degrees = 0.0f;
-    if (observed_degrees == 0.0f) return accumulated_degrees;
-    if (observed_degrees * expected_degrees <= 0.0f) return 0.0f;
-    return accumulated_degrees + observed_degrees;
-}
-
-inline float touch_jitter_gate(float error, int& streak, float band,
-                               int required_frames) {
-    if (!finite(error) || !(band >= 0.0f) || required_frames < 1) {
-        streak = 0;
-        return 0.0f;
-    }
-    if (error == 0.0f) {
-        streak = 0;
-        return 0.0f;
-    }
-    if (std::fabs(error) >= band) {
-        streak = 0;
-        return error;
-    }
-    const int sign = error > 0.0f ? 1 : -1;
-    streak = (streak * sign > 0) ? streak + sign : sign;
-    return streak * sign >= required_frames ? error : 0.0f;
-}
-
 inline float memory_step(float error_degrees, float dt, float speed,
                          float range_metres) {
     if (!finite(error_degrees)) return 0.0f;
@@ -160,15 +98,5 @@ inline float memory_step(float error_degrees, float dt, float speed,
     return std::max(-max_step, std::min(max_step, step));
 }
 
-inline float touch_step_limit_pixels(float screen_height, float degrees_per_pixel,
-                                     float max_degrees_per_frame) {
-    if (!(screen_height > 0.0f) || !(max_degrees_per_frame > 0.0f) ||
-        !finite(screen_height) || !finite(degrees_per_pixel) ||
-        !finite(max_degrees_per_frame)) return 0.0f;
-    float by_angle = screen_height * 0.08f;
-    const float gain = std::fabs(degrees_per_pixel);
-    if (gain > 0.001f) by_angle = std::min(by_angle, max_degrees_per_frame / gain);
-    return by_angle;
-}
 
 } // namespace aim_control

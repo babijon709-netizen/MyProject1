@@ -26,10 +26,10 @@ struct AppState {
     // Значения — enum AimMode в aim.h.
     int   aim_mode = 0;
     // Точка, из которой аимбот водит палец (доли экрана). Выбирается тапом по
-    // экрану, как зоны автофарма; -1 = не задана (прежняя позиция 74%/50%).
+    // экрану, как зоны автофарма; -1 = не задана (прежняя позиция 72%/48%).
     float aim_tx = -1.f, aim_ty = -1.f;
-    // 0 = balanced (crosshair + range), 1 = nearest to the crosshair,
-    // 2 = nearest in the world.
+    // Memory/silent target weighting; touch keeps the legacy nearest-screen rule.
+    // 0 = balanced, 1 = nearest to the crosshair, 2 = nearest in the world.
     int   aim_priority = 0;
     bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;

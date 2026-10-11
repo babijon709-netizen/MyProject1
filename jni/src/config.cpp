@@ -367,7 +367,7 @@ static void ConfigSaveToPath(const std::string& path) {
     s.esp_fill        = cfg::esp::fill;
     s.esp_thick       = g_state.esp_thick;
     // Слоты esp_stroke/esp_rounding теперь несут точку пальца аима; сюда идёт
-    // как есть (-1 = не задана, тогда работает дефолт 74%/50%).
+    // как есть (-1 = не задана, тогда работает дефолт 72%/48%).
     s.aim_touch_x     = g_state.aim_tx;
     s.aim_touch_y     = g_state.aim_ty;
     s.esp_fill_pct    = cfg::esp::fill_pct;

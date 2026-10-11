@@ -44,7 +44,7 @@ extern std::atomic<unsigned long long> g_aim_pulse_target;
 extern std::atomic<double>             g_aim_pulse_at;
 extern std::atomic<double>             g_aim_hold_at;
 
-// Точка, из которой аимбот водит палец (доли экрана; дефолт 74%/50%).
+// Точка, из которой аимбот водит палец (доли экрана; дефолт 72%/48%).
 float AimTouchFracX();
 float AimTouchFracY();
 
