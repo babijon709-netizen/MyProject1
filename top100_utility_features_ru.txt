@@ -1,0 +1,766 @@
+TOP 100 ПОЛЕЗНЫХ NON-RAGE ФУНКЦИЙ ДЛЯ ЧИТА
+UTILITY / INFORMATION / QUALITY-OF-LIFE SHORTLIST: RELEASE 11949 -> BETA 11957
+
+это отдельный список без rage-функций. здесь нет изменения урона, боевой
+скорости, noclip, silent aim, teleport или автоматического боевого abuse.
+приоритет отдан ESP, информации, навигации, loot UX, строительству, транспорту,
+accessibility, read-only telemetry и стабильной архитектуре профилей.
+
+все пункты — кандидаты для реализации. запись в игру допустима только через
+существующий g_mem/HeapMemory gate, с revalidation, readback и restore. пункты
+с Command/RPC сначала оставлять в preview/read-only режиме.
+
+ОБОЗНАЧЕНИЯ
+
+- F1 — поле/offset совпадает в release и beta.
+- F2 — производный layout с beta-сдвигом; offset брать отдельно.
+- R1 — unique native mapping release RVA -> beta RVA.
+- R2 — сигнатуры недостаточно: нужны class, full signature, AArch64 fingerprint,
+  Mirror reader/writer и field references.
+- h — локальный эффект подтверждён; m — локальная часть ясна; l — возможна
+  server-side correction; n/a — чтение, визуал или app-side функция.
+- fast-reload сохраняется как отдельное имя существующей неполной функции.
+
+1. ESP игроков и состояния
+
+001. рамка игрока с валидностью hitbox
+     назначение: показывать только подтверждённые кости и не рисовать stale-объекты.
+     anchor: KCC.hitBoxRecorderRoot +0x70; KCC.head +0x88
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: h; сложность: низкая
+     caveat: проверять life/native identity перед каждым снимком.
+
+002. скелет и ключевые кости
+     назначение: рисовать skeleton, голову, грудь и таз без изменения игровой логики.
+     anchor: PlayerManager.characterModel +0x150 -> ModelInfo/bone chain
+     release/beta: производная цепочка требует native/class resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: у разных моделей число костей и порядок Transform различаются.
+
+003. ник и display name
+     назначение: показывать имя только после проверки обратной ссылки на PlayerManager.
+     anchor: PlayerManager.nicklabel +0x130; FPOBJECT_OBJECT_NAME +0x78
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не доверять одной строке; валидировать owner/backlink.
+
+004. дистанция до игрока
+     назначение: показывать расстояние в метрах и сортировать цели по дистанции.
+     anchor: PlayerManager.lastSavedPosition +0x1F4; PLAYER_TRANSFORM +0x68
+     release/beta: поля совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: позицию брать из свежего Transform или проверенного snapshot.
+
+005. текущее здоровье игрока
+     назначение: показывать health bar и числовое значение.
+     anchor: GenericVitals; m_MaxHealth +0x88; current health property
+     release/beta: class anchor стабилен, current field требует проверки [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: локальное здоровье может отставать от server-side значения.
+
+006. броня и защитные модификаторы
+     назначение: показывать комплект защиты и итоговый damage modifier.
+     anchor: PlayerVitals -> equipment/armor value chain
+     release/beta: positional/type resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не смешивать экипировку с локальным отображением модели.
+
+007. сон, смерть и respawn
+     назначение: отдельно маркировать sleeper, dead и respawning игрока.
+     anchor: PlayerDeathHandler.death +0xF0; PlayerManager.respawning +0x208
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: старый PlayerManager после respawn не считать текущим.
+
+008. оружие в руках
+     назначение: показывать short name, тип и prefab активного first-person оружия.
+     anchor: FPManager +0x90 -> _currentWeapon +0x50; FPOBJECT_ITEM +0x40
+     release/beta: local weapon chain совпадает [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: нужны current-object и player-backlink gates.
+
+009. стойка и ADS state
+     назначение: показывать прицеливание, crouch, jump и sprint state рядом с игроком.
+     anchor: PlayerManager.playerEventHandler +0x78 -> Aim +0x298 -> Active +0x10
+     release/beta: activity chain совпадает [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: activity может быть временно отсутствующей во время scene reload.
+
+010. LOS и visibility badge
+     назначение: разделять видимых, закрытых стеной и неподтверждённых игроков.
+     anchor: KCC/ModelInfo chain + RaycastManager visibility path
+     release/beta: native raycast resolver нужен [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не превращать нечитабельный raycast в false visible.
+
+
+2. ESP мира и объектов
+
+011. ESP рудных узлов
+     назначение: показывать тип, состояние и расстояние до mineable nodes.
+     anchor: MineableEntityType; PlayerInteraction.QFd(uint,MineableObjectHitInfoCompact)
+     release/beta: Command/native pair сопоставляется [R1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: класс объекта проверять до чтения типа ресурса.
+
+012. ESP животных
+     назначение: отдельно показывать животных, тип и состояние агрессии.
+     anchor: animal marker class -> PlayerManager/model chain
+     release/beta: class-specific resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не считать NPC игроком только по наличию ModelInfo.
+
+013. ESP dropped items
+     назначение: показывать выброшенные предметы, short name и stack count.
+     anchor: Item -> ItemData +0x20; ItemData.name +0x18; shortName +0x20
+     release/beta: item data offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: объекты быстро уничтожаются; нужен life check.
+
+014. ESP контейнеров и loot-переходов
+     назначение: показывать контейнер, состояние доступа и содержимое после подтверждения.
+     anchor: PlayerLoot.player +0x70; inventory +0x80; active loot object +0x88
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не читать содержимое по stale PlayerLoot.
+
+015. ESP projectile и explosives
+     назначение: показывать летящие стрелы, ракеты и взрывчатку без изменения траектории.
+     anchor: ShaftedProjectile.launchSpeed +0xA8; gravity +0xAC; airDrag +0xB0
+     release/beta: projectile fields совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: поля prefab не всегда равны runtime projectile instance.
+
+016. ESP турелей и SAM
+     назначение: показывать online, владельца, yaw/pitch и активность турели.
+     anchor: AutoTurretBase.online +0x158; gunYaw +0x130; gunPitch +0x138; player +0x178
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: состояние turret может обновляться только после сетевого snapshot.
+
+017. ESP дверей
+     назначение: показывать открыта ли дверь, её тип и дистанцию.
+     anchor: Door.opened +0xEC
+     release/beta: SyncVar offset совпадает [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: локальная копия двери может быть неактуальной.
+
+018. ESP building pieces
+     назначение: показывать foundation/wall/roof и тип строительной детали.
+     anchor: BuildingPiece.grade +0x2C8; skin +0x2CC
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: производные deployable-классы проверять отдельно.
+
+019. ESP cupboard
+     назначение: показывать tool cupboard, capacity, protected time и auth count.
+     anchor: Cupboard.m_Capacity +0xB4; authorizedPlayers +0xD8; protectedTime +0xE8
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: список авторизации требует проверки длины и owner.
+
+020. ESP транспорта
+     назначение: показывать тип, топливо, места и права управления.
+     anchor: VehicleManager.m_RequiresFuel +0xA0; m_FuelCapacity +0xB0; m_AnyoneCanDrive +0x320
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: часть транспорта использует производные manager-классы.
+
+
+3. инвентарь и loot UX
+
+021. полный просмотр собственного инвентаря
+     назначение: показывать контейнеры, слоты, short name и stack count в отдельной панели.
+     anchor: PlayerInventoryServer; ContainerKind/int command family
+     release/beta: class/signature anchors, exact field refs требуют [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: только чтение не должно менять inventory state.
+
+022. человекочитаемые названия предметов
+     назначение: выводить name и shortName без обращения к нестабильным display-label объектам.
+     anchor: ItemData.name +0x18; ItemData.shortName +0x20
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: проверять System.String length и UTF-16 bounds.
+
+023. размер stack и свободные слоты
+     назначение: показывать stack count, свободные места и переполненные контейнеры.
+     anchor: Item/ItemData stack and container slot fields by type
+     release/beta: layout resolver нужен [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не считать нулевой pointer пустым stack без проверки класса.
+
+024. фильтр valuable loot
+     назначение: подсвечивать предметы по shortName, категории и пользовательскому списку.
+     anchor: ItemData.shortName +0x20; ItemData.name +0x18
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: фильтр должен работать read-only поверх уже найденных объектов.
+
+025. фильтр по расстоянию до loot
+     назначение: скрывать дальние предметы и сортировать ближайшие контейнеры.
+     anchor: PlayerManager.lastSavedPosition +0x1F4; loot object Transform chain
+     release/beta: player position [F1], loot Transform [R2]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не переиспользовать старую позицию после смены сцены.
+
+026. индикатор заполненного контейнера
+     назначение: показывать full/partial/empty без открытия UI контейнера.
+     anchor: PlayerLoot.inventory +0x80; inventory collection metadata
+     release/beta: root offsets [F1], collection length [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: длины массива проверять перед чтением.
+
+027. preview перемещения предмета
+     назначение: показывать, куда попадёт предмет, до отправки inventory command.
+     anchor: PlayerInventoryServer.QCm(ContainerKind,int,ContainerKind,int,int,int)
+     release/beta: release 0x6924D5C -> beta 0x69AE384 [R1]
+     уверенность клиент/сервер: h/m; сложность: высокая
+     caveat: оставлять preview read-only; не вызывать Command автоматически.
+
+028. индикатор вместимости
+     назначение: показывать capacity, вес и причину невозможности подобрать предмет.
+     anchor: PlayerInventoryServer + inventory/container fields
+     release/beta: class anchor, field refs через [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: локальный capacity может не совпадать с server-side ограничением.
+
+029. быстрый поиск по инвентарю
+     назначение: искать предмет одновременно по name, shortName, типу и контейнеру.
+     anchor: ItemData.name +0x18; shortName +0x20; ContainerKind
+     release/beta: item fields [F1], container mapping [R2]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: кэшировать только immutable strings, не pointers объектов.
+
+030. fast-loot без rage-изменений
+     назначение: сократить UI-паузу подбора, не менять урон, скорость движения или server inventory authority.
+     anchor: UniTask DelayPromise/DelayIgnoreTimeScalePromise; timespan +0x18/+0x1C
+     release/beta: promise offsets и typeinfo slots через [F1/R2]
+     уверенность клиент/сервер: h/m; сложность: средняя
+     caveat: сохранять original delay и отключать controller при смене runner/session.
+
+
+4. навигация и карта
+
+031. компас направления взгляда
+     назначение: показывать heading и направление камеры в верхней панели.
+     anchor: eventHandler.LookDirection +0x140; synced value +0x20
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: вектор нормализовать и проверять finite.
+
+032. waypoint world-to-screen
+     назначение: ставить безопасные точки маршрута и расстояния на экране.
+     anchor: Camera view/projection matrices; PlayerManager.worldCameraRoot +0x68
+     release/beta: camera/player roots совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: учитывать behind-camera и stale matrix.
+
+033. breadcrumb trail
+     назначение: рисовать последние позиции собственного игрока и маршрут возврата.
+     anchor: PlayerManager.lastSavedPosition +0x1F4; transform position chain
+     release/beta: position field [F1], history buffer app-side [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: историю хранить в overlay, не писать в игру.
+
+034. ближайшая цель по категории
+     назначение: быстро выбирать ближайший ресурс, контейнер, sleeping bag или building piece.
+     anchor: marker registry + class/type filters
+     release/beta: entity class resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не включать hostile target selection в utility profile.
+
+035. пользовательские world markers
+     назначение: создавать маркеры на объектах и сохранять их между сессиями.
+     anchor: world object identity + Transform position; config trailer
+     release/beta: game object chain [R2], app trailer [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: маркер должен удаляться при смене scene/object identity.
+
+036. death и sleeping-bag markers
+     назначение: отображать последние death position и известные точки сна.
+     anchor: PlayerManager.lastDeathPosition; PlayerManager/PlayerSleepHandler bag chain
+     release/beta: death position [F1], bag chain [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не показывать marker после подтверждённого respawn без новой позиции.
+
+037. маркер входа в базу
+     назначение: подсвечивать двери, locks и ближайшие входные точки на маршруте.
+     anchor: Door.opened +0xEC; Lock.lockType +0x94; Lock.locked +0x98
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не пытаться открывать объект автоматически.
+
+038. динамические distance rings
+     назначение: рисовать кольца 10/25/50 метров для лута и ресурсов.
+     anchor: PlayerManager.lastSavedPosition +0x1F4; app-side overlay geometry
+     release/beta: player position [F1], rings [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: использовать одну систему единиц и не создавать gameplay writes.
+
+039. карта опасных зон
+     назначение: визуально объединять турели, traps, explosives и закрытые doors.
+     anchor: AutoTurretBase; Door; Lock; trap/projectile class anchors
+     release/beta: mixed entity resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не считать объект опасным без подтверждённого класса.
+
+040. время суток и lighting badge
+     назначение: показывать локальное время, фазу дня и выбранный режим visibility.
+     anchor: TOD_Sky typeinfo scan range; sky/time fields
+     release/beta: typeinfo slots через [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: время на клиенте может отличаться от server time.
+
+
+5. строительство и база
+
+041. grade и skin строительной детали
+     назначение: показывать качество и skin каждой стены, пола или крыши.
+     anchor: BuildingPiece.grade +0x2C8; skin +0x2CC
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: производные piece-классы проверять по типу.
+
+042. health bar строительной детали
+     назначение: показывать health и процент повреждения над объектом.
+     anchor: BuildingPiece.health +0x3B8
+     release/beta: offset совпадает [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: health может обновляться с задержкой SyncVar.
+
+043. stability overlay
+     назначение: показывать stability и потенциально слабые звенья постройки.
+     anchor: BuildingPiece.stability +0x2C4
+     release/beta: offset совпадает [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: это информативный прогноз, не гарантия collapse.
+
+044. deployable flags
+     назначение: различать deployable, taxable и объекты вне building privilege.
+     anchor: BuildingPiece.m_Deployable +0x1C8; m_Taxable +0x1C9; m_IgnoreBuildingPrivilege +0x1CA
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: код установки может пересчитывать flags.
+
+045. lock state badge
+     назначение: показывать lock type и locked/open state рядом с дверью или контейнером.
+     anchor: Lock.lockType +0x94; Lock.locked +0x98
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: локальная SyncVar-копия может быть stale.
+
+046. authorized players count
+     назначение: показывать число авторизованных игроков у cupboard.
+     anchor: Cupboard.authorizedPlayers +0xD8; m_Capacity +0xB4
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не выводить содержимое списка без проверки privacy/UI policy профиля.
+
+047. protected time и decay timer
+     назначение: показывать таймер защиты и decay в человекочитаемом виде.
+     anchor: Cupboard.protectedTime +0xE8; BuildingPiece.m_Decay +0x2E8
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: таймер может обновляться сервером не каждый кадр.
+
+048. building privilege boundary
+     назначение: рисовать границу cupboard и объекты за её пределами.
+     anchor: BuildingPiece.m_IgnoreBuildingPrivilege +0x1CA; cupboard object chain
+     release/beta: flag [F1], boundary traversal [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: границу считать приблизительной без server query.
+
+049. turret cone preview
+     назначение: показывать yaw/pitch, направление и примерную зону обзора турели.
+     anchor: AutoTurretBase.gunYaw +0x130; gunPitch +0x138; online +0x158
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: конус не равен точной server-side line of sight.
+
+050. building graph viewer
+     назначение: соединять соседние building pieces и показывать слабые участки.
+     anchor: BuildingPiece transform/neighbour references; stability +0x2C4
+     release/beta: stability [F1], neighbour graph [R2]
+     уверенность клиент/сервер: n/a; сложность: высокая
+     caveat: граф строить read-only и ограничивать depth для FPS.
+
+
+6. транспорт
+
+051. тип и состояние транспорта
+     назначение: показывать тип vehicle, online state и владельца.
+     anchor: VehicleManager class; vehicle identity/player backlink
+     release/beta: class resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: производные vehicle managers имеют разные поля.
+
+052. топливная ёмкость
+     назначение: показывать capacity и оставшееся место для топлива.
+     anchor: VehicleManager.m_RequiresFuel +0xA0; m_FuelCapacity +0xB0
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: capacity не равна текущему fuel amount.
+
+053. остаток топлива
+     назначение: показывать fuel amount и прогноз времени до остановки.
+     anchor: VehicleManager fuel container/value chain
+     release/beta: class anchor, fuel value через [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: prediction зависит от throttle и server tick.
+
+054. занятость сидений
+     назначение: показывать driver/passenger seats и свободные места.
+     anchor: VehicleManager seat/passenger collection
+     release/beta: collection layout требует [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: seat state может приходить отдельным network update.
+
+055. права управления транспортом
+     назначение: показывать anyoneCanDrive/ride/storage в одном badge.
+     anchor: VehicleManager.m_AnyoneCanDrive +0x320; m_AnyoneCanRide +0x321; m_AnyoneCanUseStorage +0x322
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: фактическое право может дополнительно зависеть от owner/server.
+
+056. скорость и направление транспорта
+     назначение: показывать speedometer, heading и acceleration read-only.
+     anchor: KinematicCarController velocity/transform; VehicleManager root
+     release/beta: controller chain [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не путать UI speed с изменением physics.
+
+057. здоровье транспорта
+     назначение: показывать health bar и критическое состояние транспорта.
+     anchor: VehicleManager -> GenericVitals/vehicle damage chain
+     release/beta: derived vitals resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: текущий урон может быть server-authoritative.
+
+058. состояние вертолёта
+     назначение: показывать engine/rotor/throttle state для пилота и наблюдателей.
+     anchor: KinematicHelicopterController._maxEngineForce +0x48; _throttleRatePerSecond +0x4C
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: поля controller не гарантируют точную скорость.
+
+059. trail транспорта
+     назначение: рисовать короткий breadcrumb trail собственного транспорта.
+     anchor: VehicleManager transform position; app-side history
+     release/beta: vehicle root [R2], history [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: хранить историю только локально.
+
+060. low-fuel warning
+     назначение: показывать предупреждение и расстояние до последнего известного безопасного места.
+     anchor: VehicleManager.m_RequiresFuel +0xA0; fuel value chain
+     release/beta: requiresFuel [F1], value [R2]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не выполнять автозаправку или сетевую команду.
+
+
+7. камера, viewmodel и интерфейс
+
+061. custom FOV
+     назначение: сохранять пользовательский FOV профиля без вмешательства в сетевое состояние.
+     anchor: Camera.fieldOfView +0x170; viewmodel ConfigExtension
+     release/beta: camera offset [F1], config app-side [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: проверять пределы и восстанавливать исходный FOV.
+
+062. позиция рук
+     назначение: настраивать x/y/z hands position с отдельным restore state.
+     anchor: FPObject first-person model chain; ViewmodelSettings x/y/z
+     release/beta: object chain [R2], settings [n/a]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не использовать FPMotion gameplay TransformOffset как toggle flag.
+
+063. настраиваемый crosshair
+     назначение: менять цвет, размер, gap и форму локального overlay crosshair.
+     anchor: Camera projection + local hit direction; app-side UI
+     release/beta: camera [F1], overlay [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не выдавать визуальный crosshair за точную server hitbox.
+
+064. colorblind palette
+     назначение: добавить deuteranopia/protanopia/tritanopia режимы для ESP.
+     anchor: app-side theme/color palette
+     release/beta: n/a, функция overlay [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: цвета должны дополняться формой и текстом.
+
+065. профили цветов ESP
+     назначение: отдельные цвета для enemy, ally, sleeper, loot, resource и turret.
+     anchor: AppState ESP color slots; ConfigUiTrailer
+     release/beta: n/a, config trailer [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не смешивать глобальную тему и profile-specific colors.
+
+066. масштаб текста и density
+     назначение: настраивать размер labels, line thickness и количество подписей.
+     anchor: app-side ImGui layout/theme
+     release/beta: n/a, UI-only [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: ограничить количество labels для сохранения FPS.
+
+067. touch calibration
+     назначение: калибровать joystick, farm zones, freecam и кнопки overlay.
+     anchor: AppState layout trailer; TouchHelperA
+     release/beta: n/a, app-side trailer [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: хранить координаты в профиле устройства и валидировать диапазон.
+
+068. hotkey wheel
+     назначение: сделать radial menu для быстрых utility toggles без постоянной панели.
+     anchor: AppState settings; input/touch dispatcher
+     release/beta: n/a, UI/input-only [n/a]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не отправлять input в игру без явного действия пользователя.
+
+069. FPS/ping/net status panel
+     назначение: показывать FPS, memory backend, ping estimate и stale-read counters.
+     anchor: fps_memory; Mirror.NetworkClient typeinfo; diagnostics
+     release/beta: FPS layout [R2], NetworkClient slot [F1/R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: ping estimate не считать authoritative server latency.
+
+070. быстрое переключение utility profiles
+     назначение: переключать ESP/loot/navigation profiles одной кнопкой.
+     anchor: Viewmodel ConfigExtension + WeaponConfigExtension + CfgUiTrailer
+     release/beta: app-side trailer [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: при смене профиля сначала restore старого runtime state.
+
+
+8. combat information без rage
+
+071. индикатор боеприпасов в руках
+     назначение: показывать magazine/reserve без изменения количества патронов.
+     anchor: FPObject.Item +0x40 -> ItemData +0x20; inventory chain
+     release/beta: item roots [F1], ammo fields [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не считать отсутствие Item объектом с нулевым ammo.
+
+072. индикатор reserve ammo
+     назначение: суммировать патроны подходящего типа в inventory.
+     anchor: ItemData.shortName +0x20; PlayerInventoryServer container chain
+     release/beta: shortName [F1], inventory collection [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не читать remote inventory без local ownership gate.
+
+073. fast-reload telemetry: reload phase indicator
+     назначение: показывать idle, reload start, loop reload и finished.
+     anchor: FPWeaponBase +0x120/+0x121; effectiveReloadPeriod +0xE8
+     release/beta: fields совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: это read-only telemetry; не превращать fast-reload в writer и не использовать TransformOffset как gameplay flag.
+
+074. fire mode и burst info
+     назначение: показывать semi/burst/full-auto, burst length и pause.
+     anchor: FPHitscan.fireMode +0x138; burstLength +0x144; burstDuration +0x148; burstPause +0x14C
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не писать timing fields из telemetry path.
+
+075. bow draw gauge
+     назначение: показывать текущий draw progress, aimSpeed и aimPower рядом с crosshair.
+     anchor: FPBow.aimSpeed +0x144; aimPower +0x148; min shot period +0x138
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: поля prefab/source не всегда отражают runtime interpolation.
+
+076. projectile trajectory preview
+     назначение: рисовать локальную прогнозную дугу по launchSpeed/gravity/drag.
+     anchor: ShaftedProjectile.launchSpeed +0xA8; gravity +0xAC; airDrag +0xB0; underwaterDrag +0xB4
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: preview информативный и не изменяет projectile.
+
+077. last-hit marker
+     назначение: показывать последнюю точку и время local hit event.
+     anchor: eventHandler.lastHitPoint +0x170; lastHitTime +0x178
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: это локальная отметка, а не подтверждение server damage.
+
+078. damage event log
+     назначение: вести локальный журнал источника урона, victim и времени события.
+     anchor: PlayerVitals damage TargetRpc/health event methods
+     release/beta: native method pair через [R1/R2]
+     уверенность клиент/сервер: n/a; сложность: высокая
+     caveat: не показывать event как гарантированно применённый server damage.
+
+079. shot cadence telemetry
+     назначение: измерять фактический интервал выстрелов и cache/source drift.
+     anchor: FPWeaponBase.shotPeriod +0x124; FPBow.minTimeBetweenShots +0x138
+     release/beta: offsets совпадают [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: read-only controller не должен менять timing.
+
+080. combat session statistics
+     назначение: считать выстрелы, reloads, hits, misses и average distance локально.
+     anchor: lastHitPoint/time; weapon current object; app-side event ring
+     release/beta: base fields [F1], event correlation [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: статистика неполная при потерянных network events.
+
+
+9. farming, interaction и non-rage automation
+
+081. resource overlay filters
+     назначение: включать только дерево, камень, металл, sulfur или выбранные resource types.
+     anchor: MineableEntityType; marker registry
+     release/beta: type resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: фильтр не должен автоматически менять target или удар.
+
+082. route planner для ресурсов
+     назначение: строить маршрут по отмеченным nodes с сортировкой по дистанции.
+     anchor: MineableEntityType; PlayerManager position +0x1F4
+     release/beta: position [F1], node graph [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: planner read-only, без auto-hit.
+
+083. pickup radius visualization
+     назначение: показывать радиус взаимодействия и ближайшие pickup objects.
+     anchor: PlayerInteraction ray/interaction methods; local player position
+     release/beta: interaction native path [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: визуальный радиус не равен гарантии server pickup.
+
+084. loot queue preview
+     назначение: показывать порядок найденных предметов до начала подбора.
+     anchor: PlayerLoot; ItemData.shortName +0x20
+     release/beta: roots [F1], queue [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не запускать queue без отдельного user action.
+
+085. inventory auto-sort assistant
+     назначение: предлагать сортировку по категориям, а не выполнять её молча.
+     anchor: PlayerInventoryServer container/slot command family
+     release/beta: methods require [R2]
+     уверенность клиент/сервер: h/m; сложность: средняя
+     caveat: preview и подтверждение должны быть раздельными.
+
+086. crafting queue assistant
+     назначение: показывать недостающие ресурсы и ближайшие источники для рецепта.
+     anchor: ItemData.shortName +0x20; inventory collection; crafting data class
+     release/beta: item [F1], recipe chain [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не отправлять craft command автоматически.
+
+087. repair/refill reminder
+     назначение: предупреждать о low durability, ammo и fuel до начала действия.
+     anchor: GenericVitals/Item durability and inventory chain
+     release/beta: type resolver [R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: локальный reminder не гарантирует успешную repair operation.
+
+088. placement preview
+     назначение: показывать ghost building/deployable placement и конфликт коллизий.
+     anchor: PlayerInteraction.QFS(Ray,VsX); BuildingPiece placement chain
+     release/beta: release 0x69718F8 -> beta 0x69D9138 [R1]
+     уверенность клиент/сервер: n/a; сложность: высокая
+     caveat: preview не должен отправлять placement command и не обходить privilege.
+
+089. interaction prompt enhancer
+     назначение: показывать имя объекта, distance, lock и требуемое действие крупнее стандартного UI.
+     anchor: PlayerInteraction command/RPC family; Door/Lock fields
+     release/beta: interaction methods [R1/R2], fields [F1]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не подменять server response локальным prompt.
+
+090. локальные UI routines
+     назначение: сохранять безопасные последовательности открытия собственного inventory/config UI.
+     anchor: AppState input dispatcher; CfgUiTrailer
+     release/beta: app-side only [n/a]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: не включать network commands и автоматические боевые действия.
+
+
+10. диагностика, профили и стабильность
+
+091. build/version detector
+     назначение: определять release/beta layout и запрещать writer при неизвестной версии.
+     anchor: game_offsets_active::Select; TypeInfo/RVA validation
+     release/beta: explicit Release/Beta selector [F1/R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: unknown build должен переходить в read-only mode.
+
+092. offset confidence panel
+     назначение: показывать по каждому feature field, method RVA, field type и confidence.
+     anchor: game_offsets_active; controller diagnostics
+     release/beta: offset table [F1/F2], method table [R1/R2]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: confidence не заменяет runtime readback.
+
+093. feature status HUD
+     назначение: показывать off/waiting/active/failed для каждого utility controller.
+     anchor: viewmodel::Diagnostics; controller status
+     release/beta: app-side diagnostics [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не выводить stale active после disconnect.
+
+094. object lifecycle monitor
+     назначение: логировать weapon/entity identity, native pointer и момент destruction.
+     anchor: Identity.class/native; MANAGED_CACHED_PTR +0x10
+     release/beta: cached pointer offset совпадает [F1]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: адрес без class/native identity не считать живым.
+
+095. readback audit
+     назначение: для каждой записи хранить before/after, address, feature и readback result.
+     anchor: HeapMemory.write_heap; controller saved/applied state
+     release/beta: app-side writer contract [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: лог не должен содержать лишние player identifiers.
+
+096. heap gate health
+     назначение: показывать причину отказа anonymous rw-heap gate и свежесть maps snapshot.
+     anchor: HeapGate; /proc/<pid>/maps parser; object_data::heap_writable_range
+     release/beta: transport/gate [n/a]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: при отказе не делать fallback на прямой memory write.
+
+097. session/context log
+     назначение: разделять weapon switch, scene reload, process loss и disconnect.
+     anchor: controller Context; session/base epoch
+     release/beta: lifecycle contract [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: после process loss забывать адреса без restore write.
+
+098. performance watchdog
+     назначение: считать tick duration, read count, write count и пропускать дорогие scans.
+     anchor: game_viewmodel 100 ms weapon cadence; controller diagnostics
+     release/beta: app-side cadence [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: не переносить writers в background thread.
+
+099. screenshot/highlight event log
+     назначение: сохранять локальный screenshot при найденном loot, hit или изменении building state.
+     anchor: lastHitPoint/time +0x170/+0x178; overlay event ring
+     release/beta: base event fields [F1], capture [n/a]
+     уверенность клиент/сервер: n/a; сложность: средняя
+     caveat: хранить только локальные события и ограничивать disk usage.
+
+100. utility profile manager
+     назначение: сохранять read-only ESP, navigation, loot и accessibility profiles в trailer.
+     anchor: ConfigExtension + WeaponConfigExtension + CfgUiTrailer
+     release/beta: app-side trailers [n/a]
+     уверенность клиент/сервер: n/a; сложность: низкая
+     caveat: при загрузке профиля сначала restore предыдущих runtime states.
+
+ПОРЯДОК РЕАЛИЗАЦИИ
+
+1. сначала 001-030: это read-only ESP, item data, player state, viewmodel и локальные utility overlays.
+2. затем 031-060: навигация, markers, building и transport; все графы строить из проверенных identities.
+3. затем 061-080: accessibility и combat telemetry; не превращать telemetry writer в gameplay modifier.
+4. затем 081-090: automation только с preview и явным подтверждением пользователя; никаких автоматических боевых действий.
+5. 091-100: diagnostics/profile infrastructure; использовать его до добавления новых memory writers.
+
+НЕ ИСПОЛЬЗОВАТЬ КАК GAMEPLAY TOGGLE
+
+- FPMotion.runReloadOffset и FPMotion.m_AimOffset: это TransformOffset, а не gameplay flags.
+- PlayerInputHandler.SprintMode +0xA8: это input/state поле, не доказанный toggle.
+- TargetRpc/ClientRpc: это notification/state delivery, а не готовая server-authoritative команда.
+- unknown release/beta build: read-only mode до прохождения offset/class validation.
