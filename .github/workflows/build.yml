@@ -52,13 +52,15 @@ jobs:
           echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
 
       - name: Build
+        id: android_build
         shell: bash
         run: |
+          set -o pipefail
           "${ANDROID_NDK_HOME}/ndk-build" \
             NDK_PROJECT_PATH="${GITHUB_WORKSPACE}" \
             APP_BUILD_SCRIPT="${GITHUB_WORKSPACE}/jni/Android.mk" \
             NDK_APPLICATION_MK="${GITHUB_WORKSPACE}/jni/Application.mk" \
-            V=1
+            V=1 2>&1 | tee "${RUNNER_TEMP}/ndk-build.log"
 
           test -f "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen"
 
@@ -69,6 +71,29 @@ jobs:
 
           file dist/benzware.sh
           sha256sum dist/benzware.sh dist/xvcen-arm64-v8a
+
+      - name: Report build diagnostics
+        if: failure() && steps.android_build.outcome == 'failure'
+        env:
+          NDK_BUILD_LOG: ${{ runner.temp }}/ndk-build.log
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          log = Path(os.environ["NDK_BUILD_LOG"])
+          lines = log.read_text(errors="replace").splitlines() if log.exists() else []
+          matches = [line for line in lines if re.search(
+              r"(fatal error:|error:|undefined reference|ld\.lld:|make: \*\*\*)", line,
+              re.IGNORECASE)]
+          if not matches:
+              matches = lines[-80:]
+          for line in matches[-80:]:
+              escaped = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=ndk-build::{escaped}")
+          PY
 
       - name: Release binary
         id: release
