@@ -17,6 +17,24 @@ int main() {
     assert(configured_bone_slot(-1, all_bones) == -1);
     assert(configured_bone_slot(3, all_bones) == -1);
 
+    assert(target_within_range_window(15.0f, 10.0f));
+    assert(!target_within_range_window(20.0f, 10.0f));
+    assert(!target_within_range_window(80.0f, 10.0f));
+    assert(!target_within_range_window(std::numeric_limits<float>::infinity(), 10.0f));
+    const float smart_close = target_priority_score(0, 0.95f, 10.0f, true, false);
+    const float smart_far = target_priority_score(0, 0.05f, 80.0f, true, true);
+    assert(smart_close < smart_far);
+    const float nearest_close = target_priority_score(2, 0.95f, 10.0f, true, false);
+    const float nearest_far = target_priority_score(2, 0.05f, 80.0f, true, true);
+    assert(nearest_close < nearest_far);
+    assert(target_priority_score(2, 0.95f, 100.0f, true, false) <
+           target_priority_score(2, 0.05f, 101.0f, true, false));
+    const float crosshair_center = target_priority_score(1, 0.05f, 15.0f, true, false);
+    const float crosshair_edge = target_priority_score(1, 0.80f, 10.0f, true, false);
+    assert(crosshair_center < crosshair_edge);
+    assert(target_priority_score(0, 0.50f, 20.0f, true, true) <
+           target_priority_score(0, 0.48f, 20.0f, true, false));
+
     AngleFilter filter;
     float yaw = 179.0f, pitch = 0.0f;
     filter.update(yaw, pitch, 1.0f / 60.0f, 0.02f);

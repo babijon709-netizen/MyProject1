@@ -60,6 +60,32 @@ struct AngleFilter {
     }
 };
 
+inline bool target_within_range_window(float range_metres, float nearest_metres) {
+    if (!finite(range_metres) || !finite(nearest_metres) ||
+        range_metres < 0.0f || nearest_metres < 0.0f) return false;
+    // Keep crosshair-first selection within +5 m nearby, scaling to 1.5x at range.
+    const float limit = std::max(nearest_metres + 5.0f, nearest_metres * 1.5f);
+    return range_metres <= limit;
+}
+
+// Lower scores win: smart balances log-distance with aim error; the other two
+// make either crosshair alignment or world distance the primary criterion.
+inline float target_priority_score(int priority, float aim_error,
+                                   float range_metres, bool range_valid,
+                                   bool sticky) {
+    if (!finite(aim_error) || aim_error < 0.0f) aim_error = 1.0e6f;
+    const bool valid_range = range_valid && finite(range_metres) && range_metres >= 0.0f;
+    const float range_term = std::log1p(valid_range ? range_metres : 10000.0f);
+    float score;
+    switch (priority) {
+        case 1:  score = aim_error * 8.0f + range_term * 0.01f; break;
+        case 2:  score = (valid_range ? range_metres : 1.0e6f) * 4.0f + aim_error; break;
+        default: score = range_term * 4.0f + aim_error; break;
+    }
+    if (sticky) score -= 0.03f;
+    return score;
+}
+
 inline void memory_command_angles(float accumulator_yaw, float accumulator_pitch,
                                   bool have_camera, float camera_yaw, float camera_pitch,
                                   float delta_yaw, float delta_pitch,

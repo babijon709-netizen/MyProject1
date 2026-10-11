@@ -35,8 +35,8 @@ float AimTouchFracY() {
 
 // ============================ Aimbot ============================
 //
-// Touch mode drags a synthetic look finger toward a projected bone point.
-// Memory and silent modes use the same point feed through separate paths.
+// Touch drags a synthetic look finger; memory writes camera angles, and silent
+// writes the shot axis. Target eligibility and priority are shared below.
 
 struct AimTarget {
     bool  valid = false;
@@ -169,11 +169,10 @@ float AimSensitivityGain(bool& from_game) {
 
 // ============================ Общее для всех режимов ========================
 //
-// Touch steers with screen-space drags; memory and silent use camera-relative
-// target selection. game.cpp projects lead into the aim points for both touch
-// and memory modes.
+// Touch steers with screen-space drags after sharing target selection with
+// memory. game.cpp projects lead into aim points for both modes.
 
-// Memory and silent keep independent target/filter state.
+// Each mode keeps independent target/filter state.
 struct AimPick {
     unsigned long long lastId = 0;
     int lastBone = -1;
@@ -191,6 +190,15 @@ struct AimPick {
         angleFilter.reset();
     }
 };
+
+struct RankedAimTarget {
+    AimTarget target;
+    float aim_error = 0.f;
+    bool range_valid = false;
+    bool sticky = false;
+};
+
+static AimPick s_touchPick;
 
 // Per-frame checks for memory and silent modes. Calibration, detached state,
 // freecam, and scope-only ADS can pause aiming. The reason is recorded in
@@ -264,7 +272,7 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     return true;
 }
 
-// Select and filter a target angle for the memory and silent modes.
+// Select a target for touch, memory, and silent modes; memory additionally filters its angles.
 
 static unsigned long s_dead_skipped = 0;   // мёртвых не взяли в цель (для лога)
 static unsigned long s_no_skeleton = 0;         // у цели нет скелета вовсе
@@ -328,7 +336,14 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
     if (wantBone < 0 || wantBone > 2) wantBone = 1;
 
     // ---- choose target ----
-    float bestScore = 1e18f;
+    static std::vector<RankedAimTarget> candidates;
+    candidates.clear();
+    if (candidates.capacity() < boxes.size()) candidates.reserve(boxes.size());
+    bool haveNearestRange = false;
+    float nearestRange = 0.f;
+    const bool cameraAim = g_state.aim_mode == AIM_MODE_MEMORY ||
+                           g_state.aim_mode == AIM_MODE_TOUCH;
+    const float fovRadiusDeg = manes_aim_source::fov_radius_degrees(cfg::aim::fov);
     for (const EspBox& b : boxes) {
         // На союзников аим не работает НИКОГДА, а не только пока в визуалах
         // включён их показ: проверка «g_state.esp_team && b.ally» означала,
@@ -345,7 +360,6 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         // игроков с корректным скелетом, и прицел уезжал на него (19.09).
         if (b.dead) { ++s_dead_skipped; continue; }
         AimTarget t;
-        const bool holdCurrentTarget = g_state.aim_mode == AIM_MODE_MEMORY;
         const int usedBone = aim_control::configured_bone_slot(wantBone, b.aim_valid);
         if (usedBone >= 0) {
             t.bone = usedBone;
@@ -375,40 +389,49 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         float dx = t.sx - crossX, dy = t.sy - crossY;
         t.dist = sqrtf(dx * dx + dy * dy);
         t.world_dist = b.distance;
-        const bool memoryAim = g_state.aim_mode == AIM_MODE_MEMORY;
-        const float fovRadiusDeg = manes_aim_source::fov_radius_degrees(cfg::aim::fov);
-        const float angularDistance = memoryAim
+        const float angularDistance = cameraAim
             ? manes_aim_source::angular_distance_degrees(t.yaw, t.pitch)
             : 0.f;
-        // Memory uses its configured angular FOV; silent uses the screen-space circle.
-        const bool inFov = memoryAim
+        // Touch and memory use the same configured angular FOV; silent keeps
+        // the projected screen-space circle used for shot-axis selection.
+        const bool inFov = cameraAim
             ? manes_aim_source::inside_angular_fov(
                   t.yaw, t.pitch, cfg::aim::fov, sticky ? fovRadiusDeg : 0.f)
             : t.dist <= (sticky ? fovR * 2.f : fovR);
         if (!inFov) { ++s_out_of_fov; continue; }
 
-        // Memory ranks by camera-relative angle; silent ranks by projected distance.
         const float pixelTerm = t.dist / (fovR > 1.f ? fovR : 1.f);
         const float angleTerm = angularDistance /
             (fovRadiusDeg > 1.f ? fovRadiusDeg : 1.f);
-        const float aimTerm = memoryAim ? angleTerm : pixelTerm;
-        const bool  haveRange = (t.world_dist >= 0.f) && std::isfinite(t.world_dist);
-        const float rangeTerm = haveRange ? (t.world_dist / 120.f) : 1.f;
-        float score;
-        switch (g_state.aim_priority) {
-            case 1:  score = aimTerm; break;
-            case 2:  score = rangeTerm * 4.f + aimTerm * 0.05f; break;
-            default: score = aimTerm + rangeTerm * 0.8f; break;
+        const float aimError = cameraAim ? angleTerm : pixelTerm;
+        const bool haveRange = t.world_dist > 0.1f && std::isfinite(t.world_dist);
+        candidates.push_back({t, aimError, haveRange, sticky});
+        if (haveRange && (!haveNearestRange || t.world_dist < nearestRange)) {
+            nearestRange = t.world_dist;
+            haveNearestRange = true;
         }
-        // Keep the current target until its exact bone becomes invalid or it
-        // leaves the release FOV. This prevents nearby candidates from stealing
-        // the lock during ADS/FOV changes.
-        if (holdCurrentTarget && sticky) score = -1.f;
-        else if (sticky) score *= 0.35f;
-        if (score < bestScore) { bestScore = score; best = t; }
     }
 
-    if (!best.valid) {
+    bool haveBest = false;
+    float bestScore = 1e18f;
+    for (const RankedAimTarget& candidate : candidates) {
+        // Unknown distances cannot outrank a known near target. The range
+        // window also prevents a distant crosshair-perfect target from taking
+        // priority over a much closer valid one.
+        if (haveNearestRange && !candidate.range_valid) continue;
+        if (haveNearestRange && !aim_control::target_within_range_window(
+                candidate.target.world_dist, nearestRange)) continue;
+        const float score = aim_control::target_priority_score(
+            g_state.aim_priority, candidate.aim_error,
+            candidate.target.world_dist, candidate.range_valid, candidate.sticky);
+        if (!haveBest || score < bestScore) {
+            bestScore = score;
+            best = candidate.target;
+            haveBest = true;
+        }
+    }
+
+    if (!haveBest) {
         if (why) {
             // Берём ту причину, которая в ЭТОМ кадре отсеяла больше всех:
             // счётчики накопительные, а нужен ответ про конкретный кадр.
@@ -477,8 +500,6 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
 // ============================ Тач-аим ======================================
 static void UpdateAimTouch(float dt) {
     static float s_fx = 0.f, s_fy = 0.f;
-    static float s_lastTx = -1e9f, s_lastTy = -1e9f;
-    static unsigned long long s_lastTargetId = 0;
 
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen &&
@@ -492,8 +513,7 @@ static void UpdateAimTouch(float dt) {
     if (!active) {
         AimReleaseFinger(s_fingerDown);
         g_aimActive = false;
-        s_lastTx = s_lastTy = -1e9f;
-        s_lastTargetId = 0;
+        s_touchPick.reset();
         return;
     }
 
@@ -509,70 +529,22 @@ static void UpdateAimTouch(float dt) {
     if (sw < 100.f || sh < 100.f) {
         AimReleaseFinger(s_fingerDown);
         g_aimActive = false;
-        s_lastTx = s_lastTy = -1e9f;
-        s_lastTargetId = 0;
+        s_touchPick.reset();
         return;
     }
 
     const float ptX = AimTouchFracX() * sw;
     const float ptY = AimTouchFracY() * sh;
-    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
-    const float crossX = sw * 0.5f, crossY = sh * 0.5f;
-    const float fovR = AimFovRadiusPx(sw, sh);
-    int wantBone = g_state.aim_bone;
-    if (wantBone < 0 || wantBone > 2) wantBone = 0;
-
-    bool haveBest = false;
-    float bestScore = 1e18f, bestX = 0.f, bestY = 0.f;
-    unsigned long long bestId = 0;
-    for (const EspBox& b : boxes) {
-        if (g_state.esp_team && b.ally) continue;
-        if (!b.aim_valid[wantBone]) continue;
-
-        const float px = b.aim_pts[wantBone][0];
-        const float py = b.aim_pts[wantBone][1];
-        if (!std::isfinite(px) || !std::isfinite(py)) continue;
-        if (px < -60.f || px > sw + 60.f || py < -60.f || py > sh + 60.f) continue;
-        if (g_state.aim_pos && (b.x1 < 0.f || b.y1 < 0.f || b.x2 > sw || b.y2 > sh)) continue;
-
-        const float dx = px - crossX, dy = py - crossY;
-        const float distance = sqrtf(dx * dx + dy * dy);
-        if (distance > fovR) continue;
-
-        float score = distance;
-        if (s_lastTx > -1e8f) {
-            const float lx = px - s_lastTx, ly = py - s_lastTy;
-            if (lx * lx + ly * ly < 80.f * 80.f) score *= 0.5f;
-        }
-        if (score < bestScore) {
-            bestScore = score;
-            bestX = px;
-            bestY = py;
-            bestId = b.id;
-            haveBest = true;
-        }
-    }
-
-    if (!haveBest) {
-        s_lastTx = s_lastTy = -1e9f;
-        s_lastTargetId = 0;
+    AimTarget best;
+    if (!AimSelectTarget(sw, sh, dt, s_touchPick, best)) {
         g_aimActive = false;
+        s_touchPick.reset();
         AimReleaseFinger(s_fingerDown);
         return;
     }
 
-    s_lastTx = bestX;
-    s_lastTy = bestY;
-    g_aimActive = true;
-    const double now = MonoNow();
-    g_aim_hold_at.store(now, std::memory_order_relaxed);
-    if (bestId != s_lastTargetId) {
-        s_lastTargetId = bestId;
-        g_aim_pulse_target.store(bestId, std::memory_order_relaxed);
-        g_aim_pulse_at.store(now, std::memory_order_relaxed);
-    }
-
-    const float ex = bestX - crossX, ey = bestY - crossY;
+    const float crossX = sw * 0.5f, crossY = sh * 0.5f;
+    const float ex = best.sx - crossX, ey = best.sy - crossY;
     if (fabsf(ex) < 2.5f && fabsf(ey) < 2.5f) return;
 
     if (!s_fingerDown) {
@@ -585,11 +557,11 @@ static void UpdateAimTouch(float dt) {
     float sm = g_state.gun_str;
     if (!(sm >= 1.f)) sm = 1.f;
     if (sm > 10.f) sm = 10.f;
-    const float rate = 28.f - (sm - 1.f) * (24.f / 9.f);
+    const float rate = 4.f + (sm - 1.f) * (24.f / 9.f);
     float k = 1.f - expf(-rate * dt);
     if (k > 0.85f) k = 0.85f;
 
-    float maxStep = (7000.f - (sm - 1.f) * 500.f) * dt;
+    float maxStep = (2500.f + (sm - 1.f) * 500.f) * dt;
     if (maxStep > 150.f) maxStep = 150.f;
     float dx = ex * k, dy = ey * k;
     if (dx > maxStep) dx = maxStep;
@@ -835,6 +807,15 @@ void AimEndFrame() {
 void UpdateAim(float dt) {
     ++s_frames;
     const int mode = g_state.aim_mode;
+    static int previousMode = -1;
+    if (mode != previousMode) {
+        if (previousMode == AIM_MODE_TOUCH) {
+            AimReleaseFinger(s_fingerDown);
+            g_aimActive = false;
+        }
+        s_touchPick.reset();
+        previousMode = mode;
+    }
     AimLogTick(dt);
     if (mode == AIM_MODE_MEMORY) UpdateAimMemory(dt);
     else if (mode == AIM_MODE_SILENT) UpdateAimSilent(dt);

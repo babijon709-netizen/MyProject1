@@ -128,7 +128,6 @@ static const LangPair kUiEn[] = {
     {"Панель вкладок", "Tab bar"},
     {"Панель слева", "Panel on the left"},
     {"Панель снизу", "Panel at the bottom"},
-    {"Плавность", "Smoothness"},
     {"По умолчанию", "Default"},
     {"Подбор", "Looting"},
     {"Подбор: мгновенно", "pickup now transfers the whole window in one pass"},
