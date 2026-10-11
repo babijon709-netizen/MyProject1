@@ -6899,6 +6899,8 @@ static void read_local_aim_reference(uint64_t local_player, const PlayerAux* loc
 static std::vector<uint64_t> g_frame_transforms;
 static double g_player_list_last_success = 0.0;
 static double g_last_camera_frame_time = 0.0;
+float g_last_overlay_sw = 1080.0F;
+float g_last_overlay_sh = 2400.0F;
 Mat4 g_frame_vp{};
 bool g_frame_vp_valid = false;
 bool g_frame_camera_fresh = false;
@@ -7116,6 +7118,40 @@ static bool read_camera_frame(float aspect, uint64_t& native, Mat4& projection, 
     return false;
 }
 
+bool publish_camera_only_frame(float sw, float sh) {
+    if (g_pid <= 0 || !g_il2cpp_base) return false;
+    resolve_local_player();
+    if (!g_game_controller_class) return false;
+
+    if (!std::isfinite(sw) || sw < 100.0F || sw > 10000.0F) sw = 1080.0F;
+    if (!std::isfinite(sh) || sh < 100.0F || sh > 10000.0F) sh = 2400.0F;
+
+    Mat4 projection{}, view{};
+    uint64_t native_camera = 0;
+    if (!read_camera_frame(sw / sh, native_camera, projection, view)) return false;
+
+    const Mat4 view_projection = mat_mul(projection, view);
+    Vec3 camera_position{};
+    if (!matrix_is_finite(view_projection) ||
+        !camera_position_from_view(view, camera_position)) return false;
+
+    g_frame_vp = view_projection;
+    g_frame_vp_valid = true;
+    g_frame_camera_fresh = true;
+    g_frame_sw = sw;
+    g_frame_sh = sh;
+    g_frame_local_pos = camera_position;
+    g_frame_local_valid = true;
+    g_last_camera_frame_time = mono_seconds();
+    g_last_overlay_sw = sw;
+    g_last_overlay_sh = sh;
+
+    g_frame_cam_basis_valid = camera_basis_from_view(
+        view, g_frame_cam_right, g_frame_cam_up, g_frame_cam_fwd);
+    if (g_frame_cam_basis_valid) g_frame_cam_pos = camera_position;
+    return true;
+}
+
 // Боты в списке боксов: только данные для аима (is_bot), оверлей их не рисует.
 // Углы считает тот же set_aim_point, что у игроков. Точка прицела — кость
 // головы модели (NPCBrainHumanoid.modelInfo.head), когда её удалось прочитать;
@@ -7222,6 +7258,8 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     float sh = overlay_height >= 100 ? static_cast<float>(overlay_height) : 2400.0F;
     if (!std::isfinite(sw) || sw > 10000.0F) sw = 1080.0F;
     if (!std::isfinite(sh) || sh > 10000.0F) sh = 2400.0F;
+    g_last_overlay_sw = sw;
+    g_last_overlay_sh = sh;
 
     bool player_list_ok = false;
     std::vector<uint64_t> current_players = read_configured_player_transforms(&player_list_ok);
