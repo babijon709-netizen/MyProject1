@@ -157,12 +157,13 @@ template<class IO> class Controller {
         return context_.wait.life(io);
     }
 
-    bool build_plan(Plan& p) {
+    bool build_plan(Plan& p, bool bow_no_delay) {
         const uint64_t main_address=address(kCachedPeriod);
         float main_period=0;
         if (!io.read(main_address,main_period) || !valid_period(main_period)) return fail(7);
+        const bool zero_bow = bow_no_delay && context_.kind == Kind::Bow;
         p.active[kCachedPeriod]=true;
-        p.target[kCachedPeriod]=clamp_period(main_period);
+        p.target[kCachedPeriod]=zero_bow ? 0.f : clamp_period(main_period);
 
         const uint64_t source=source_period_offset();
         if (source) {
@@ -170,7 +171,7 @@ template<class IO> class Controller {
             if (!io.read(context_.weapon.object+source,current) || !valid_period(current))
                 return fail(7);
             p.active[kSourcePeriod]=true;
-            p.target[kSourcePeriod]=clamp_period(current);
+            p.target[kSourcePeriod]=zero_bow ? 0.f : clamp_period(current);
         }
 
         if (context_.kind==Kind::Spear) {
@@ -250,19 +251,19 @@ template<class IO> class Controller {
         float now=0;
         if (!io.read(address(i),now) || !valid_period(now)) return fail(7);
         auto& saved=saved_[i];
-        if (now<=target) {
-            if (saved.owned && now!=saved.applied) saved={};
-            return true;
-        }
+        if (saved.owned && now!=saved.applied) saved={};
+        if (saved.owned && now==saved.applied && now<=target) return true;
+        if (!saved.owned && now<=target) return true;
+
         Context check;
         if (!resolve(player,check) || !(check==context_) || life(i)!=Life::Alive)
             return stage_ ? false : fail(8);
         if (!io.read(address(i),now) || !valid_period(now)) return fail(7);
-        if (now<=target) {
-            if (saved.owned && now!=saved.applied) saved={};
-            return true;
-        }
-        saved={now,target,true};
+        if (saved.owned && now!=saved.applied) saved={};
+        if (saved.owned && now==saved.applied && now<=target) return true;
+        if (!saved.owned && now<=target) return true;
+        if (!saved.owned) saved={now,target,true};
+        else saved.applied=target;
         if (!io.write_heap(address(i),target) ||
             !io.read(address(i),now) || now!=target) return fail(10);
         return true;
@@ -281,7 +282,8 @@ public:
         status=viewmodel::Status::Off;
         return ok;
     }
-    void tick(uint64_t session, uint64_t base, uint64_t player, bool enabled) {
+    void tick(uint64_t session, uint64_t base, uint64_t player, bool enabled,
+              bool bow_no_delay = false, bool fast_fire_enabled = true) {
         using viewmodel::Status;
         if (session_!=session || base_!=base) {
             reset(false); session_=session; base_=base;
@@ -306,8 +308,12 @@ public:
             if (!restore()) { stage_=9; status=Status::Failed; return; }
             context_=fresh;
         }
+        if (bow_no_delay && !fast_fire_enabled && context_.kind != Kind::Bow) {
+            status = restore() ? Status::Waiting : Status::Failed;
+            return;
+        }
         Plan plan;
-        if (!build_plan(plan)) {
+        if (!build_plan(plan, bow_no_delay)) {
             const int failed_stage=stage_;
             if (!restore()) stage_=9;
             else stage_=failed_stage;

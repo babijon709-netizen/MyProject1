@@ -160,8 +160,8 @@ struct CfgBlob {
 static_assert(sizeof(CfgBlob) == 260, "stable cfg blob");
 
 // UI state that used to live in sidecar files (.lang/.accent/.layout/.mode)
-// is appended after ConfigExtension as a trailer. CfgBlob and the extension
-// keep their layouts; readers that stop at the extension ignore the trailer.
+// is appended after the optional weapon trailer. CfgBlob and the original
+// ConfigExtension keep their layouts; old readers stop before both trailers.
 struct CfgUiTrailer {
     uint32_t magic;          // "CUI1"
     uint32_t version;        // 1
@@ -202,6 +202,34 @@ static void LayoutFromArray(const float* v) {
     g_state.xray_btn_x = cl(v[18]);    g_state.xray_btn_y = cl(v[19]);
 }
 
+static void WriteWeaponTrailer(std::ostream& f) {
+    auto extension = viewmodel::encode_weapon(g_state.viewmodel);
+    uint8_t buf[sizeof(extension)];
+    memcpy(buf, &extension, sizeof(buf));
+    XorBuf(buf, sizeof(buf));
+    f.write((char*)buf, sizeof(buf));
+}
+
+static bool ReadWeaponTrailer(std::istream& f, viewmodel::WeaponConfigExtension& extension) {
+    const std::streampos start = f.tellg();
+    uint8_t buf[sizeof(extension)]{};
+    f.read((char*)buf, sizeof(buf));
+    if ((size_t)f.gcount() != sizeof(buf)) {
+        f.clear();
+        f.seekg(start);
+        return false;
+    }
+    XorBuf(buf, sizeof(buf));
+    viewmodel::ViewmodelSettings probe;
+    if (!viewmodel::decode_weapon(buf, sizeof(buf), probe)) {
+        f.clear();
+        f.seekg(start);
+        return false;
+    }
+    memcpy(&extension, buf, sizeof(extension));
+    return true;
+}
+
 static void WriteUiTrailer(std::ostream& f) {
     CfgUiTrailer t{};
     t.magic = kCfgUiMagic;
@@ -232,6 +260,40 @@ static bool ReadUiTrailer(std::istream& f, CfgUiTrailer& t) {
     return t.magic == kCfgUiMagic && t.version == 1;
 }
 
+static bool ReadConfigExtension(std::istream& f, uint8_t* out, size_t& size) {
+    size = 0;
+    const std::streampos start = f.tellg();
+    uint8_t header[12]{};
+    f.read((char*)header, sizeof(header));
+    if ((size_t)f.gcount() != sizeof(header)) {
+        f.clear();
+        f.seekg(start);
+        return false;
+    }
+    XorBuf(header, sizeof(header));
+    uint32_t magic = 0, version = 0, declared = 0;
+    memcpy(&magic, header, sizeof(magic));
+    memcpy(&version, header + 4, sizeof(version));
+    memcpy(&declared, header + 8, sizeof(declared));
+    if (magic != 0x31574d56u || version < 1 || version > 6 ||
+        (declared != 32 && declared != sizeof(viewmodel::ConfigExtension))) {
+        f.clear();
+        f.seekg(start);
+        return false;
+    }
+    f.clear();
+    f.seekg(start);
+    f.read((char*)out, declared);
+    if ((size_t)f.gcount() != declared) {
+        f.clear();
+        f.seekg(start);
+        return false;
+    }
+    XorBuf(out, declared);
+    size = declared;
+    return true;
+}
+
 // Единственный источник «текущего» конфига: тот же селектор, что у ConfigLoadLast().
 static std::string NewestCfgPath() {
     std::string name;
@@ -255,7 +317,12 @@ static bool ReadNewestUi(CfgUiTrailer& t) {
     const std::string p = NewestCfgPath();
     if (p.empty()) return false;
     std::ifstream f(p, std::ios::binary);
-    f.seekg(sizeof(CfgBlob) + sizeof(viewmodel::ConfigExtension));
+    f.seekg(sizeof(CfgBlob));
+    uint8_t extension[sizeof(viewmodel::ConfigExtension)]{};
+    size_t extension_size = 0;
+    if (!ReadConfigExtension(f, extension, extension_size)) return false;
+    viewmodel::WeaponConfigExtension weapon;
+    ReadWeaponTrailer(f, weapon);
     return f && ReadUiTrailer(f, t);
 }
 
@@ -426,6 +493,7 @@ static void ConfigSaveToPath(const std::string& path) {
         memcpy(extra, &extension, sizeof(extra));
         XorBuf(extra, sizeof(extra));
         f.write((char*)extra, sizeof(extra));
+        WriteWeaponTrailer(f);
         WriteUiTrailer(f);
         f.close();
         if (f.fail()) remove(tmp.c_str());
@@ -467,10 +535,14 @@ static void LoadCfgByName(const char* name, bool announce) {
     f.read((char*)buf, sizeof(buf));
     size_t got = (size_t)f.gcount();
     uint8_t extra[sizeof(viewmodel::ConfigExtension)]{};
-    f.read((char*)extra, sizeof(extra));
-    size_t extraGot = (size_t)f.gcount();
+    size_t extraGot = 0;
+    f.clear();
+    f.seekg(sizeof(CfgBlob));
+    const bool hasExtension = ReadConfigExtension(f, extra, extraGot);
+    viewmodel::WeaponConfigExtension weapon_extension{};
+    const bool hasWeapon = hasExtension && ReadWeaponTrailer(f, weapon_extension);
     CfgUiTrailer ui{};
-    const bool hasUi = ReadUiTrailer(f, ui);
+    const bool hasUi = hasExtension && ReadUiTrailer(f, ui);
     f.close();
     if (got != sizeof(buf)) { if (announce) ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
@@ -479,8 +551,12 @@ static void LoadCfgByName(const char* name, bool announce) {
     // Загруженный конфиг становится самым свежим: startup восстанавливает по mtime.
     utime(path.c_str(), nullptr);
 
-    XorBuf(extra, extraGot);
     g_state.viewmodel = viewmodel::decode(extra, extraGot);
+    if (hasWeapon) {
+        uint8_t weapon_bytes[sizeof(weapon_extension)];
+        memcpy(weapon_bytes, &weapon_extension, sizeof(weapon_bytes));
+        viewmodel::decode_weapon(weapon_bytes, sizeof(weapon_bytes), g_state.viewmodel);
+    }
     g_state.esp_turrets = g_state.esp_backpacks = g_state.esp_sleepers = false;
     g_state.esp_cupboards = false;
     // Упреждения в старых прицепах (v1–v3) нет — сброс в 0; v4–v6 могут

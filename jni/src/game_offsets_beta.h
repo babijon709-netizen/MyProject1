@@ -60,7 +60,12 @@ inline constexpr std::uint64_t FPEXPLOSIVECHARGE_PROJECTILE_PREFAB = game_offset
 inline constexpr std::uint64_t FPSNOWBALL_PROJECTILE_PREFAB = game_offsets::FPSNOWBALL_PROJECTILE_PREFAB;
 inline constexpr std::uint64_t FPSPEAR_PROJECTILE_PREFAB = game_offsets::FPSPEAR_PROJECTILE_PREFAB;
 inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = game_offsets::FPWEAPON_EFFECTIVE_RELOAD_PERIOD;
+inline constexpr std::uint64_t FPWEAPON_CAN_SPRINT_WHILE_RELOADING = game_offsets::FPWEAPON_CAN_SPRINT_WHILE_RELOADING;
 inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = game_offsets::FPWEAPON_SHOT_PERIOD;
+// Beta 11957: Oxide.FPWeaponBase::CFd(), same native decision point as
+// release gGC(), with the identical +0x120/+0x121/+0xFA field sequence.
+inline constexpr std::uint64_t FPWEAPON_CAN_SPRINT_METHOD_RVA = 0x68D5DF4;
+inline constexpr std::uint64_t FPWEAPON_IS_RELOADING = game_offsets::FPWEAPON_IS_RELOADING;
 inline constexpr std::uint64_t FPHITSCAN_FIRE_MODE = game_offsets::FPHITSCAN_FIRE_MODE;
 inline constexpr std::uint64_t FPHITSCAN_FIRE_DURATION = game_offsets::FPHITSCAN_FIRE_DURATION;
 inline constexpr std::uint64_t FPHITSCAN_BURST_LENGTH = game_offsets::FPHITSCAN_BURST_LENGTH;
@@ -69,6 +74,8 @@ inline constexpr std::uint64_t FPHITSCAN_BURST_PAUSE = game_offsets::FPHITSCAN_B
 inline constexpr std::uint64_t FPHITSCAN_BURST_WAIT = game_offsets::FPHITSCAN_BURST_WAIT;
 inline constexpr std::uint64_t WAITFORSECONDS_SECONDS = game_offsets::WAITFORSECONDS_SECONDS;
 inline constexpr std::uint64_t FPBOW_MIN_SHOT_PERIOD = game_offsets::FPBOW_MIN_SHOT_PERIOD;
+inline constexpr std::uint64_t FPBOW_AIM_SPEED = game_offsets::FPBOW_AIM_SPEED;
+inline constexpr std::uint64_t FPBOW_AIM_POWER = game_offsets::FPBOW_AIM_POWER;
 inline constexpr std::uint64_t FPCROSSBOW_MIN_SHOT_PERIOD = game_offsets::FPCROSSBOW_MIN_SHOT_PERIOD;
 inline constexpr std::uint64_t FPROCKETLAUNCHER_MIN_SHOT_PERIOD = game_offsets::FPROCKETLAUNCHER_MIN_SHOT_PERIOD;
 inline constexpr std::uint64_t FPSNOWBALL_MIN_THROW_PERIOD = game_offsets::FPSNOWBALL_MIN_THROW_PERIOD;

@@ -123,7 +123,12 @@ inline constexpr std::uint64_t FPSPEAR_PROJECTILE_PREFAB = 0x170;
 // FPHitscan copies config values into these live fields during lMf/sPo. The
 // config alone is therefore not enough for a weapon which is already drawn.
 inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = 0xE8;
+inline constexpr std::uint64_t FPWEAPON_CAN_SPRINT_WHILE_RELOADING = 0xFA;
 inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = 0x124;
+// Native decision point: FPWeaponBase::gGC() checks isAiming (+0x120),
+// isReloading (+0x121), then canSprintWhileReloading (+0xFA).
+inline constexpr std::uint64_t FPWEAPON_CAN_SPRINT_METHOD_RVA = 0x68693CC;
+inline constexpr std::uint64_t FPWEAPON_IS_RELOADING = 0x121;
 // Per-instance source fields copied into the attack cache; checked in both supplied dumps.
 inline constexpr std::uint64_t FPHITSCAN_FIRE_MODE = 0x138;
 inline constexpr std::uint64_t FPHITSCAN_FIRE_DURATION = 0x140;
@@ -133,6 +138,8 @@ inline constexpr std::uint64_t FPHITSCAN_BURST_PAUSE = 0x14C;
 inline constexpr std::uint64_t FPHITSCAN_BURST_WAIT = 0x1F0;
 inline constexpr std::uint64_t WAITFORSECONDS_SECONDS = 0x10;
 inline constexpr std::uint64_t FPBOW_MIN_SHOT_PERIOD = 0x138;
+inline constexpr std::uint64_t FPBOW_AIM_SPEED = 0x144;
+inline constexpr std::uint64_t FPBOW_AIM_POWER = 0x148;
 inline constexpr std::uint64_t FPCROSSBOW_MIN_SHOT_PERIOD = 0x140;
 inline constexpr std::uint64_t FPROCKETLAUNCHER_MIN_SHOT_PERIOD = 0x140;
 inline constexpr std::uint64_t FPSNOWBALL_MIN_THROW_PERIOD = 0x12C;

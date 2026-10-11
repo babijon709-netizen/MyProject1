@@ -959,8 +959,20 @@ float TabContent(int tab, float dt, float cW) {
                 const int fps = vm.fps_limit;
                 const bool recoilButton = vm.no_recoil_button, ns = vm.no_spread;
                 const bool ballistics = vm.no_ballistics, fl = vm.fast_loot;
+                const bool sprintAim = vm.sprint_while_aiming, sprintReload = vm.sprint_while_reloading;
+                const bool bowDelay = vm.bow_no_delay, projectileSpeed = vm.projectile_speed_enabled;
+                const bool bowSpeed = vm.bow_draw_speed_enabled, bowPower = vm.bow_draw_power_enabled;
+                const float projectileMultiplier = vm.projectile_speed_multiplier;
+                const float bowSpeedMultiplier = vm.bow_draw_speed_multiplier;
+                const float bowPowerMultiplier = vm.bow_draw_power_multiplier;
                 vm = {}; vm.fps_limit = fps; vm.no_recoil_button = recoilButton; vm.no_spread = ns;
                 vm.no_ballistics = ballistics; vm.fast_loot = fl;
+                vm.sprint_while_aiming = sprintAim; vm.sprint_while_reloading = sprintReload;
+                vm.bow_no_delay = bowDelay; vm.projectile_speed_enabled = projectileSpeed;
+                vm.bow_draw_speed_enabled = bowSpeed; vm.bow_draw_power_enabled = bowPower;
+                vm.projectile_speed_multiplier = projectileMultiplier;
+                vm.bow_draw_speed_multiplier = bowSpeedMultiplier;
+                vm.bow_draw_power_multiplier = bowPowerMultiplier;
                 g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
                 g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
                 esp_viewmodel_tick(vm);
@@ -995,6 +1007,40 @@ float TabContent(int tab, float dt, float cW) {
         ToggleRow("##fastfire", XS("Быстрая стрельба"), &g_state.fast_fire,
                   g_state.a_fast_fire, true, true);
         if (oldFastFire != g_state.fast_fire) esp_viewmodel_tick(vm);
+
+        SHdr(XS("Движение и лук"));
+        CardBg(Layout::RowH * 2.f);
+        const bool oldSprintAim = vm.sprint_while_aiming;
+        const bool oldSprintReload = vm.sprint_while_reloading;
+        ToggleRow("##sprintaim", XS("Бег во время прицеливания"), &vm.sprint_while_aiming,
+                  g_state.a_sprint_aim, true, false);
+        ToggleRow("##sprintreload", XS("Бег во время перезарядки"), &vm.sprint_while_reloading,
+                  g_state.a_sprint_reload, true, false);
+        if (oldSprintAim != vm.sprint_while_aiming || oldSprintReload != vm.sprint_while_reloading)
+            esp_viewmodel_tick(vm);
+
+        CardBg(Layout::RowH * 3.f + Layout::SliderH * 3.f);
+        const bool oldBowDelay = vm.bow_no_delay;
+        const bool oldProjectileSpeed = vm.projectile_speed_enabled;
+        const bool oldBowDrawSpeed = vm.bow_draw_speed_enabled;
+        const bool oldBowDrawPower = vm.bow_draw_power_enabled;
+        ToggleRow("##bowdelay", XS("Лук без задержки"), &vm.bow_no_delay,
+                  g_state.a_bow_delay, false, true);
+        ToggleRow("##projectilespeed", XS("Скорость снаряда"), &vm.projectile_speed_enabled,
+                  g_state.a_projectile_speed, false, false);
+        SliderRow("##projectilespeedvalue", XS("Множитель скорости"), &vm.projectile_speed_multiplier,
+                  0.1f, 10.f, XS("%.1fx"), false, false, g_state.sl_projectile_speed, dt);
+        ToggleRow("##bowdrawspeed", XS("Скорость натяжения лука"), &vm.bow_draw_speed_enabled,
+                  g_state.a_bow_draw_speed, false, false);
+        SliderRow("##bowdrawspeedvalue", XS("Множитель натяжения"), &vm.bow_draw_speed_multiplier,
+                  0.1f, 10.f, XS("%.1fx"), false, false, g_state.sl_bow_draw_speed, dt);
+        ToggleRow("##bowdrawpower", XS("Сила натяжения лука"), &vm.bow_draw_power_enabled,
+                  g_state.a_bow_draw_power, true, false);
+        SliderRow("##bowdrawpowervalue", XS("Множитель силы"), &vm.bow_draw_power_multiplier,
+                  0.1f, 10.f, XS("%.1fx"), true, false, g_state.sl_bow_draw_power, dt);
+        if (oldBowDelay != vm.bow_no_delay || oldProjectileSpeed != vm.projectile_speed_enabled ||
+            oldBowDrawSpeed != vm.bow_draw_speed_enabled || oldBowDrawPower != vm.bow_draw_power_enabled)
+            esp_viewmodel_tick(vm);
 
         SHdr(XS("Сеть"));
         CardBg(Layout::RowH * 2 + Layout::SliderH);
@@ -1814,6 +1860,12 @@ void RenderMenu() {
     Tick(g_state.a_fast_loot, g_state.viewmodel.fast_loot, dt);
     Tick(g_state.a_fast_fire, g_state.fast_fire, dt);
     Tick(g_state.a_fast_reload, g_state.fast_reload, dt);
+    Tick(g_state.a_sprint_aim, g_state.viewmodel.sprint_while_aiming, dt);
+    Tick(g_state.a_sprint_reload, g_state.viewmodel.sprint_while_reloading, dt);
+    Tick(g_state.a_bow_delay, g_state.viewmodel.bow_no_delay, dt);
+    Tick(g_state.a_projectile_speed, g_state.viewmodel.projectile_speed_enabled, dt);
+    Tick(g_state.a_bow_draw_speed, g_state.viewmodel.bow_draw_speed_enabled, dt);
+    Tick(g_state.a_bow_draw_power, g_state.viewmodel.bow_draw_power_enabled, dt);
     Tick(g_state.a_fake_lag, g_state.fake_lag, dt);
     Tick(g_state.a_fps_90,  g_state.viewmodel.fps_limit == 90,  dt);
     Tick(g_state.a_fps_120, g_state.viewmodel.fps_limit == 120, dt);

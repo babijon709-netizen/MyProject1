@@ -51,7 +51,10 @@ struct AppState {
     float a_custom_fov = 0.f, a_custom_hands = 0.f, a_no_recoil = 0.f, a_no_spread = 0.f,
           a_no_ballistics = 0.f, a_fast_loot = 0.f, a_fast_fire = 0.f,
           a_fast_reload = 0.f, a_fake_lag = 0.f;
+    float a_sprint_aim = 0.f, a_sprint_reload = 0.f, a_bow_delay = 0.f;
+    float a_projectile_speed = 0.f, a_bow_draw_speed = 0.f, a_bow_draw_power = 0.f;
     SliderAnim sl_custom_fov, sl_hands_x, sl_hands_y, sl_hands_z, sl_fake_lag;
+    SliderAnim sl_projectile_speed, sl_bow_draw_speed, sl_bow_draw_power;
     bool  always_day = false;     // всегда день
     float marker_dist = 150.f;
     float esp_thick = 1.5f;

@@ -5,6 +5,8 @@
 #include "fast_loot_memory.h"
 #include "no_recoil_memory.h"
 #include "no_ballistics_memory.h"
+#include "movement_tuning_memory.h"
+#include "weapon_controls_memory.h"
 #include "object_data_memory.h"
 #include "app_state.h"
 #include "farm.h"
@@ -305,6 +307,8 @@ fast_fire::Controller<HeapMemory> rapid_fire(heap_memory);
 fast_loot::Controller<HeapMemory> loot_speed(heap_memory);
 no_recoil::Controller<HeapMemory> no_recoil_ctl(heap_memory);
 no_ballistics::Controller<HeapMemory> no_ballistics_ctl(heap_memory);
+movement_tuning::Controller<HeapMemory> movement_ctl(heap_memory);
+weapon_controls::Controller<HeapMemory> weapon_controls_ctl(heap_memory);
 
 // Причина остановки быстрой стрельбы для лога: расшифровка стадии, которую
 // выставляет fast_fire::Controller (resolve/build_plan/apply в
@@ -495,6 +499,10 @@ void esp_viewmodel_reset(bool restore) {
         ;
     if (!no_ballistics_ctl.reset(restore && g_mem.bound()))
         ;
+    if (!movement_ctl.reset(restore && g_mem.bound()))
+        ;
+    if (!weapon_controls_ctl.reset(restore && g_mem.bound()))
+        ;
     loot_speed.reset();
     unity_base = 0; fps_last_tick = {}; fps_last_resolve = {}; fps_last_limit = 0;
     weapon_last_tick = {}; weapon_last_player = 0; weapon_last_flags = ~0u;
@@ -506,14 +514,23 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     const bool want_fast_fire = g_state.fast_fire;
+    const bool want_bow_no_delay = settings.bow_no_delay;
+    const bool want_movement_tuning = settings.sprint_while_aiming || settings.sprint_while_reloading;
+    const bool want_weapon_controls = settings.projectile_speed_enabled ||
+                                      settings.bow_draw_speed_enabled ||
+                                      settings.bow_draw_power_enabled;
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
         rapid_fire.reset(false);
-        rapid_fire.status = want_fast_fire ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        rapid_fire.status = (want_fast_fire || want_bow_no_delay) ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         no_recoil_ctl.reset(false);
         no_recoil_ctl.status = settings.no_recoil_button ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         no_ballistics_ctl.reset(false);
         no_ballistics_ctl.status = settings.no_ballistics ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        movement_ctl.reset(false);
+        movement_ctl.status = want_movement_tuning ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        weapon_controls_ctl.reset(false);
+        weapon_controls_ctl.status = want_weapon_controls ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
@@ -544,9 +561,11 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     static bool local_source_failed = false;
     if (settings.fov_enabled || settings.hands_enabled || controller.has_state() ||
         want_no_spread || weapons.has_state() ||
-        want_fast_fire || rapid_fire.has_state() ||
+        want_fast_fire || want_bow_no_delay || rapid_fire.has_state() ||
         settings.no_recoil_button || no_recoil_ctl.has_state() ||
         settings.no_ballistics || no_ballistics_ctl.has_state() ||
+        want_movement_tuning || movement_ctl.has_state() ||
+        want_weapon_controls || weapon_controls_ctl.has_state() ||
         g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
@@ -575,9 +594,13 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             auto wait=controller.has_state()?viewmodel::Status::Failed:viewmodel::Status::Waiting;
             controller.status={wait,wait};
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
-            rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire);
+            rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire || want_bow_no_delay,
+                             want_bow_no_delay, want_fast_fire);
             no_recoil_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_recoil_button);
             no_ballistics_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_ballistics);
+            movement_ctl.tick(epoch, g_il2cpp_base, 0,
+                              settings.sprint_while_aiming, settings.sprint_while_reloading);
+            weapon_controls_ctl.tick(epoch, g_il2cpp_base, 0, settings);
             return;
         }
         local_source_failed=false;
@@ -586,9 +609,14 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     // every scalar). They only need a watchdog cadence, not the uncapped
     // overlay rate. Setting/player changes bypass the limiter immediately.
     const unsigned weapon_flags = (want_no_spread ? 1u : 0u) |
-                                  (want_fast_fire ? 2u : 0u) |
+                                  ((want_fast_fire || want_bow_no_delay) ? 2u : 0u) |
                                   (settings.no_recoil_button ? 4u : 0u) |
-                                  (settings.no_ballistics ? 8u : 0u);
+                                  (settings.no_ballistics ? 8u : 0u) |
+                                  (settings.sprint_while_aiming ? 16u : 0u) |
+                                  (settings.sprint_while_reloading ? 32u : 0u) |
+                                  (settings.projectile_speed_enabled ? 64u : 0u) |
+                                  (settings.bow_draw_speed_enabled ? 128u : 0u) |
+                                  (settings.bow_draw_power_enabled ? 256u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -598,9 +626,13 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapon_last_player = player;
         weapon_last_flags = weapon_flags;
         weapons.tick(epoch, g_il2cpp_base, player, want_no_spread);
-        rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire);
+        rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire || want_bow_no_delay,
+                         want_bow_no_delay, want_fast_fire);
         no_recoil_ctl.tick(epoch, g_il2cpp_base, player, settings.no_recoil_button);
         no_ballistics_ctl.tick(epoch, g_il2cpp_base, player, settings.no_ballistics);
+        movement_ctl.tick(epoch, g_il2cpp_base, player,
+                          settings.sprint_while_aiming, settings.sprint_while_reloading);
+        weapon_controls_ctl.tick(epoch, g_il2cpp_base, player, settings);
     }
     {
         // Log no-spread resolution changes only.
@@ -640,6 +672,8 @@ viewmodel::Diagnostics esp_viewmodel_diagnostics() {
     auto status = controller.status;
     status.no_spread = weapons.spread;
     status.fast_fire = rapid_fire.status;
+    status.movement_tuning = movement_ctl.status;
+    status.weapon_controls = weapon_controls_ctl.status;
     return status;
 }
 
