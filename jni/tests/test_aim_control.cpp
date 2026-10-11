@@ -17,6 +17,29 @@ int main() {
     assert(configured_bone_slot(-1, all_bones) == -1);
     assert(configured_bone_slot(3, all_bones) == -1);
 
+    // Мигнувшая кость: цель держится прошлой точкой прицела, а не отдаётся
+    // другому игроку. Держится ограниченное число тактов — иначе умершего
+    // или ушедшего из FOV игрока не отпустить.
+    {
+        BoneHold h;
+        // Цель на месте, кость видна — держать нечего.
+        assert(!h.update(true, false, true, kBoneHoldTicks));
+        assert(h.ticks == 0);
+        // Кость мигнула: четыре такта держим, на пятом отпускаем.
+        for (int i = 0; i < kBoneHoldTicks; ++i)
+            assert(h.update(false, true, true, kBoneHoldTicks));
+        assert(!h.update(false, true, true, kBoneHoldTicks));
+        assert(h.ticks == 0);
+        // Кость вернулась — счётчик обнулён, и следующее мигание держится снова.
+        assert(!h.update(true, false, true, kBoneHoldTicks));
+        assert(h.update(false, true, true, kBoneHoldTicks));
+        // Игрок пропал из списка (кость не мигала, а цели нет) — не держим.
+        h.reset();
+        assert(!h.update(false, false, true, kBoneHoldTicks));
+        // Прошлой точки прицела нет — держать нечем.
+        assert(!h.update(false, true, false, kBoneHoldTicks));
+    }
+
     AngleFilter filter;
     float yaw = 179.0f, pitch = 0.0f;
     filter.update(yaw, pitch, 1.0f / 60.0f, 0.02f);

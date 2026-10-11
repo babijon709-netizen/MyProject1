@@ -189,11 +189,23 @@ struct AimPick {
     bool filterUsesCamera = false;
     bool filterModeSet = false;
     bool switched = false;
+    // switched — выбор изменился (другой игрок ИЛИ другой слот кости),
+    // idChanged — именно другой игрок. Различать нужно потому, что труба ввода
+    // и замер её задержки принадлежат устройству, а не цели: на смене слота
+    // кости остаток смещается на доли градуса, и сбрасывать там нечего.
+    bool idChanged = false;
+    // Последняя годная точка прицела текущей цели и счётчик тактов, которые
+    // она уже удерживается (см. aim_control::BoneHold).
+    AimTarget hold{};
+    aim_control::BoneHold boneHold{};
 
     void reset() {
         lastId = 0;
         lastBone = -1;
         switched = false;
+        idChanged = false;
+        hold = AimTarget{};
+        boneHold.reset();
         filterUsesCamera = false;
         filterModeSet = false;
         angleFilter.reset();
@@ -441,6 +453,7 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
 
     // ---- choose target ----
     float bestScore = 1e18f;
+    bool curBoneLost = false;   // текущая цель в списке, но её кость не спроецировалась
     for (const EspBox& b : boxes) {
         // На союзников аим не работает НИКОГДА, а не только пока в визуалах
         // включён их показ: проверка «g_state.esp_team && b.ally» означала,
@@ -475,6 +488,7 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
             // Do not substitute another joint or a box estimate when the
             // configured bone is unavailable.
             if (b.has_skeleton) ++s_bones_not_projected; else ++s_no_skeleton;
+            if (b.id == pick.lastId) curBoneLost = true;
             continue;
         }
         if (false) {
@@ -537,6 +551,17 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         if (score < bestScore) { bestScore = score; best = t; }
     }
 
+    // Мигнувшая кость не должна отдавать цель другому игроку (см.
+    // aim_control::BoneHold). Полная потеря цели — игрок умер, вышел из FOV —
+    // сюда не попадает: там curBoneLost ложен, и работает прежний счётчик
+    // s_lostFrames вместе с обычным выбором.
+    const bool sameTarget = best.valid && pick.lastId != 0 && best.id == pick.lastId;
+    if (sameTarget) pick.hold = best;
+    if (pick.boneHold.update(sameTarget, curBoneLost,
+                             pick.hold.valid && pick.hold.id == pick.lastId,
+                             aim_control::kBoneHoldTicks))
+        best = pick.hold;
+
     if (!best.valid) {
         if (why) {
             // Берём ту причину, которая в ЭТОМ кадре отсеяла больше всех:
@@ -560,7 +585,11 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
 
     const bool targetChanged = best.id != pick.lastId;
     const bool selectionChanged = targetChanged || best.bone != pick.lastBone;
-    if (selectionChanged) pick.angleFilter.reset();
+    // Фильтр сбрасывается только на другом игроке: его углы никак не связаны с
+    // прошлыми, и сглаживание соединило бы две точки дугой. На смене слота
+    // кости точка прицела смещается на доли градуса — там сглаживание как раз
+    // убирает ступеньку.
+    if (targetChanged) pick.angleFilter.reset();
     if (g_state.aim_mode == AIM_MODE_MEMORY || g_state.aim_mode == AIM_MODE_TOUCH) {
         float filteredYaw = best.yaw;
         float filteredPitch = best.pitch;
@@ -593,6 +622,7 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
     // игрок жаловался, что аим ведёт по мёртвым, а по respawning (0x208) в
     // логе 14:55 не сработало ни разу. Печатаем здоровье и оба флага.
     pick.switched = selectionChanged;
+    pick.idChanged = targetChanged;
     const double now = MonoNow();
     if (targetChanged) {
         g_aim_pulse_target.store(best.id, std::memory_order_relaxed);
@@ -667,8 +697,9 @@ static void UpdateAimTouch(float dt) {
             s_trackYaw.reset(); s_trackPitch.reset();
             s_heldTick = false;
             // Палец отпущен — заказанное игра уже не отработает. Обнуляем
-            // полёт, иначе возврат цели начнётся со старой оценкой.
-            s_touchCtl.clearOrders();
+            // полёт, иначе возврат цели начнётся со старой оценкой. Задержка
+            // трубы остаётся: она про трубу, а не про заказы.
+            s_touchCtl.clearOrders(true);
             s_pendDx = s_pendDy = s_pendTime = 0.f;
         }
         return;
@@ -677,9 +708,13 @@ static void UpdateAimTouch(float dt) {
     if (pick.switched) {
         s_haveLast = false;                      // do not learn gain across a target switch
         s_trackYaw.reset(); s_trackPitch.reset();  // и оценку коэффициента тоже
-        // Заказы «в полёте», их поглощение и разгон подхода принадлежат прошлой цели.
-        s_touchCtl.clearOrders();
-        s_touchCtl.resetApproach();
+        // Труба ввода принадлежит устройству, а не цели: замеренная задержка и
+        // ушедшие в игру заказы обязаны пережить смену. clearOrders() обнулял и
+        // то и другое, после чего доля шага оставалась без предела, окно
+        // летящего заказа пустело, и контроллер три такта подряд заказывал
+        // полный остаток — игра применяла пачку одним кадром, и прицел шёл
+        // бросками по 12° (жалоба про маятник на смене цели).
+        s_touchCtl.onTargetSwitch(pick.idChanged);
         s_pendDx = s_pendDy = s_pendTime = 0.f;
     }
 
@@ -876,8 +911,10 @@ static void UpdateAimTouch(float dt) {
         s_fingerDown = false;
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
-        // Палец отпущен — заказанное игра не отработает вовсе.
-        s_touchCtl.clearOrders();
+        // Палец отпущен — заказанное игра не отработает вовсе. Замер задержки
+        // трубы при этом остаётся: он нужен следующему захвату, чтобы не
+        // набирать пачку приказов поверх друг друга.
+        s_touchCtl.clearOrders(true);
         s_heldTick = false;
         s_haveLast = false;
         // Перенос пальца — это не шаг прицела: замер по нему покажет мусор.

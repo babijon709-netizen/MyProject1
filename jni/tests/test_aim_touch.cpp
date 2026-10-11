@@ -1,7 +1,7 @@
 // Юнит-тесты контроллера тач-аима (jni/src/aim_touch.h).
 //
 // Проверяют отдельные куски математики и замкнутую петлю на модели трубы ввода.
-// Полный A/B старой и новой ветки по 11 сценариям живёт в стенде
+// Полный A/B старой и новой ветки по 15 сценариям живёт в стенде
 // tools/aim/touch_sim.cpp (запуск: scripts/aim_sim.sh); здесь — то, что должно
 // держаться независимо от сценария.
 #include "aim_touch.h"
@@ -17,6 +17,7 @@ using namespace aim_touch;
 struct Plant {
     float camYaw = 0.0f, camPitch = 0.0f;
     float tgtYaw = 30.0f, tgtPitch = 6.0f;
+    float tgtVyaw = 0.0f, tgtVpitch = 0.0f;   // собственное движение цели, град/с
     float gain = 0.10f;
     int pipeFrames = 4;
     float gameFps = 15.0f;
@@ -45,6 +46,8 @@ struct Plant {
     // Один такт оверлея: игра прокручивает свои кадры и применяет доехавшее.
     void step(float dt) {
         now += dt;
+        tgtYaw += tgtVyaw * dt;
+        tgtPitch += tgtVpitch * dt;
         appliedYaw = appliedPitch = 0.0f;
         acc += dt;
         while (acc >= 1.0f / gameFps) {
@@ -157,7 +160,7 @@ static void test_delay_and_inflight() {
     for (int i = 0; i < 3; ++i) {
         f.update(dt, 10.0f, 0.0f, true, 0.0f, 0.0f);
         f.age(dt, 0.6f);
-        f.place(1.0f, 0.0f, 1.0f);
+        f.place(1.0f, 0.0f, 1.0f, 1.0f);
     }
     f.update(dt, 10.0f - 1.0f, 0.0f, true, 1.0f, 0.0f);
     assert(f.delay > 0.1f && f.delay < 0.4f);
@@ -165,7 +168,7 @@ static void test_delay_and_inflight() {
 
     // Летящий заказ — это приказы моложе задержки, а не всё окно.
     Flight g;
-    for (int i = 0; i < 10; ++i) { g.age(dt, 0.6f); g.place(1.0f, 0.0f, 1.0f); }
+    for (int i = 0; i < 10; ++i) { g.age(dt, 0.6f); g.place(1.0f, 0.0f, 1.0f, 1.0f); }
     const float infl = g.inflightMag(3.0f * dt);
     assert(infl > 2.5f && infl < 3.5f);
 
@@ -174,7 +177,7 @@ static void test_delay_and_inflight() {
     Flight h;
     h.flowOk = true;
     h.age(dt, 0.6f);
-    h.place(5.0f, -5.0f, 1.0f);
+    h.place(5.0f, -5.0f, 1.0f, 1.0f);
     h.subtract(eYaw, ePitch, h.delay > 0.0f ? h.delay : 0.6f);
     assert(eYaw == 0.0f && ePitch == 0.0f);
     std::printf("delay/inflight ok\n");
@@ -270,6 +273,177 @@ static void test_min_quantum() {
     std::printf("min quantum: приказов в один квант %d из 20\n", moved);
 }
 
+// Заказ ставится в градусах камеры, а летящий заказ считается алгебраически:
+// камера применит сумму всего, что висит в трубе.
+static void test_inflight_units_and_signs() {
+    const float dt = 1.0f / 12.0f;
+
+    // Подтяжка коэффициента: 14 рабочих градусов при trim 1.4 — это 10
+    // градусов камеры. Прежняя запись в рабочих градусах завышала летящий
+    // заказ на 40%, и вычитание снимало с остатка больше, чем камера довернёт.
+    Flight g;
+    g.age(dt, 0.6f);
+    g.place(14.0f, 0.0f, 1.4f, 1.4f);
+    assert(std::fabs(g.absorbYaw - 10.0f) < 1.0e-4f);
+    float eY = 12.0f, eP = 0.0f;
+    g.subtract(eY, eP, 0.6f);
+    assert(std::fabs(eY - 2.0f) < 1.0e-4f);
+
+    // Встречные заказы гасят друг друга: +5 и -2 дают +3, а не 7 по модулю.
+    // Сумма модулей со знаком последнего приказа на смене цели завышала
+    // летящий заказ вдвое-втрое, насыщение обнуляло команду, и прицел вставал.
+    Flight f;
+    f.age(dt, 0.6f);
+    f.place(5.0f, 0.0f, 1.0f, 1.0f);
+    f.age(dt, 0.6f);
+    f.place(-2.0f, 0.0f, 1.0f, 1.0f);
+    assert(std::fabs(f.absorbYaw - 3.0f) < 1.0e-4f);
+    float hY = -10.0f, hP = 0.0f;
+    f.subtract(hY, hP, 0.6f);
+    assert(std::fabs(hY - (-13.0f)) < 1.0e-4f);
+
+    // Очередь на замер задержки однонаправлена и равна поглощению: иначе её
+    // голова держит заказы прошлой цели, их возраст списывается на новый
+    // отклик, и замер задержки уползает вверх (0.32 -> 0.70 с на стенде).
+    Flight q;
+    q.update(dt, 10.0f, 0.0f, true, 0.0f, 0.0f);
+    q.age(dt, 0.6f);
+    q.place(6.0f, 0.0f, 1.0f, 1.0f);
+    q.update(dt, 10.0f, 0.0f, true, 0.0f, 0.0f);
+    q.age(dt, 0.6f);
+    q.place(-8.0f, 0.0f, 1.0f, 1.0f);
+    double fifoSum = 0.0;
+    for (const auto& e : q.fifoYaw) fifoSum += (double)e.mag * e.sign;
+    assert(std::fabs((float)fifoSum - q.absorbYaw) < 1.0e-4f);
+    assert(std::fabs(q.absorbYaw - (-2.0f)) < 1.0e-4f);
+    std::printf("inflight: единицы и знаки ok\n");
+}
+
+// Труба ввода принадлежит устройству, а не цели: смена цели обязана переживать
+// замер задержки и ушедшие в игру заказы.
+static void test_switch_keeps_pipe() {
+    const float dt = 1.0f / 12.0f;
+    Flight f;
+    for (int i = 0; i < 3; ++i) {
+        f.update(dt, 10.0f, 0.0f, true, 0.0f, 0.0f);
+        f.age(dt, 0.6f);
+        f.place(1.0f, 0.0f, 1.0f, 1.0f);
+    }
+    f.update(dt, 9.0f, 0.0f, true, 1.0f, 0.0f);
+    const float delay = f.delay;
+    assert(delay > 0.1f && delay < 0.4f);
+
+    Controller c;
+    c.reset();
+    c.flight = f;
+    c.targetRateYaw = 5.0f;
+    c.softTime = 0.30f;
+    c.flipDamp = 0.45f;
+    c.onTargetSwitch(true);
+    assert(std::fabs(c.flight.delay - delay) < 1.0e-6f);  // замер задержки пережил смену
+    assert(!c.flight.orders.empty());                     // заказы игра ещё применит
+    assert(c.targetRateYaw == 0.0f);                      // скорость прошлой цели забыта
+    assert(c.softTime == 0.0f);                           // мягкий старт заново
+    assert(c.flipDamp == 1.0f);                           // скачок остатка — не перелёт
+
+    // Смена слота кости: остаток смещается на доли градуса, вести цель надо
+    // непрерывно — ни разгон, ни скорость цели не сбрасываются.
+    c.targetRateYaw = 5.0f;
+    c.softTime = 0.30f;
+    c.onTargetSwitch(false);
+    assert(std::fabs(c.flight.delay - delay) < 1.0e-6f);
+    assert(c.targetRateYaw == 5.0f);
+    assert(c.softTime == 0.30f);
+    std::printf("switch: задержка трубы %.2f с переживает смену цели\n", delay);
+}
+
+// Смена цели на противоположную сторону на ведении: труба полна заказов в
+// сторону прошлой цели. Прежний способ (clearOrders + resetApproach) и новый
+// (onTargetSwitch) гоняются на одном контроллере.
+static void test_switch_closed_loop() {
+    struct Res {
+        int settle = -1; int crossings = 0; int reversals = 0;
+        float swing = 0.0f; float throwMax = 0.0f;
+    };
+    Res r[2];
+    for (int variant = 0; variant < 2; ++variant) {
+        Controller c;
+        c.reset();
+        Plant pl;
+        pl.tgtYaw = 8.0f;
+        pl.tgtVyaw = 8.0f;          // ведение: к моменту смены труба полна
+        Params p;
+        p.soft = true;
+        p.substeps = 4;
+        p.have_camera_axis = false;
+        p.estimate_only = true;
+        const float dt = 1.0f / 12.0f;
+        const int switchAt = 20;
+        float pendX = 0.0f, pendY = 0.0f, pendT = 0.0f;
+        float lastCmd = 0.0f, prevRaw = 0.0f;
+        bool haveCmd = false, crossed = false;
+        int lastOut = -1;
+        for (int i = 0; i < 80; ++i) {
+            if (i == switchAt) {
+                pl.tgtVyaw = 0.0f;
+                pl.tgtYaw = pl.camYaw - 25.0f;
+                if (variant == 0) { c.clearOrders(); c.resetApproach(); }
+                else c.onTargetSwitch(true);
+                prevRaw = -25.0f;
+                crossed = false;
+                haveCmd = false;
+                lastCmd = 0.0f;
+                lastOut = -1;
+            }
+            pl.step(dt);
+            const Output o = c.tick(p, 0.0f, 0.0f, dt, pl.rawYaw(), pl.rawPitch(),
+                                    std::fabs(pl.appliedYaw) > 0.02f, -pl.appliedYaw, -pl.appliedPitch,
+                                    false, 0.0f, 0.0f, pendX, pendY, pendT);
+            if (o.action == kMove) {
+                pl.order(dt, o.dx, o.dy, o.parts);
+                if (i > switchAt) {
+                    const float cmd = o.dx * p.base_gain;
+                    if (haveCmd && cmd != 0.0f && lastCmd != 0.0f &&
+                        (cmd > 0.0f) != (lastCmd > 0.0f))
+                        ++r[variant].reversals;
+                    if (cmd != 0.0f) { lastCmd = cmd; haveCmd = true; }
+                }
+            }
+            if (i > switchAt) {
+                // Бросок камеры: игра применяет ввод пачками, и всё, что
+                // накопилось в трубе, поворачивает камеру за один раз.
+                if (std::fabs(pl.appliedYaw) > r[variant].throwMax)
+                    r[variant].throwMax = std::fabs(pl.appliedYaw);
+                const float raw = pl.rawYaw();
+                if (prevRaw * raw < 0.0f) { ++r[variant].crossings; crossed = true; }
+                if (crossed && std::fabs(raw) > r[variant].swing) r[variant].swing = std::fabs(raw);
+                if (std::fabs(raw) > 1.0f) lastOut = i - switchAt;
+                prevRaw = raw;
+            }
+        }
+        r[variant].settle = (lastOut < 0) ? 0 : lastOut;
+    }
+    std::printf("смена цели: прежний способ — успокоение %d тактов, проходов через ноль %d, "
+                "реверсов %d, уход за цель %.2f°, бросок камеры %.2f°\n",
+                r[0].settle, r[0].crossings, r[0].reversals, r[0].swing, r[0].throwMax);
+    std::printf("           onTargetSwitch — успокоение %d тактов, проходов через ноль %d, "
+                "реверсов %d, уход за цель %.2f°, бросок камеры %.2f°\n",
+                r[1].settle, r[1].crossings, r[1].reversals, r[1].swing, r[1].throwMax);
+    // Маятника нет: один проход через цель, ухода за цель нет, реверсов команды
+    // нет.
+    assert(r[1].crossings <= 1);
+    assert(r[1].swing < 1.0f);
+    assert(r[1].reversals == 0);
+    // Бросок камеры меньше: заказы прошлой цели учтены, и пачка ввода не
+    // набирается поверх них.
+    assert(r[1].throwMax < r[0].throwMax);
+    // Сведение после смены не медленнее первого захвата такого же остатка
+    // (test_closed_loop: 30° за 16 тактов). Прежний способ сводил за 11 тактов
+    // только потому, что шёл без предела доли шага и не вычитал летящий заказ —
+    // отсюда бросок камеры 11.4° вместо 9.1°.
+    assert(r[1].settle <= 20);
+}
+
 int main() {
     test_envelope();
     test_taper();
@@ -278,7 +452,10 @@ int main() {
     test_delay_and_inflight();
     test_soft_start_is_softer();
     test_min_quantum();
+    test_inflight_units_and_signs();
+    test_switch_keeps_pipe();
     test_closed_loop();
+    test_switch_closed_loop();
     std::printf("aim_touch: все проверки пройдены\n");
     return 0;
 }

@@ -218,10 +218,10 @@ struct Flight {
 
     // Очередь заказов на списание. Первый в очереди — самый старый, то есть
     // тот, что игра применит первым: поток камеры списывает очередь с головы.
-    // ratio — во сколько раз заказ в рабочих градусах больше того, что камера
-    // выдаст на самом деле (подтяжка коэффициента). Без него замер задержки на
-    // trim 1.4 уплывал до 1.09 с: очередь списывалась медленнее, чем росла.
-    struct Queued { float mag; float placed; float ratio; };
+    // Величины — в градусах камеры (см. place), знак хранится отдельно: камера
+    // применяет алгебраическую сумму висящего ввода, поэтому очередь обязана
+    // быть однонаправленной (см. pushFifo).
+    struct Queued { float mag; float placed; float sign; };
 
     std::vector<Order> orders;
     std::vector<Queued> fifoYaw, fifoPitch;
@@ -232,8 +232,21 @@ struct Flight {
     float prevRawYaw = 0.0f, prevRawPitch = 0.0f;
     bool havePrevRaw = false;
     bool flowOk = false;
+    // Остаток скакнул от смены цели/кости, а не от движения камеры.
+    int skipFall = 0, skipCross = 0;
 
     void reset() { *this = Flight{}; }
+
+    // big = true — другой игрок: остаток прыгнул на десятки градусов, и в
+    // режиме без потока разница через такую пропасть списывает весь летящий
+    // заказ. big = false — та же цель, другая кость: шаг в доли градуса,
+    // списание по падению остаётся. Перескок нуля в обоих случаях сделала не
+    // камера, а смена цели, поэтому обнулять очередь и поглощение нельзя:
+    // вместе с ними теряется замер задержки.
+    void onResidualStep(bool big) {
+        skipCross = 1;
+        if (big) skipFall = 1;
+    }
 
     // Задержка трубы по факту: заказ, применённый камерой в этом такте, лежал в
     // очереди столько-то. Средневзвешенный по величине заказа возраст головы
@@ -248,16 +261,16 @@ struct Flight {
     // и упреждение.
     void measureDelay(std::vector<Queued>& fifo, float applied) {
         if (!(std::fabs(applied) > 1.0e-4f) || fifo.empty()) return;
+        // Отклик противоположного знака висящий заказ не списывает.
+        if (applied * fifo.front().sign < 0.0f) return;
         double wsum = 0.0, w = 0.0;
         float left = std::fabs(applied);
         while (left > 1.0e-4f && !fifo.empty()) {
             const Queued& q = fifo.front();
-            // Сколько заказа в ГРАДУСАХ КАМЕРЫ съедено этим куском.
-            const float takeCam = std::min(q.mag / q.ratio, left);
-            const float take = takeCam * q.ratio;
-            wsum += takeCam * (double)(fifoTime - q.placed);
-            w += takeCam;
-            left -= takeCam;
+            const float take = std::min(q.mag, left);
+            wsum += take * (double)(fifoTime - q.placed);
+            w += take;
+            left -= take;
             if (take >= q.mag - 1.0e-4f) fifo.erase(fifo.begin());
             else { fifo.front().mag = q.mag - take; break; }
         }
@@ -279,7 +292,8 @@ struct Flight {
         flowOk = flowOkTick;
         fifoTime += dt;
         if (havePrevRaw) {
-            if (flowOk) {
+            if (flowOk || skipFall > 0) {
+              if (flowOk) {
                 const float wasYaw = absorbYaw, wasPitch = absorbPitch;
                 drain(absorbYaw, flowYaw);
                 drain(absorbPitch, flowPitch);
@@ -288,6 +302,7 @@ struct Flight {
                 // Камера повернулась — ровно столько заказа она и съела.
                 measureDelay(fifoYaw, flowYaw);
                 measureDelay(fifoPitch, flowPitch);
+              }
             } else {
                 const float wasYaw = absorbYaw, wasPitch = absorbPitch;
                 drainByFall(absorbYaw, prevRawYaw - rawYaw, stallYaw);
@@ -296,10 +311,16 @@ struct Flight {
                 measureDelay(fifoPitch, wasPitch - absorbPitch);
             }
             // Остаток перескочил ноль — камера уже дальше цели: висящий заказ
-            // толкнёт её ещё дальше. Обнуляем не дожидаясь прилёта.
-            if (prevRawYaw * rawYaw < 0.0f) { absorbYaw = 0.0f; fifoYaw.clear(); }
-            if (prevRawPitch * rawPitch < 0.0f) { absorbPitch = 0.0f; fifoPitch.clear(); }
+            // толкнёт её ещё дальше. Обнуляем не дожидаясь прилёта. На смене
+            // цели ноль перескакивает сама цель, и обнуление стоило бы очереди
+            // и замера задержки.
+            if (skipCross == 0) {
+                if (prevRawYaw * rawYaw < 0.0f) { absorbYaw = 0.0f; fifoYaw.clear(); }
+                if (prevRawPitch * rawPitch < 0.0f) { absorbPitch = 0.0f; fifoPitch.clear(); }
+            }
         }
+        if (skipFall > 0) --skipFall;
+        if (skipCross > 0) --skipCross;
         prevRawYaw = rawYaw;
         prevRawPitch = rawPitch;
         havePrevRaw = true;
@@ -356,16 +377,48 @@ struct Flight {
                      orders.end());
     }
 
-    void place(float yawDeg, float pitchDeg, float ratio) {
+    // Заказ ставится в ГРАДУСАХ КАМЕРЫ: остаток, поток камеры и падение
+    // остатка — все в них же. Вызывающий считает приказ в рабочих градусах
+    // (шаг пальца × коэффициент с подтяжкой), поэтому пересчёт делается сразу.
+    // Подтяжка до 1.4 раздувала приказ: вычитание летящего заказа снимало с
+    // остатка на 40% больше, чем камера выдаст на самом деле, а списывание
+    // поглощения потоком таяло в 1.4 раза медленнее (стенд «trim 1.4»: хвост
+    // рысканья 8.8° вместо 0.3°, захват 2.9 с вместо 1.6 с).
+    void place(float yawWork, float pitchWork, float ratioYaw, float ratioPitch) {
+        if (!(ratioYaw >= 1.0f) || !aim_control::finite(ratioYaw)) ratioYaw = 1.0f;
+        if (!(ratioPitch >= 1.0f) || !aim_control::finite(ratioPitch)) ratioPitch = 1.0f;
+        const float yawDeg = yawWork / ratioYaw;
+        const float pitchDeg = pitchWork / ratioPitch;
+        if (!aim_control::finite(yawDeg) || !aim_control::finite(pitchDeg)) return;
         orders.push_back({yawDeg, pitchDeg, 0.0f});
         absorbYaw += yawDeg;     stallYaw = 0.0f;
         absorbPitch += pitchDeg; stallPitch = 0.0f;
-        if (!(ratio >= 1.0f) || !aim_control::finite(ratio)) ratio = 1.0f;
-        if (yawDeg != 0.0f) fifoYaw.push_back({std::fabs(yawDeg), fifoTime, ratio});
-        if (pitchDeg != 0.0f) fifoPitch.push_back({std::fabs(pitchDeg), fifoTime, ratio});
+        pushFifo(fifoYaw, yawDeg);
+        pushFifo(fifoPitch, pitchDeg);
     }
 
 private:
+    // Заказ противоположного знака ГАСИТ уже висящий в трубе, а не ложится
+    // рядом: камера применит алгебраическую сумму ввода. Без гашения после
+    // смены цели голова очереди держала заказы прошлой цели (в другую
+    // сторону), их возраст списывался на новый отклик, и замер задержки уползал
+    // 0.32 -> 0.70 с. Дальше по кругу: доля шага падала до пола, окно летящего
+    // заказа раздувалось, команда укорачивалась, сведение вставало (стенд
+    // «смена цели без потока»: хвост рысканья 4.2° вместо 0.3°).
+    void pushFifo(std::vector<Queued>& fifo, float v) {
+        if (!(std::fabs(v) > 1.0e-5f)) return;
+        float mag = std::fabs(v);
+        const float sign = (v > 0.0f) ? 1.0f : -1.0f;
+        while (mag > 1.0e-5f && !fifo.empty() && fifo.front().sign != sign) {
+            Queued& q = fifo.front();
+            const float take = std::min(q.mag, mag);
+            q.mag -= take;
+            mag -= take;
+            if (q.mag <= 1.0e-5f) fifo.erase(fifo.begin());
+        }
+        if (mag > 1.0e-5f) fifo.push_back({mag, fifoTime, sign});
+    }
+
     // Заказ, который никто не применил дольше предела задержки, — потерянный
     // ввод (палец перехвачен игрой, экран перекрыт).
     void ageFifo(std::vector<Queued>& fifo, float dt) {
@@ -383,8 +436,11 @@ public:
     // оно сливается падением остатка и потому на длинной трубе даёт не меньше,
     // чем расчёт.
     void subtract(float& errYaw, float& errPitch, float delaySec) const {
-        const float inflYaw = inFlightAxis(delaySec, true);
-        const float inflPitch = inFlightAxis(delaySec, false);
+        auto pick = [](float byAge, float byAbsorb) {
+            return (std::fabs(byAbsorb) > 1.0e-4f) ? byAbsorb : byAge;
+        };
+        const float inflYaw = pick(inFlightAxis(delaySec, true), absorbYaw);
+        const float inflPitch = pick(inFlightAxis(delaySec, false), absorbPitch);
         // Насыщение, а не вычитание: оценка летящего заказа ограничивается
         // остатком, поэтому err не меняет знак от одного только учёта полёта и
         // отдельная защита знака не нужна. Вычитание без насыщения на ведении
@@ -398,19 +454,21 @@ public:
     }
 
 private:
-    // Знак берётся у самого свежего заказа: все они в трубе идут в одну
-    // сторону, а сумма величин знаков не несёт.
+    // Сумма ЗНАКОВАЯ: камера применит алгебраическую сумму всего, что висит в
+    // трубе. Сумма модулей со знаком последнего приказа годилась, пока все
+    // заказы шли в одну сторону, и ломалась на смене цели: заказы прошлой цели
+    // (в другую сторону) прибавлялись по величине к новым, оценка летящего
+    // заказа вырастала вдвое-втрое и насыщение обнуляло команду вовсе — прицел
+    // вставал и ждал, пока труба опустеет (стенд «смена цели без потока»: хвост
+    // рысканья 4.7° вместо 0.5°).
     float inFlightAxis(float delaySec, bool yawAxis) const {
         double sum = 0.0;
-        float sign = 0.0f;
-        float newest = -1.0f;
         for (const auto& o : orders) {
             if (o.age >= delaySec) continue;
-            const float v = yawAxis ? o.yawDeg : o.pitchDeg;
-            sum += std::fabs((double)v);
-            if (o.age > newest) { newest = o.age; if (v != 0.0f) sign = v > 0.0f ? 1.0f : -1.0f; }
+            sum += (double)(yawAxis ? o.yawDeg : o.pitchDeg);
         }
-        return sign * (float)sum;
+        const float v = (float)sum;
+        return aim_control::finite(v) ? v : 0.0f;
     }
 
 public:
@@ -528,6 +586,11 @@ struct Controller {
     static constexpr int   kTargetWindowMax = 32;
     // Меньше этой скорости упреждение не выдаётся: ниже шума замера.
     static constexpr float kTargetRateMin = 0.8f;
+    // Ограничить СУММАРНЫЙ заказ в трубе (чтобы бросок камеры за пачку ввода не
+    // превышал потолка команды за такт) пробовали: бросок падает 12.1 -> 4.2°,
+    // но команда начинает хлопать между нулём и остатком места, рывок пальца
+    // растёт 9.2 -> 21.8 px, а захват 30° замедляется 1.33 -> 2.33 с. Не годится:
+    // плавность команды важнее плавности применения ввода, которое делает игра.
     // Предел упреждения, град, и предел времени упреждения, с.
     static constexpr float kLeadMaxDegrees = 12.0f;
     static constexpr float kLeadMaxTime = 0.8f;
@@ -615,10 +678,58 @@ struct Controller {
     void reset() { *this = Controller{}; }
 
     // Палец отпущен или переставлен — игра летящее не отработает.
-    void clearOrders() {
+    // keepDelay: замер задержки принадлежит трубе ввода, а не заказам, и после
+    // переноса пальца труба никуда не девается. Без него следующий захват шёл с
+    // полной долей шага (предел k по задержке включается только при
+    // pipeDelay > 0) и с пустым окном летящего заказа — снова пачка приказов
+    // поверх друг друга и бросок камеры. Стенд A/B оставляет прежнее поведение:
+    // там сброс полный, по умолчанию.
+    void clearOrders(bool keepDelay = false) {
+        const float savedDelay = flight.delay;
         flight.reset();
+        if (keepDelay) flight.delay = savedDelay;
         streakYaw = streakPitch = 0;
         ackCameraYaw = ackCameraPitch = 0.0f;
+    }
+
+    // Смена цели. Отдельный вход, а не clearOrders + resetApproach, которыми
+    // это делалось раньше: труба ввода принадлежит устройству, а не цели.
+    //
+    // Замеренная задержка обязана переживать смену: по ней считается и доля
+    // шага (предел k включается только при pipeDelay > 0), и окно летящего
+    // заказа. Обнулённая задержка оставляла окно пустым, летящий заказ не
+    // вычитался, и контроллер заказывал полный остаток каждый такт — за
+    // мёртвое время трубы набиралось три приказа по 4.2°, которые игра
+    // применяла одной пачкой: бросок камеры 12.6° за кадр (стенд «смена цели
+    // -25°»). Заказы, уже ушедшие в игру, она всё равно применит — палец со
+    // экрана не снимался, и забыть их значит заказать тот же поворот ещё раз.
+    //
+    //   hard = true  — другой игрок. Остаток скачет на десятки градусов,
+    //                  скорость прошлой цели и разгон подхода смысла не имеют.
+    //   hard = false — та же цель, другая кость (голова мигнула, слот упал на
+    //                  шею или грудь): остаток смещается на доли градуса, а
+    //                  aim.cpp считает это сменой выбора. Сбрасывать разгон и
+    //                  скорость цели здесь нельзя — на ведении это повторяется
+    //                  каждые доли секунды.
+    void onTargetSwitch(bool hard) {
+        flight.onResidualStep(hard);
+        streakYaw = streakPitch = 0;
+        ackCameraYaw = ackCameraPitch = 0.0f;
+        // Гаситель качелей и прошлый остаток принадлежат старой цели: иначе
+        // первый же такт на новой принимает скачок за перелёт и режет долю
+        // шага до 0.45 на треть секунды.
+        flipDamp = 1.0f;
+        haveCtlErr = false;
+        prevCtlYaw = prevCtlPitch = 0.0f;
+        if (!hard) return;
+        slewYaw.reset();
+        slewPitch.reset();
+        acquire = 0.0f;
+        softTime = 0.0f;
+        std::memset(histYaw, 0, sizeof(histYaw));
+        std::memset(histPitch, 0, sizeof(histPitch));
+        histN = 0;
+        targetRateYaw = targetRatePitch = 0.0f;
     }
 
     // Новый захват: разгон начинается заново, скорость команды с нуля.
@@ -944,7 +1055,7 @@ struct Controller {
             // Рысканье: шаг dx поворачивает камеру на dx*gy к цели (остаток
             // упадёт на столько); тангаж: сдвиг пальца вверх (dy < 0) поднимает
             // камеру, остаток упадёт на -dy*gp.
-            flight.place(dx * gy, -dy * gp, std::max(trim, trimP));
+            flight.place(dx * gy, -dy * gp, trim, trimP);
         }
 
         out.action = kMove;

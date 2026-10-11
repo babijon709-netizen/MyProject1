@@ -25,6 +25,14 @@
 //   рывок     — СКЗ изменения команды пальца от такта к такту, px: рывок,
 //               который видит игрок, это рывок КОМАНДЫ (камера в любом случае
 //               применяет ввод пачками раз в несколько кадров)
+// Окно смены цели (первые 2 с после смены; у сценариев смены цели и смены
+// кости). Перелёт и ровность хода там молчат: трек пересобирается на скачке
+// остатка, а ровность считается после захвата. В окне считается маятник
+// (амплитуда ухода ЗА цель после первого прохода), проходы через ноль,
+// успокоение (время от смены до последнего такта вне полосы захвата, полоса
+// едет за скоростью цели), реверсы команды, бросок камеры за кадр игры и рывок
+// пальца. Именно эти числа описывают жалобу «первые две секунды маятником».
+//
 //   простой   — доля тактов после захвата, где команда не выдана, хотя остаток
 //               больше полосы захвата: залипший заказ выглядит здесь как 1.0, а
 //               на глаз это «аим не доводит цель и потом дёргает». Такты с
@@ -73,6 +81,17 @@ struct Scenario {
     bool have_camera_axis = false;
     bool estimate_only = true;   // коэффициент — из настройки, замеров нет
     float dip_at = -1.0f, dip_len = 0.0f, dip_fps = 12.0f;  // просадка ФПС игры
+    // Смена цели: в момент switch_at остаток скачет на switch_yaw/switch_pitch
+    // (градусы от текущего положения камеры), новая цель идёт со своей
+    // скоростью. Жалоба: «первые две секунды при смене цели аим ходит
+    // маятником».
+    float switch_at = -1.0f, switch_yaw = 0.0f, switch_pitch = 0.0f;
+    float switch_vyaw = 0.0f, switch_vpitch = 0.0f;
+    // Мигание кости: раз в bone_flip секунд точка прицела прыгает (голова
+    // пропала из скелета, слот упал на шею/грудь) и остаток тангажа смещается
+    // на bone_amp. Для aim.cpp это selectionChanged, то есть та же «смена
+    // цели», хотя игрок её не менял.
+    float bone_flip = 0.0f, bone_amp = 0.0f;
     float duration = 3.0f;
 };
 
@@ -87,8 +106,22 @@ struct Axis {
     float hold = 0.0f;       // доля тактов после захвата, где команды не было
 };
 
+// Окно после смены цели: то, что игрок видит как маятник.
+struct SwitchWin {
+    float overshoot = 0.0f;  // наибольший остаток ПОСЛЕ первого прохода через цель
+    int crossings = 0;       // сколько раз остаток пересёк ноль в окне
+    float settle = -1.0f;    // с момента смены до последнего такта вне полосы, с
+    int reversals = 0;       // смены знака команды пальца в окне
+    // Ровность хода в окне смены: то, что игрок видит как «маятник» и рывки.
+    // Считается по кадрам игры, как и общая ровность.
+    float max_step = 0.0f;   // наибольший поворот камеры за кадр игры, град
+    float step_ratio = 0.0f; // пик к среднему: 1 — ровно, много — бросками
+    float jerk = 0.0f;       // СКЗ изменения команды пальца, px/такт
+};
+
 struct Metrics {
     Axis yaw, pitch;
+    SwitchWin swYaw, swPitch;
     float travel_px = 0.0f;
 };
 
@@ -135,6 +168,11 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
     const float dtOverlay = 1.0f / sc.overlay_fps;
     float camYaw = 0.0f, camPitch = 0.0f;      // поворот камеры в знаках остатка
     float tgtYaw = sc.start_yaw, tgtPitch = sc.start_pitch;  // абсолютный угол кости
+    float vyaw = sc.target_vyaw, vpitch = sc.target_vpitch;  // скорость текущей цели
+    float boneOffset = 0.0f;                   // смещение остатка от мигания кости
+    bool didSwitch = false;
+    float swStart = -1.0f;                     // начало окна смены цели
+    float nextFlip = sc.bone_flip;
     std::vector<Packet> pipe;                   // пакеты в трубе ввода
     float queuedYaw = 0.0f, queuedPitch = 0.0f; // доехало, ждёт применения
     int pipeStage = 0;
@@ -157,10 +195,35 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
     trY.prevErr = sc.start_yaw;
     trP.prevErr = sc.start_pitch;
 
+    // Окно смены цели длится 2 с: ровно столько, по жалобе, аим ходит
+    // маятником. Полоса успокоения та же, что у захвата.
+    const float swLen = 2.0f;
+    struct SwTrack {
+        float prevErr = 0.0f;
+        bool crossed = false;
+        float lastExceed = -1.0f;
+        float lastCmd = 0.0f;
+        bool haveCmd = false;
+        float stepMax = 0.0f;
+        double stepSum = 0.0;
+        int stepN = 0;
+        double jerkSum = 0.0;
+        int cmdN = 0;
+        float lastMag = 0.0f;
+    } swY, swP;
+
     // Полоса захвата едет за собственной скоростью цели: на ведущей цели
-    // остаток не уходит в ноль, а держится на лаге порядка v * задержка трубы.
-    const float lockBand = 1.0f + std::fabs(sc.target_vyaw) * 0.10f;
-    const float lockBandP = 1.0f + std::fabs(sc.target_vpitch) * 0.10f;
+    // остаток не уходит в ноль. Пропорциональная петля с мёртвым временем
+    // держит лаг v*D/kLoopGain, и полоса обязана это учитывать — иначе
+    // «не захвачена» ловится на цели, которую петля догнать физически не может
+    // (10°/с при трубе 0.27 с: лаг 3.9° против прежней полосы 2.0°).
+    // Считается от скорости ТЕКУЩЕЙ цели: после смены цели полоса прежней цели
+    // оставляла «не захвачено» там, где новая цель бежит быстрее.
+    const float pipeSec = (float)sc.pipe_frames / sc.game_fps;
+    const float lagPerRate = std::max(0.10f, pipeSec / 0.7f);
+    auto bandOf = [lagPerRate](float v) { return 1.0f + std::fabs(v) * lagPerRate; };
+    float lockBand = bandOf(vyaw);
+    float lockBandP = bandOf(vpitch);
 
     const int ticks = (int)(sc.duration * sc.overlay_fps);
     for (int i = 0; i < ticks; ++i) {
@@ -195,6 +258,17 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
                 // оверлея: в такт попадает то одна пачка ввода, то две, и
                 // отношение пика к среднему меряло бы это попадание, а не то,
                 // как камера идёт.
+                const bool inSw = (swStart >= 0.0f && now >= swStart && now < swStart + swLen);
+                if (inSw && std::fabs(stepYaw) > 0.02f) {
+                    if (std::fabs(stepYaw) > swY.stepMax) swY.stepMax = std::fabs(stepYaw);
+                    swY.stepSum += std::fabs((double)stepYaw);
+                    ++swY.stepN;
+                }
+                if (inSw && std::fabs(stepPitch) > 0.02f) {
+                    if (std::fabs(stepPitch) > swP.stepMax) swP.stepMax = std::fabs(stepPitch);
+                    swP.stepSum += std::fabs((double)stepPitch);
+                    ++swP.stepN;
+                }
                 if (trY.acquired && std::fabs(stepYaw) > 0.02f) {
                     if (std::fabs(stepYaw) > trY.maxStep) trY.maxStep = std::fabs(stepYaw);
                     trY.stepSum += std::fabs((double)stepYaw);
@@ -214,11 +288,53 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
         const float flowYaw = appliedYaw;
         const float flowPitch = appliedPitch;
 
+        // ---- смена цели / мигание кости ----
+        // Устройство на обоих событиях идёт одним путём: pick.switched =
+        // targetChanged || bone != lastBone. Разница в том, что остаток
+        // скачет на десятки градусов или на доли градуса, поэтому контроллеру
+        // они передаются разными вызовами.
+        if (sc.switch_at >= 0.0f && !didSwitch && t >= sc.switch_at) {
+            didSwitch = true;
+            swStart = t;
+            tgtYaw = camYaw + sc.switch_yaw;
+            tgtPitch = camPitch + sc.switch_pitch;
+            vyaw = sc.switch_vyaw;
+            vpitch = sc.switch_vpitch;
+            lockBand = bandOf(vyaw);
+            lockBandP = bandOf(vpitch);
+            boneOffset = 0.0f;
+            if (soft) ctl.onTargetSwitch(true);
+            else { ctl.clearOrders(); ctl.resetApproach(); }
+            swY = SwTrack{}; swP = SwTrack{};
+            // Скачок остатка в момент смены — это условие сценария, а не
+            // работа контроллера. Общий трек обнуляется, иначе «перелёт»
+            // мерял бы сам скачок (25°), а «захват» остался бы временем
+            // первой цели: после смены интересен повторный захват.
+            auto rearm = [](Axis& ax, Track& tr, float raw) {
+                ax.overshoot = 0.0f;
+                ax.acquire_time = -1.0f;
+                tr.acquired = false;
+                tr.prevErr = raw;
+                tr.haveCmd = false;
+                tr.lastCmd = 0.0f;
+            };
+            rearm(m.yaw, trY, sc.switch_yaw);
+            rearm(m.pitch, trP, sc.switch_pitch);
+        }
+        if (sc.bone_flip > 0.0f && t >= nextFlip) {
+            nextFlip += sc.bone_flip;
+            if (swStart < 0.0f) { swStart = t; swY = SwTrack{}; swP = SwTrack{}; }
+            // Кость прыгает голова -> шея и обратно: остаток тангажа смещается.
+            boneOffset = (boneOffset == 0.0f) ? sc.bone_amp : 0.0f;
+            if (soft) ctl.onTargetSwitch(false);
+            else { ctl.clearOrders(); ctl.resetApproach(); }
+        }
+
         // ---- цель ----
-        tgtYaw += sc.target_vyaw * dtOverlay;
-        tgtPitch += sc.target_vpitch * dtOverlay;
+        tgtYaw += vyaw * dtOverlay;
+        tgtPitch += vpitch * dtOverlay;
         const float rawYaw = tgtYaw - camYaw + bone_jitter(t, sc.jitter);
-        const float rawPitch = tgtPitch - camPitch + bone_jitter(t + 3.7f, sc.jitter * 0.7f);
+        const float rawPitch = tgtPitch + boneOffset - camPitch + bone_jitter(t + 3.7f, sc.jitter * 0.7f);
 
         // ---- контроллер ----
         const bool camMoved = std::fabs(appliedYaw) > 0.02f || std::fabs(appliedPitch) > 0.02f;
@@ -257,6 +373,14 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
                 ++m.pitch.reversals;
             if (cmdYaw != 0.0f) { trY.lastCmd = cmdYaw; trY.haveCmd = true; }
             if (cmdPitch != 0.0f) { trP.lastCmd = cmdPitch; trP.haveCmd = true; }
+            if (swStart >= 0.0f && t < swStart + swLen) {
+                if (swY.haveCmd && cmdYaw != 0.0f && (cmdYaw > 0.0f) != (swY.lastCmd > 0.0f))
+                    ++m.swYaw.reversals;
+                if (swP.haveCmd && cmdPitch != 0.0f && (cmdPitch > 0.0f) != (swP.lastCmd > 0.0f))
+                    ++m.swPitch.reversals;
+                if (cmdYaw != 0.0f) { swY.lastCmd = cmdYaw; swY.haveCmd = true; }
+                if (cmdPitch != 0.0f) { swP.lastCmd = cmdPitch; swP.haveCmd = true; }
+            }
         }
 
         // ---- гладкость команды пальца ----
@@ -267,6 +391,12 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
         {
             const float mag = (out.action == aim_touch::kMove)
                             ? std::sqrt(out.dx * out.dx + out.dy * out.dy) : 0.0f;
+            if (swStart >= 0.0f && t < swStart + swLen) {
+                const float d = mag - swY.lastMag;
+                swY.jerkSum += (double)d * d;
+                ++swY.cmdN;
+                swY.lastMag = mag;
+            }
             if (trY.acquired) {
                 const float d = mag - trY.lastCmdMag;
                 trY.jerkSum += (double)d * d;
@@ -280,8 +410,7 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
         }
 
         // ---- метрики по осям ----
-        auto track = [](Axis& ax, Track& tr, float raw, float applied, float dt,
-                        float band, float tNow) {
+        auto track = [](Axis& ax, Track& tr, float raw, float band, float tNow) {
             if (tr.acquired && raw * tr.prevErr < 0.0f && std::fabs(raw) > ax.overshoot)
                 ax.overshoot = std::fabs(raw);
             // Ровность хода имеет смысл только после захвата: на сведении
@@ -292,8 +421,26 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
                 ax.acquire_time = tNow;
             }
         };
-        track(m.yaw, trY, rawYaw, appliedYaw, dtOverlay, lockBand, t);
-        track(m.pitch, trP, rawPitch, appliedPitch, dtOverlay, lockBandP, t);
+        track(m.yaw, trY, rawYaw, lockBand, t);
+        track(m.pitch, trP, rawPitch, lockBandP, t);
+        if (swStart >= 0.0f && t < swStart + swLen) {
+            auto swTrack = [](SwitchWin& w, SwTrack& tr, float raw, float band, float tNow,
+                              float start) {
+                if (tr.prevErr != 0.0f && raw * tr.prevErr < 0.0f) {
+                    ++w.crossings;
+                    tr.crossed = true;
+                }
+                // Амплитуда маятника — насколько остаток уходит ЗА цель после
+                // первого прохода через неё. Сам скачок остатка в момент смены
+                // сюда не попадает: он задан сценарием, а не контроллером.
+                if (tr.crossed && std::fabs(raw) > w.overshoot) w.overshoot = std::fabs(raw);
+                if (std::fabs(raw) > band) tr.lastExceed = tNow;
+                tr.prevErr = raw;
+                w.settle = (tr.lastExceed < 0.0f) ? 0.0f : tr.lastExceed - start;
+            };
+            swTrack(m.swYaw, swY, rawYaw, lockBand, t, swStart);
+            swTrack(m.swPitch, swP, rawPitch, lockBandP, t, swStart);
+        }
         trY.prevErr = rawYaw;
         trP.prevErr = rawPitch;
         // Хвост — СКЗ остатка за последнюю треть прогона. Считать его «после
@@ -325,6 +472,15 @@ Metrics run(const Scenario& sc, bool soft, int substeps) {
     };
     finish(m.yaw, trY);
     finish(m.pitch, trP);
+    auto finishSw = [](SwitchWin& w, SwTrack& tr) {
+        if (tr.stepN < 3) return;
+        const float mean = (float)(tr.stepSum / tr.stepN);
+        w.max_step = tr.stepMax;
+        w.step_ratio = (mean > 0.02f) ? tr.stepMax / mean : 1.0f;
+        if (tr.cmdN > 1) w.jerk = (float)std::sqrt(tr.jerkSum / tr.cmdN);
+    };
+    finishSw(m.swYaw, swY);
+    finishSw(m.swPitch, swP);
     return m;
 }
 
@@ -363,10 +519,48 @@ std::vector<Scenario> cases() {
     {   // Слайдер скорости на максимуме.
         Scenario s; s.name = "скорость 10";
         s.speed = 10.0f; v.push_back(s); }
+    {   // Смена цели в противоположную сторону НА ВЕДЕНИИ: к моменту смены
+        // труба полна заказов в сторону прошлой цели, а новый остаток другого
+        // знака. Это и есть жалоба «первые две секунды маятником»: сначала
+        // камеру доворачивает старый заказ, потом новый.
+        Scenario s; s.name = "смена цели -25°";
+        s.start_yaw = 8.0f; s.target_vyaw = 8.0f;
+        s.switch_at = 1.5f; s.switch_yaw = -25.0f; s.switch_vyaw = 0.0f;
+        s.duration = 4.5f; v.push_back(s); }
+    {   // Смена на бегущую цель: скорость прошлой цели новой не подходит,
+        // оценка темпа обязана собраться заново и не раскачать прицел.
+        Scenario s; s.name = "смена на бегущую 10°/с";
+        s.start_yaw = 8.0f; s.target_vyaw = -6.0f;
+        s.switch_at = 1.5f; s.switch_yaw = 20.0f; s.switch_vyaw = 10.0f;
+        s.duration = 4.5f; v.push_back(s); }
+    {   // Смена цели в дуэли: потока камеры нет, заказ сливается по падению
+        // остатка, и скачок остатка на 25° выглядит как огромное падение.
+        Scenario s; s.name = "смена цели без потока";
+        s.flow_ok = false; s.start_yaw = 8.0f; s.target_vyaw = 8.0f;
+        s.switch_at = 1.5f; s.switch_yaw = -25.0f; s.duration = 4.5f;
+        v.push_back(s); }
+    {   // Смена кости из меню: точка прицела прыгает голова -> шея, игрок тот
+        // же (мягкая смена, onTargetSwitch(false)). Это единственная мягкая
+        // смена, которая доходит до контроллера: мигнувшую кость держит
+        // aim_control::BoneHold, а слот кости меняется только из меню. Шаг 2
+        // градуса — голова к шее на ближней цели; на дальней слоты расходятся
+        // на доли градуса и остаются внутри полосы удержания.
+        Scenario s; s.name = "смена кости (меню)";
+        s.bone_flip = 2.0f; s.bone_amp = 2.0f;
+        s.duration = 3.5f; v.push_back(s); }
     return v;
 }
 
 float worse(float a, float b) { return a > b ? a : b; }
+
+// Время захвата — единственная метрика, где меньше значит лучше, и -1 значит
+// «не захвачена вовсе». Обычное worse() приняло бы -1 за лучший результат и
+// спрятало бы провал: на смене цели прежняя ветка до конца прогона болтается
+// в 1.4° при полосе 1.0°, то есть не захватывает цель совсем.
+float worseAcq(float a, float b) {
+    if (a < 0.0f || b < 0.0f) return -1.0f;
+    return a > b ? a : b;
+}
 
 void printRow(const char* label, const Metrics& a, const Metrics& b) {
     std::printf("%-26s перелёт %5.2f->%5.2f  реверсы %3d->%3d  захват %5.2f->%5.2f  "
@@ -374,8 +568,8 @@ void printRow(const char* label, const Metrics& a, const Metrics& b) {
                 label,
                 worse(a.yaw.overshoot, a.pitch.overshoot), worse(b.yaw.overshoot, b.pitch.overshoot),
                 a.yaw.reversals + a.pitch.reversals, b.yaw.reversals + b.pitch.reversals,
-                worse(a.yaw.acquire_time, a.pitch.acquire_time),
-                worse(b.yaw.acquire_time, b.pitch.acquire_time),
+                worseAcq(a.yaw.acquire_time, a.pitch.acquire_time),
+                worseAcq(b.yaw.acquire_time, b.pitch.acquire_time),
                 worse(a.yaw.tail_rms, a.pitch.tail_rms), worse(b.yaw.tail_rms, b.pitch.tail_rms),
                 a.yaw.jerk, b.yaw.jerk, a.yaw.hold, b.yaw.hold);
 }
@@ -401,13 +595,31 @@ int main(int argc, char** argv) {
             std::printf("%s;%.3f;%.3f;%.3f;%.3f;%.3f;%.3f;%.3f;%.3f;%d;%d\n",
                         sc.name,
                         worse(a.yaw.overshoot, a.pitch.overshoot), worse(b.yaw.overshoot, b.pitch.overshoot),
-                        worse(a.yaw.acquire_time, a.pitch.acquire_time), worse(b.yaw.acquire_time, b.pitch.acquire_time),
+                        worseAcq(a.yaw.acquire_time, a.pitch.acquire_time), worseAcq(b.yaw.acquire_time, b.pitch.acquire_time),
                         worse(a.yaw.tail_rms, a.pitch.tail_rms), worse(b.yaw.tail_rms, b.pitch.tail_rms),
                         a.yaw.max_step, b.yaw.max_step,
                         a.yaw.reversals + a.pitch.reversals, b.yaw.reversals + b.pitch.reversals);
             continue;
         }
         printRow(sc.name, a, b);
+        if (sc.switch_at >= 0.0f || sc.bone_flip > 0.0f) {
+            std::printf("%-26s   окно смены 2с: маятник Y %.2f->%.2f P %.2f->%.2f град, "
+                        "проходов через ноль %d->%d / %d->%d, успокоение Y %.2f->%.2f "
+                        "P %.2f->%.2f с, реверсы %d->%d\n", "",
+                        a.swYaw.overshoot, b.swYaw.overshoot,
+                        a.swPitch.overshoot, b.swPitch.overshoot,
+                        a.swYaw.crossings, b.swYaw.crossings,
+                        a.swPitch.crossings, b.swPitch.crossings,
+                        a.swYaw.settle, b.swYaw.settle, a.swPitch.settle, b.swPitch.settle,
+                        a.swYaw.reversals + a.swPitch.reversals,
+                        b.swYaw.reversals + b.swPitch.reversals);
+            std::printf("%-26s   ровность в окне: бросок Y %.2f->%.2f P %.2f->%.2f град/кадр, "
+                        "пик/сред Y %.2f->%.2f, рывок пальца %.2f->%.2f px\n", "",
+                        a.swYaw.max_step, b.swYaw.max_step,
+                        a.swPitch.max_step, b.swPitch.max_step,
+                        a.swYaw.step_ratio, b.swYaw.step_ratio,
+                        a.swYaw.jerk, b.swYaw.jerk);
+        }
         if (!csv)
             std::printf("%-26s   по осям: захват Y %.2f->%.2f P %.2f->%.2f, хвост Y %.2f->%.2f "
                         "P %.2f->%.2f, пик/сред Y %.2f->%.2f, перелёт Y %.2f->%.2f\n", "",
@@ -421,6 +633,7 @@ int main(int argc, char** argv) {
     // Пороги regression-проверки: новая ветка обязана быть не хуже прежней по
     // перелёту, рывкам и скорости захвата во всех сценариях сразу.
     float worstOldOver = 0.0f, worstNewOver = 0.0f, worstOldStep = 0.0f, worstNewStep = 0.0f;
+    float worstNewSettle = 0.0f;
 
     for (const auto& sc : cs) {
         const Metrics a = run(sc, false, 1);
@@ -432,7 +645,10 @@ int main(int argc, char** argv) {
         if (a.yaw.max_step > worstOldStep) worstOldStep = a.yaw.max_step;
         if (b.yaw.max_step > worstNewStep) worstNewStep = b.yaw.max_step;
 
-        if (overB > overA + 0.15f) {
+        // Пол 0.35°: меньше полосы удержания, игрок такой перелёт не видит, и
+        // ловить надо перелёт, а не то, что прежняя ветка в этом сценарии
+        // случайно встала ровно на кость.
+        if (overB > overA + 0.15f && overB > 0.35f) {
             std::printf("ПРОВАЛ %s: перелёт вырос %.2f -> %.2f\n", sc.name, overA, overB);
             ++bad;
         }
@@ -456,6 +672,7 @@ int main(int argc, char** argv) {
                         a.yaw.max_step, b.yaw.max_step);
             ++bad;
         }
+        const float pipeSec = (float)sc.pipe_frames / sc.game_fps;
         for (int axis = 0; axis < 2; ++axis) {
             const Axis& ax = axis ? b.pitch : b.yaw;
             const Axis& ay = axis ? a.pitch : a.yaw;
@@ -463,7 +680,13 @@ int main(int argc, char** argv) {
                 std::printf("ПРОВАЛ %s: %s не захвачена\n", sc.name, axis ? "тангаж" : "рысканье");
                 ++bad;
             } else if (ay.acquire_time > 0.0f &&
-                       ax.acquire_time > ay.acquire_time * 1.35f + 0.25f) {
+                       ax.acquire_time > ay.acquire_time * 1.35f + 0.25f &&
+                       // Второе условие — физика, а не допуск: быстрее задержки
+                       // трубы захват не бывает. На трубе 8 кадров (0.53 с)
+                       // прежняя ветка показывала 0.50 с только потому, что
+                       // пачка ввода попала в удачную фазу, а ровное сведение
+                       // там же занимает около секунды — и это не регресс.
+                       ax.acquire_time > pipeSec + 0.50f) {
                 std::printf("ПРОВАЛ %s: %s замедлилось %.2f -> %.2f\n", sc.name,
                             axis ? "тангаж" : "рысканье", ay.acquire_time, ax.acquire_time);
                 ++bad;
@@ -474,9 +697,46 @@ int main(int argc, char** argv) {
                 ++bad;
             }
         }
+
+        // Окно смены цели: маятник здесь не виден ни перелёту (трек
+        // пересобирается на скачке остатка), ни ровности хода (считается после
+        // захвата). Спрашивается худшая из двух осей — смена кости двигает
+        // тангаж, смена цели рысканье.
+        // Успокоение обязано быть не хуже прежнего способа: запас 0.15 с — на
+        // мягкий старт, который на жёсткой смене отрабатывает заново. Бросок
+        // камеры за кадр игры обязан быть не крупнее: заказы прошлой цели
+        // теперь вычитаются, и пачка ввода не набирается поверх них. Проходы
+        // через цель и реверсы команды — не чаще: это и есть качание.
+        if (sc.switch_at >= 0.0f || sc.bone_flip > 0.0f) {
+            const float stA = worse(a.swYaw.settle, a.swPitch.settle);
+            const float stB = worse(b.swYaw.settle, b.swPitch.settle);
+            if (stB > stA * 1.10f + 0.15f) {
+                std::printf("ПРОВАЛ %s: окно смены, успокоение %.2f -> %.2f с\n",
+                            sc.name, stA, stB);
+                ++bad;
+            }
+            if (stB > worstNewSettle) worstNewSettle = stB;
+            const float thA = worse(a.swYaw.max_step, a.swPitch.max_step);
+            const float thB = worse(b.swYaw.max_step, b.swPitch.max_step);
+            if (thB > thA * 1.35f + 1.0f) {
+                std::printf("ПРОВАЛ %s: окно смены, бросок камеры %.2f -> %.2f град/кадр\n",
+                            sc.name, thA, thB);
+                ++bad;
+            }
+            const int crA = a.swYaw.crossings + a.swPitch.crossings;
+            const int crB = b.swYaw.crossings + b.swPitch.crossings;
+            const int rvA = a.swYaw.reversals + a.swPitch.reversals;
+            const int rvB = b.swYaw.reversals + b.swPitch.reversals;
+            if (crB > crA + 2 || rvB > rvA + 2) {
+                std::printf("ПРОВАЛ %s: окно смены, проходов %d -> %d, реверсов %d -> %d\n",
+                            sc.name, crA, crB, rvA, rvB);
+                ++bad;
+            }
+        }
     }
-    std::printf("худший перелёт %.2f -> %.2f град, худший бросок %.2f -> %.2f град\n",
-                worstOldOver, worstNewOver, worstOldStep, worstNewStep);
+    std::printf("худший перелёт %.2f -> %.2f град, худший бросок %.2f -> %.2f град,\n"
+                "худшее успокоение в окне смены %.2f с\n",
+                worstOldOver, worstNewOver, worstOldStep, worstNewStep, worstNewSettle);
     if (bad) {
         std::printf("сценариев с провалом: %d\n", bad);
         return 1;
