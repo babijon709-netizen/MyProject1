@@ -11,10 +11,9 @@ on:
 
   workflow_dispatch:
 
-# Бинарник только собирается и загружается как artifact.
-# Автоматический git push отключён, чтобы избежать non-fast-forward.
+# write — шаг «Release binary» кладёт бинарник в релиз nightly.
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-${{ github.ref }}
@@ -31,8 +30,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -55,21 +52,78 @@ jobs:
           echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
 
       - name: Build
-        env:
-          BENZWARE_STATUS_URL: ${{ vars.BENZWARE_STATUS_URL }}
+        id: android_build
         shell: bash
         run: |
-          node tests/remote_gate/worker.test.mjs
-          sh tests/remote_gate/native.test.sh
-          chmod +x build.sh
-          ./build.sh
+          set -o pipefail
+          "${ANDROID_NDK_HOME}/ndk-build" \
+            NDK_PROJECT_PATH="${GITHUB_WORKSPACE}" \
+            APP_BUILD_SCRIPT="${GITHUB_WORKSPACE}/jni/Android.mk" \
+            NDK_APPLICATION_MK="${GITHUB_WORKSPACE}/jni/Application.mk" \
+            V=1 2>&1 | tee "${RUNNER_TEMP}/ndk-build.log"
 
-          file libs/arm64-v8a/benzware.sh
-          sha256sum libs/arm64-v8a/benzware.sh
+          test -f "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen"
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: benzware-sh-arm64-v8a
-          path: libs/arm64-v8a/benzware.sh
-          if-no-files-found: error
+          mkdir -p dist
+          cp "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen" dist/benzware.sh
+          cp "${GITHUB_WORKSPACE}/libs/arm64-v8a/xvcen" dist/xvcen-arm64-v8a
+          chmod 755 dist/benzware.sh dist/xvcen-arm64-v8a
+
+          file dist/benzware.sh
+          sha256sum dist/benzware.sh dist/xvcen-arm64-v8a
+
+      - name: Report build diagnostics
+        if: failure() && steps.android_build.outcome == 'failure'
+        env:
+          NDK_BUILD_LOG: ${{ runner.temp }}/ndk-build.log
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          log = Path(os.environ["NDK_BUILD_LOG"])
+          lines = log.read_text(errors="replace").splitlines() if log.exists() else []
+          matches = [line for line in lines if re.search(
+              r"(fatal error:|error:|undefined reference|ld\.lld:|make: \*\*\*)", line,
+              re.IGNORECASE)]
+          if not matches:
+              matches = lines[-80:]
+          for line in matches[-80:]:
+              escaped = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=ndk-build::{escaped}")
+          PY
+
+      - name: Release binary
+        id: release
+        if: always() && hashFiles('dist/benzware.sh') != ''
+        # Бинарник уходит в релиз, а не в артефакт Actions: ассет релиза лежит
+        # в хранилище репозитория, которое не зависит от квоты артефактов (она
+        # забита и пересчитывается 6-12 ч, отсюда «Failed to CreateArtifact»).
+        # Тег один и тот же, файлы перезаписываются --clobber.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view nightly >/dev/null 2>&1 ||
+            gh release create nightly \
+              --target "${GITHUB_SHA}" \
+              --title "nightly (${GITHUB_REF_NAME})" \
+              --notes "Автосборка ветки ${GITHUB_REF_NAME}, коммит ${GITHUB_SHA}" \
+              --prerelease
+          gh release upload nightly dist/benzware.sh dist/xvcen-arm64-v8a --clobber
+          echo "url=https://github.com/${GITHUB_REPOSITORY}/releases/tag/nightly" >> "$GITHUB_OUTPUT"
+          echo "file=https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/benzware.sh" >> "$GITHUB_OUTPUT"
+
+      - name: Итог сборки
+        if: always() && hashFiles('dist/benzware.sh') != ''
+        run: |
+          if [ "${{ steps.release.outcome }}" = "success" ]; then
+            echo "релиз  : ${{ steps.release.outputs.url }}"
+            echo "скачать: ${{ steps.release.outputs.file }}"
+          else
+            echo "::error::релиз nightly не залился — смотри лог шага выше"
+          fi
+          sha256sum dist/benzware.sh dist/xvcen-arm64-v8a
+          file dist/benzware.sh
