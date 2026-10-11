@@ -14,6 +14,7 @@
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
 #include "aim_control.h"
+#include "aim_touch.h"          // контроллер тач-аима: общий со стендом tools/aim/touch_sim.cpp
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -96,7 +97,7 @@ std::atomic<double> g_aim_hold_at{0.0};
 // есть шаг пальца считался в 2.5 раза больше нужного. Петля «палец -> камера ->
 // ошибка» при этом расходится (L = k * 0.10 / 0.04 = 1.25 > 1 при k <= 0.5),
 // и прицел трясёт: ровно то, на что жаловался игрок. Проверено на стенде
-// (tools/aim/sim_loop.cpp, модель петли): с рабочим 0.04 при камере 0.10 захват
+// (tools/aim/touch_sim.cpp, сценарий «trim 1.4»): с рабочим 0.04 при камере 0.10 захват
 // «до 1 град» не наступает вообще, перелёт 5.5..9.8 град, СКЗ хвоста 4.5..6.1;
 // с рабочим 0.10 — захват за 1.30 с и хвост 0.00.
 //
@@ -303,9 +304,27 @@ static unsigned long s_bot_noesp_skipped = 0;
 // (цель сама ушла), а камера при этом честно крутится. Поглощение, списанное
 // по потоку, отличает «приказ в трубе ещё не применён» (камера стоит) от
 // «применён» (камера повернулась на столько-то).
-// Знаки: поток положителен туда, куда смотрит камера. Камера вправо — боксы
-// едут влево (медДкс < 0), поэтому рысканье входит с минусом. Камера вверх —
-// боксы едут вниз (медДкс по Y > 0), тангаж входит с плюсом (вверх — больше).
+// Знак потока обязан совпадать со знаком заказа (ordYaw = dx*gy,
+// ordPitch = -dy*gp): drainFlow в aim_touch.h списывает поглощение только
+// однонаправленным потоком, и при обратном знаке заказ не списывался бы вовсе.
+//
+// Вывод из проекции, а не на глаз. Остаток у аима — «градусы от прицела до
+// кости, +право и +вверх» (см. t.yaw/t.pitch выше). Заказ dx > 0 крутит камеру
+// вправо, остаток падает, значит поток рысканья положителен при повороте
+// вправо. Камера вправо на X град — кость уезжает ВЛЕВО, medDx = -X/град_на_px,
+// поэтому поток рысканья = -medDx * град/px. Камера вверх — кость уезжает вниз,
+// medDy > 0 (ось Y экрана смотрит вниз), остаток тангажа падает, поэтому поток
+// тангажа = +medDy * град/px.
+//
+// Стенд tools/aim/touch_sim.cpp держит то же соглашение: flowYaw = +appliedYaw,
+// где appliedYaw — поворот камеры в знаках остатка.
+//
+// Отдельно: прежний мёртвый захват («пауза на 3-5 тактов, потом бросок через
+// кость») давал НЕ знак потока, а клэмп «заказ не больше текущего остатка» —
+// он каждый такт возвращал поглощение к остатку, и заказ зависал навсегда.
+// Клэмп удалён (см. Flight::update в aim_touch.h), знак потока при этом
+// остался прежним. Проверить знак на устройстве можно по логу: поток и заказ
+// одного знака в тактах, где камера отвечает.
 static float s_flowYawDeg = 0.f, s_flowPitchDeg = 0.f;
 static bool  s_flowValid = false;
 struct AimFlowPrev { unsigned long long id; float cx, cy; };
@@ -597,36 +616,15 @@ static void UpdateAimTouch(float dt) {
     // сдвиг пальца с момента последнего НАБЛЮДАЕМОГО поворота камеры.
     static float s_pendDx = 0.f, s_pendDy = 0.f;
     static float s_pendTime = 0.f;
-    // Был ли поворот камеры виден в ПРОШЛОМ кадре. Нужен такту с подтверждением:
-    // поза камеры читается до того, как игра применит наш ввод, и строгое
-    // «камера не двинулась в этом кадре» заставляло ждать лишний такт на каждом
-    // шаге — ведение становилось в несколько раз медленнее.
-    static bool  s_camMovedPrev = false;
-    static float s_ackCameraYaw = 0.f, s_ackCameraPitch = 0.f;
     static int   s_lostFrames = 0;
-    // Доля шага при захвате цели: 0.3 сразу после захвата, 1.0 через 0.2 с
-    // (см. «мягкий старт» ниже — страховка первого шага при наведении).
-    static float s_acquire = 1.f;
-    static int   s_holdFrames = 0;
-    // Приказы «в полёте» (см. «шаг в полёте» ниже): окно последних приказов и
-    // оценка по поглощению остатка. Объявлены вверху, потому что чистятся в
-    // том числе на путях ДО их использования (нет цели, смена цели).
-    struct FlightOrd { float yawDeg, pitchDeg, age; };
-    static std::vector<FlightOrd> s_flight;
-    static float s_absorbYaw = 0.f, s_absorbPitch = 0.f; // заказано, не отработано (град)
-    static float s_stallYaw = 0.f, s_stallPitch = 0.f;
-    static float s_prevRawYaw = 0.f, s_prevRawPitch = 0.f;
-    static bool  s_havePrevRaw = false;
-    // Счётчики однонаправленного остатка в полосе дрожи (см. константы выше).
-    static int s_streakYaw = 0, s_streakPitch = 0;
-    static int s_ackTimeouts = 0;
-    static float s_ackDisabled = 0.f;
     static float s_trimYaw = 1.f, s_trimPitch = 1.f;
-    static float s_flipDamp = 1.f;
-    static float s_prevCtlYaw = 0.f, s_prevCtlPitch = 0.f;
-    static bool s_haveCtlErr = false;
     static bool s_wasActive = false;
     static AimPick pick;
+    // Весь счётчик такта (подтверждение, приказ «в полёте», полоса дрожи, доля
+    // шага, мягкий старт, потолки, сетка цифровера) живёт в aim_touch.h — тот
+    // же код гоняет стенд tools/aim/touch_sim.cpp.
+    static aim_touch::Controller s_touchCtl;
+    static bool s_heldTick = false;   // первый такт после касания: даём игре его увидеть
 
     auto resetRuntime = [&]() {
         AimReleaseFinger(s_fingerDown);
@@ -636,22 +634,10 @@ static void UpdateAimTouch(float dt) {
         s_gainYaw = s_gainPitch = 0.0f;
         s_trackYaw.reset(); s_trackPitch.reset();
         s_pendDx = s_pendDy = s_pendTime = 0.0f;
-        s_camMovedPrev = false;
-        s_ackCameraYaw = s_ackCameraPitch = 0.0f;
-        s_lostFrames = s_holdFrames = 0;
-        s_acquire = 0.0f;
-        s_flight.clear();
-        s_absorbYaw = s_absorbPitch = 0.0f;
-        s_stallYaw = s_stallPitch = 0.0f;
-        s_prevRawYaw = s_prevRawPitch = 0.0f;
-        s_havePrevRaw = false;
-        s_streakYaw = s_streakPitch = 0;
-        s_ackTimeouts = 0;
-        s_ackDisabled = 0.0f;
+        s_lostFrames = 0;
         s_trimYaw = s_trimPitch = 1.0f;
-        s_flipDamp = 1.0f;
-        s_prevCtlYaw = s_prevCtlPitch = 0.0f;
-        s_haveCtlErr = false;
+        s_touchCtl.reset();
+        s_heldTick = false;
         pick.reset();
     };
 
@@ -665,11 +651,6 @@ static void UpdateAimTouch(float dt) {
         resetRuntime();
         s_wasActive = true;
     }
-    // Overlay cadence can exceed the game's touch-processing cadence by a lot.
-    // Keep commands pending long enough for up to eight slow game frames.
-    const float responseWindow = aim_control::touch_response_window(dt);
-    const float ackWait = responseWindow;
-
     // Точка, из которой аим водит палец: выбирается в меню тапом по экрану
     // (вкладка «Аим», см. g_calibMode == 3). Пока не задана — прежняя позиция
     // справа по центру, поэтому поведение по умолчанию не меняется.
@@ -684,14 +665,10 @@ static void UpdateAimTouch(float dt) {
             AimReleaseFinger(s_fingerDown);
             s_haveLast = false; pick.reset();
             s_trackYaw.reset(); s_trackPitch.reset();
+            s_heldTick = false;
             // Палец отпущен — заказанное игра уже не отработает. Обнуляем
             // полёт, иначе возврат цели начнётся со старой оценкой.
-            s_flight.clear();
-            s_absorbYaw = s_absorbPitch = 0.f;
-            s_stallYaw = s_stallPitch = 0.f;
-            s_havePrevRaw = false;
-            s_streakYaw = s_streakPitch = 0;
-            s_ackCameraYaw = s_ackCameraPitch = 0.f;
+            s_touchCtl.clearOrders();
             s_pendDx = s_pendDy = s_pendTime = 0.f;
         }
         return;
@@ -700,13 +677,9 @@ static void UpdateAimTouch(float dt) {
     if (pick.switched) {
         s_haveLast = false;                      // do not learn gain across a target switch
         s_trackYaw.reset(); s_trackPitch.reset();  // и оценку коэффициента тоже
-        // Заказы «в полёте» и их поглощение принадлежат прошлой цели.
-        s_flight.clear();
-        s_absorbYaw = s_absorbPitch = 0.f;
-        s_stallYaw = s_stallPitch = 0.f;
-        s_havePrevRaw = false;
-        s_streakYaw = s_streakPitch = 0;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
+        // Заказы «в полёте», их поглощение и разгон подхода принадлежат прошлой цели.
+        s_touchCtl.clearOrders();
+        s_touchCtl.resetApproach();
         s_pendDx = s_pendDy = s_pendTime = 0.f;
     }
 
@@ -762,7 +735,6 @@ static void UpdateAimTouch(float dt) {
     else {
         s_haveLast = false;
         s_pendDx = s_pendDy = s_pendTime = 0.f;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
     }
 
     // ---- чувствительность пальца: град поворота камеры на пиксель экрана ----
@@ -827,429 +799,72 @@ static void UpdateAimTouch(float dt) {
     const bool lsPitch = s_trackPitch.ready();
     s_trimYaw   = trimTo(s_trimYaw,   lsYaw   ? s_trackYaw.gain()   : (learned ? s_gainYaw   : 0.f), probeGainYaw);
     s_trimPitch = trimTo(s_trimPitch, lsPitch ? s_trackPitch.gain() : s_gainPitch,                    probeGainPitch);
-    const float gy = probeGainYaw   * s_trimYaw;
-    const float gp = probeGainPitch * s_trimPitch;
 
-    // Count same-direction camera deltas while a touch correction is pending.
-    // Small per-frame rotations can add up to a valid response even when each
-    // one is below the camera reader's 0.02-degree movement threshold.
-    const float expectedYaw = s_pendDx * gy;
-    const float expectedPitch = -s_pendDy * gp;
-    if (!haveCam || !s_fingerDown || camMoved) {
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
-    } else {
-        s_ackCameraYaw = aim_control::touch_accumulate_camera_response(
-            s_ackCameraYaw, camYawDelta, expectedYaw);
-        s_ackCameraPitch = aim_control::touch_accumulate_camera_response(
-            s_ackCameraPitch, camPitchDelta, expectedPitch);
-    }
-    const bool partialCameraAck =
-        aim_control::touch_camera_response_acknowledged(expectedYaw, s_ackCameraYaw) ||
-        aim_control::touch_camera_response_acknowledged(expectedPitch, s_ackCameraPitch);
-    const bool camAnswered = camMoved || s_camMovedPrev || partialCameraAck;
-    s_camMovedPrev = camMoved;
-    if (s_ackDisabled > 0.f) s_ackDisabled -= dt;
-    const bool ackGate = (s_ackDisabled <= 0.f);
-    if (ackGate && s_fingerDown && !camAnswered &&
-        (fabsf(s_pendDx) >= 1.f || fabsf(s_pendDy) >= 1.f)) {
-        s_pendTime += dt;
-        if (s_pendTime < ackWait) {
-            Touch_Move(s_fx, s_fy);   // держим тач живым, ничего не двигаем
-            return;
-        }
-        s_pendDx = s_pendDy = 0.f;    // ввод потерялся — продолжаем
-        s_pendTime = 0.f;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
-        if (++s_ackTimeouts >= 3) { s_ackTimeouts = 0; s_ackDisabled = 5.f; }
-    } else if (camAnswered) {
-        s_ackTimeouts = 0;
-        s_pendTime = 0.f;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
-    }
+    // ---- поток камеры: сколько заказанного игра уже отработала ----
+    float flowYaw = 0.f, flowPitch = 0.f;
+    const bool flowOk = aim_camera_flow(flowYaw, flowPitch);
 
-    // ---- «шаг в полёте» -----------------------------------------------------
-    // Игра отрабатывает наш шаг не в этом такте: касание идёт через систему
-    // ввода Android до 100 мс (шесть-восемь кадров игры). Когда настоящей оси
-    // камеры нет (esp_aim_camera_angles -> false, штатный режим на этом
-    // устройстве), такт с подтверждением выше не работает вовсе: контроллер
-    // видит ещё не уменьшившийся остаток и шлёт ту же поправку повторно — к
-    // моменту отклика камера поворачивается вдвое больше нужного: рывок через
-    // цель и обратно, маятник первых секунд наведения.
-    //
-    // Учёт «в полёте» поэтому считается двумя независимыми оценками, а какая
-    // из них правит — зависит от остатка (стенд tools/aim/lock_sim.cpp, сетка
-    // оверлей 12-60 fps × задержка касания 2-8 кадров игры, захват 30°):
-    //
-    //   1. ПОГЛОЩЕНИЕ: заказ копится в градусах, а списывается по факту
-    //      отработки. Основной источник — ПОТОК КАМЕРЫ (см. aim_camera_flow):
-    //      камера повернулась на Х градусов — ровно Х заказанного она съела,
-    //      независимо от того, куда за это время ушла цель. Запасной (когда
-    //      боксов меньше трёх) — падение остатка: камера отработала приказ
-    //      тогда, когда остаток стал меньше. Ни предположений о задержке, ни
-    //      поедания уже отработанных приказов: сколько съедено, столько списано.
-    //   2. Flight orders younger than responseWindow cap the estimate while
-    //      tracking a moving target when camera feedback is unavailable.
-    //
-    // Выбор оценки по величине остатка. Раньше бралась просто меньшая по
-    // величине из двух, и на просадке ФПС (жалоба 23.09, третий заход: «при
-    // посадке ФПС тач-аим ходит маятником») это давало маятник: приказ живёт
-    // в трубе дольше жизни окна, окно пустеет, меньшая оценка — ноль,
-    // контроллер заказывает заново поверх летящего, по прилёте обоих камера
-    // перелетает цель; плюс таймаут «потерялся» в 0.4 с списывал заказ,
-    // который при 12-15 фпс ещё летит (до 0.7 с). Теперь на захвате
-    // (|остаток| > 2.5°) правит поглощение — оно списывается по потоку камеры
-    // при любой задержке трубы, — а на ведении у цели правит минимум с окном,
-    // чтобы след за целью не растягивался.
-    //
-    // Защита знака: остаток перескочил ноль — весь висящий заказ обнуляется
-    // сразу (камера дальше цели, летящий приказ толкнёт ещё дальше), а новый
-    // приказ против хода не выдаётся вовсе. Довычитывать приказы, которых уже
-    // нет, или заказывать против хода камеры — это и есть маятник.
-    //
-    // Четвёртый заход по маятнику (жалоба 24.09: «всё равно маятник первые
-    // 1-2 секунды при наводке») добавил три правила, найденные стендом:
-    //   * поглощение клэмпится к ТЕКУЩЕМУ остатку — цель сближается сама, и
-    //     заказ по остатку прошлых тактов перелетал кость;
-    //   * у цели (полоса 0.45°) шаг выдаётся только при устойчивом
-    //     однонаправленном остатке — дрожь кости гоняла палец с частотой
-    //     кадров (110 реверсов на стенде);
-    //   * доля шага спадает вместе с остатком — поздние прилёты длинной
-    //     трубы не перелетают кость.
-    // Заказ без отклика — потерялся. При просадке ФПС игры труба касания
-    // растягивается на 2-8 кадров ИГРЫ: на 12-15 фпс это до 0.5-0.7 с, а
-    // прежние 0.4 с списывали заказ, который ещё ЛЕТИТ — контроллер считал
-    // его потерянным, заказывал заново, и по прилёте обоих камера перелетала
-    // цель (жалоба 23.09: «при посадке ФПС тач-аим ходит маятником»).
-    // Порог обязан перекрывать худшую задержку трубы с запасом.
-    static constexpr float kTouchStallTime  = 1.00f;  // заказ без отклика — потерялся
-    // Граница «захват/ведение» для выбора оценки в полёте, град: при большом
-    // остатке берём поглощение, при малом — минимум с окном (см. ниже).
-    static constexpr float kTouchInflightBand = 2.5f;
-    // Полоса «дрожь кости» у цели и порог устойчивого дрейфа в ней — та же
-    // пара, что в мемори-локе: дрожь знак чередует и порог не набирает
-    // (камера стоит), настоящее медленное движение знак держит и проходит.
-    // Без порога контроллер гонял палец за дрожью с частотой кадров —
-    // 110 реверсов на стенде, видимый маятник у цели.
-    static constexpr float kTouchJitterBand  = 0.45f;
-    static constexpr int   kTouchDriftStreak = 2;
-    // Доля шага у цели падает вместе с остатком (до минимума): при длинной
-    // трубе касания поздние прилёты заказанного не перелетают кость. На
-    // стенде перелёт на дрожи ±0.4° падает с 0.9° до 0.4°, реверсов 0.
-    static constexpr float kTouchRampBand = 2.5f;   // град, с чего начинается спад
-    static constexpr float kTouchRampMin  = 0.40f;  // пол: ниже шаг станет меньше пикселя и прицел залипнет
-    // If camera feedback timed out, use the latency queue even when an angle
-    // source exists; otherwise the disabled ACK gate would resend every frame.
-    const bool useFlight = !haveCam || s_ackDisabled > 0.0f;
-    auto clearFlight = [&]() {
-        s_flight.clear();
-        s_absorbYaw = s_absorbPitch = 0.f;
-        s_stallYaw = s_stallPitch = 0.f;
-        s_havePrevRaw = false;
-        s_streakYaw = s_streakPitch = 0;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
-    };
-    float errYaw = best.yaw, errPitch = best.pitch;
-    bool s_flowOkTick = false;
-    if (useFlight) {
-        // Поглощение списывается двумя способами, по возможности:
-        //
-        //   1. ПОТОК КАМЕРЫ (основной): камера повернулась на столько-то —
-        //      ровно столько заказа она отработала, в какую бы сторону ни шёл
-        //      остаток. На просадке ФПС это единственный честный признак:
-        //      остаток может стоять и даже расти у ПРИМЕНЁННОГО приказа
-        //      (цель сама ушла за те 2-8 кадров игры, пока приказ летел), и
-        //      списание по падению остатка там молчит или ест не то.
-        //   2. ПАДЕНИЕ ОСТАТКА (запасной, когда поток не посчитался — дуэль
-        //      1 на 1, меньше трёх боксов на экране): прежний способ, на
-        //      захвате вклад цели мал против шагов и он работает.
-        if (s_havePrevRaw) {
-            float flowYaw = 0.f, flowPitch = 0.f;
-            const bool flowOk = aim_camera_flow(flowYaw, flowPitch);
-            s_flowOkTick = flowOk;
-            auto drainFlow = [](float& absorb, float flow) {
-                if (absorb > 0.f && flow > 0.f)
-                    absorb = (flow >= absorb) ? 0.f : absorb - flow;
-                else if (absorb < 0.f && flow < 0.f)
-                    absorb = (-flow >= -absorb) ? 0.f : absorb - flow;
-            };
-            if (flowOk) {
-                const float wasYaw = s_absorbYaw, wasPitch = s_absorbPitch;
-                drainFlow(s_absorbYaw, flowYaw);
-                drainFlow(s_absorbPitch, flowPitch);
-                if (s_absorbYaw   != wasYaw)   s_stallYaw   = 0.f;
-                if (s_absorbPitch != wasPitch) s_stallPitch = 0.f;
-            } else {
-                // Камера повернулась в сторону заказа — остаток упал.
-                const float dYaw   = s_prevRawYaw   - best.yaw;
-                const float dPitch = s_prevRawPitch - best.pitch;
-                if (dYaw > 0.f && s_absorbYaw > 0.f) {
-                    s_absorbYaw = (dYaw >= s_absorbYaw) ? 0.f : s_absorbYaw - dYaw;
-                    s_stallYaw = 0.f;
-                } else if (dYaw < 0.f && s_absorbYaw < 0.f) {
-                    s_absorbYaw = (-dYaw >= -s_absorbYaw) ? 0.f : s_absorbYaw - dYaw;
-                    s_stallYaw = 0.f;
-                }
-                if (dPitch > 0.f && s_absorbPitch > 0.f) {
-                    s_absorbPitch = (dPitch >= s_absorbPitch) ? 0.f : s_absorbPitch - dPitch;
-                    s_stallPitch = 0.f;
-                } else if (dPitch < 0.f && s_absorbPitch < 0.f) {
-                    s_absorbPitch = (-dPitch >= -s_absorbPitch) ? 0.f : s_absorbPitch - dPitch;
-                    s_stallPitch = 0.f;
-                }
-            }
-            // Остаток перескочил через ноль — камера уже дальше цели: заказ,
-            // который ещё висит в трубе, толкнёт её ещё дальше. Обнуляем не
-            // дожидаясь прилёта (это и есть гашение перелёта на захвате).
-            if (s_prevRawYaw * best.yaw < 0.f)         s_absorbYaw = 0.f;
-            if (s_prevRawPitch * best.pitch < 0.f)     s_absorbPitch = 0.f;
-        }
-        s_prevRawYaw = best.yaw; s_prevRawPitch = best.pitch; s_havePrevRaw = true;
-        // Заказ давно не откликается — ввод потерялся (палец перехвачен игрой,
-        // экран перекрыт). Обнуляем, иначе оценка вечно ела бы остаток.
-        if (s_absorbYaw != 0.f) { s_stallYaw += dt; if (s_stallYaw > kTouchStallTime) s_absorbYaw = 0.f; }
-        if (s_absorbPitch != 0.f) { s_stallPitch += dt; if (s_stallPitch > kTouchStallTime) s_absorbPitch = 0.f; }
-        // Заказ не может превышать ТЕКУЩИЙ остаток: цель сближается и сама —
-        // если держать заказ по остатку прошлых тактов, по прилёте камера
-        // проскакивает кость (на стенде перелёт 2.3° на идущей навстречу
-        // цели, с клэмпом меньше, реверсов 0). Клэмп работает только когда
-        // виден поток камеры: без потока уменьшение остатка — единственный
-        // сигнал отработки, и клэмп списывал бы его дважды (на стенде шлейф
-        // ведения в дуэли 1 на 1 рос с 5.6° до 63°).
-        if (s_flowOkTick) {
-            if (s_absorbYaw > 0.f && s_absorbYaw > best.yaw)
-                s_absorbYaw = (best.yaw > 0.f) ? best.yaw : 0.f;
-            if (s_absorbYaw < 0.f && s_absorbYaw < best.yaw)
-                s_absorbYaw = (best.yaw < 0.f) ? best.yaw : 0.f;
-            if (s_absorbPitch > 0.f && s_absorbPitch > best.pitch)
-                s_absorbPitch = (best.pitch > 0.f) ? best.pitch : 0.f;
-            if (s_absorbPitch < 0.f && s_absorbPitch < best.pitch)
-                s_absorbPitch = (best.pitch < 0.f) ? best.pitch : 0.f;
-        }
-        // Окно приказов.
-        for (auto& o : s_flight) o.age += dt;
-        s_flight.erase(std::remove_if(s_flight.begin(), s_flight.end(),
-                       [responseWindow](const FlightOrd& o) { return o.age >= responseWindow; }),
-                       s_flight.end());
-        float winYaw = 0.f, winPitch = 0.f;
-        for (const auto& o : s_flight) { winYaw += o.yawDeg; winPitch += o.pitchDeg; }
-        const auto minmag = [](float a, float b) {
-            return fabsf(a) < fabsf(b) ? a : b;
-        };
-        // Что вычитается из остатка. Когда виден ПОТОК КАМЕРЫ: большой
-        // остаток — это ЗАХВАТ, приказы идут один за другим в одну сторону,
-        // и правильно списывать их по факту (поглощение, оно сливается по
-        // потоку) какая бы ни была задержка трубы. Окно тут только вредило:
-        // на просадке ФПС приказы живут в трубе дольше окна, оно пустеет, и
-        // контроллер заказывал заново поверх летящих — маятник. Малый
-        // остаток — ВЕДЕНИЕ у цели: минимум с окном держит след коротким.
-        // Когда потока НЕТ (дуэль 1 на 1, меньше трёх боксов): поглощению
-        // сливаться нечем, кроме падения остатка, и на ведении убегающей
-        // цели оно не сливается вовсе (на стенде шлейф рос без границы) —
-        // поэтому оценка ВСЕГДА ограничивается окном, как в первом гибриде.
-        const bool noFlow = !s_flowOkTick;
-        const float inflYaw   = (!noFlow && fabsf(best.yaw) > kTouchInflightBand)
-                              ? s_absorbYaw   : minmag(s_absorbYaw,   winYaw);
-        const float inflPitch = (!noFlow && fabsf(best.pitch) > kTouchInflightBand)
-                              ? s_absorbPitch : minmag(s_absorbPitch, winPitch);
-        errYaw   -= inflYaw;
-        errPitch -= inflPitch;
-        // Защита знака: в полёте уже не меньше остатка — стоим, ждём отклика.
-        if (best.yaw * errYaw < 0.f)     errYaw = 0.f;
-        if (best.pitch * errPitch < 0.f) errPitch = 0.f;
-    } else {
-        // Есть настоящая ось — работает такт с подтверждением, а не полёт.
-        // Прошлый сырой остаток забываем: вернётся режим без оси — первый же
-        // его такт не должен списывать заказ по разнице через пропасть.
-        s_havePrevRaw = false;
-    }
-
-    // ---- input quantum ----
-    // The finger can only rest on the digitizer grid, so the camera can only
-    // be steered in steps of (gain / units-per-pixel) degrees. At long range
-    // one such step can exceed the size of a head; the controller therefore
-    // has to settle on the NEAREST reachable position and hold still there,
-    // never hunt back and forth across the target.
+    // ---- параметры такта ----
     float unitsPerPx = Touch_DeviceUnitsPerPixel();
     if (!(unitsPerPx >= 0.25f && unitsPerPx <= 16.f)) unitsPerPx = 1.f;
-    const float gridPx = 1.f / unitsPerPx;               // screen px per device unit
-    // «Известный» коэффициент — это и выученный, и взятый из чувствительности игры:
-    // второй не догадка, а множитель самой игры, и по нему видно квант ввода. Без
-    // этого при чувствительности выше эталонной шаг цифровера больше мёртвой зоны,
-    // и контроллер бесконечно дёргает цель то влево, то вправо — «сильно дергает».
-    const bool  gainKnownYaw   = (s_gainYaw != 0.f)   || gainFromSens || lsYaw;
-    const bool  gainKnownPitch = (s_gainPitch != 0.f) || gainFromSens || lsPitch;
-    const float qYaw   = gainKnownYaw   ? fabsf(gy) * gridPx : 0.f; // deg per device unit
-    const float qPitch = gainKnownPitch ? fabsf(gp) * gridPx : 0.f;
 
-    // Stop inside the tighter of half a screen pixel and a 5 mm target error.
-    // Quantization sets the true lower limit: the nearest representable input is
-    // at most half one touch step away from the bone.
-    const float deadYaw = aim_control::touch_lock_deadband(
-        degPerPx, best.world_dist, gainKnownYaw ? qYaw : 0.0f);
-    const float deadPitch = aim_control::touch_lock_deadband(
-        degPerPx, best.world_dist, gainKnownPitch ? qPitch : 0.0f);
-    if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
-        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
-        // Orders from previous frames continue resolving without new input;
-        // each expires after the adaptive responseWindow.
-        if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
-        return;
-    }
+    aim_touch::Params tp;
+    tp.screen_height   = sh;
+    tp.units_per_px    = unitsPerPx;
+    tp.base_gain       = probeGainYaw;   // множитель самой игры, без подтяжки
+    tp.trim            = s_trimYaw;      // подтяжка замером (1.0..1.4)
+    tp.trim_pitch      = s_trimPitch;
+    tp.gain_from_sens  = gainFromSens;
+    tp.learned_yaw     = (s_gainYaw != 0.f);
+    tp.learned_pitch   = (s_gainPitch != 0.f);
+    tp.lsq_ready_yaw   = lsYaw;
+    tp.lsq_ready_pitch = lsPitch;
+    // Потолки шага обязаны считаться в градусах камеры, а не в рабочих, когда
+    // рабочий коэффициент — догадка: подтяжка завышает его до 1.4x, и потолок
+    // пропускал шаг в полтора раза больше, чем камера доворачивает.
+    tp.estimate_only   = !(lsYaw || s_gainYaw != 0.f);
+    tp.speed           = g_state.gun_str;
+    tp.deg_per_px      = degPerPx;
+    tp.world_dist      = best.world_dist;
+    tp.have_camera_axis = haveCam;
+    tp.soft            = true;
+    tp.substeps        = 4;
 
-    // ---- полоса дрожи у цели ----
-    // Остаток внутри полосы (но вне мёртвой зоны) — это либо дрожь кости,
-    // либо медленный дрейф. Шаг выдаётся только при УСТОЙЧИВОМ остатке в одну
-    // сторону (порог тактов): дрожь знак чередует и не проходит вовсе,
-    // настоящий дрейф проходит целиком. Та же пара фильтров, что в
-    // мемори-локе — оба режима у цели ведут себя одинаково спокойно.
-    errYaw = aim_control::touch_jitter_gate(
-        errYaw, s_streakYaw, kTouchJitterBand, kTouchDriftStreak);
-    errPitch = aim_control::touch_jitter_gate(
-        errPitch, s_streakPitch, kTouchJitterBand, kTouchDriftStreak);
-    if (errYaw == 0.f && errPitch == 0.f) {
-        // Дрожь: палец стоит, камера не ходит за костью.
-        if (s_fingerDown) Touch_Move(s_fx, s_fy);
-        return;
-    }
-
+    // Палец ещё не опущен: ставим его в точку и даём игре увидеть касание
+    // прежде, чем двигать. Окно замера коэффициента начинается с нуля, иначе
+    // первая же пара «сдвиг пальца -> отклик» посчитает бросок к точке.
     auto snapGrid = [&](float v) { return roundf(v * unitsPerPx) / unitsPerPx; };
-
     if (!s_fingerDown) {
         s_fx = snapGrid(ptX);
         s_fy = snapGrid(ptY);
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
-        s_holdFrames = 0;
-        s_acquire = 0.f;
-        // Палец опустился заново: окно замера начинается с нуля, иначе первая
-        // же пара «сдвиг пальца -> отклик» посчитает бросок пальца к точке.
+        s_heldTick = false;
         s_trackYaw.reset(); s_trackPitch.reset();
-        clearFlight();
-        return; // let the game register the touch before moving it
+        s_touchCtl.clearOrders();
+        return;
     }
-    if (s_holdFrames < 1) { ++s_holdFrames; Touch_Move(s_fx, s_fy); return; }
+    if (!s_heldTick) { s_heldTick = true; Touch_Move(s_fx, s_fy); return; }
 
-    // ---- controller ----
-    // Speed slider keeps the old direction (higher = faster):
-    //   1 = gentle (~25% of the remaining error per frame), 10 = snap.
-    float sm = g_state.gun_str;
-    if (!(sm >= 1.f)) sm = 1.f;
-    if (sm > 10.f) sm = 10.f;
-    float frac = 0.25f + (sm - 1.f) / 9.f * 0.75f;   // 0.25 .. 1.00 per frame @60fps
-    // Frame-rate independent source smoothing fraction, adapted to the current dt.
-    float k = manes_aim_source::frame_gain(frac, dt);
-    // ...но не больше половины видимой ошибки за такт. Камера отвечает не в
-    // этом такте: поза отстаёт от касания на 2 кадра (замер в контроллере
-    // фарма, тот же палец и тот же экран), поэтому при k -> 1 петля идёт по
-    // err(t+1) = err(t) - k*err(t-1), то есть z^2 - z + k = 0: корни
-    // |z| = sqrt(k) = 0.993 при k = 0.986, угол ~80 градусов — колебания с
-    // периодом 4.5 такта (0.36 с) не затухают. В логе 16.09.2026 это и видно:
-    // |sent| * 0.10 / |err| = 0.982 (медиана, 167 строк), смена знака ошибки в
-    // 45% пар соседних строк, шаги до потолка 54 px — «аим дёргается».
-    // Половина ошибки за такт даёт |z| <= 0.71: хвост гаснет за 2-3 такта.
-    // Захват цели при этом не замедляется — при ошибке больше 5 градусов шаг
-    // всё равно упирается в потолок maxStep (0.05*sh = 54 px на этом экране),
-    // и скорость наведения задаёт он. Слайдер ниже середины продолжает
-    // работать: доля считается от устойчивого предела пропорционально frac.
-    // The device still showed a fast pendulum at 0.45; use a more conservative
-    // fraction so delayed touch responses cannot reverse the next command.
-    const float kStable = 0.30f;
-    const float fracMid = 0.25f + (5.f - 1.f) / 9.f * 0.75f;   // слайдер 5
-    if (k > kStable) k = kStable;
-    if (frac < fracMid) k *= frac / fracMid;
-    if (k > 1.f) k = 1.f;
-    if (k < 0.05f) k = 0.05f;
+    const aim_touch::Output cmd = s_touchCtl.tick(
+        tp, s_fx, s_fy, dt, best.yaw, best.pitch,
+        camMoved, camYawDelta, camPitchDelta,
+        flowOk, flowYaw, flowPitch,
+        s_pendDx, s_pendDy, s_pendTime);
 
-    // Гаситель «качелей»: остаток по любой из осей перескочил через ноль и уже
-    // набрал заметную величину обратного знака — это перелёт от нашей поправки. На несколько
-    // тактов режем шаг, чтобы вместо дрожи подойти спокойно; восстанавливаемся
-    // плавно (около четырёх тактов). Стенд: реверсы пальца на подходе 6 -> 4,
-    // перелёт не растёт.
-    const bool flipYaw = s_haveCtlErr && s_prevCtlYaw * errYaw < 0.f &&
-                         fabsf(errYaw) > fabsf(s_prevCtlYaw) * 0.35f;
-    const bool flipPitch = s_haveCtlErr && s_prevCtlPitch * errPitch < 0.f &&
-                           fabsf(errPitch) > fabsf(s_prevCtlPitch) * 0.35f;
-    if (flipYaw || flipPitch) {
-        s_flipDamp = 0.45f;
-    } else if (s_flipDamp < 1.f) {
-        s_flipDamp += (1.f - s_flipDamp) * (dt * 2.5f);
-        if (s_flipDamp > 1.f) s_flipDamp = 1.f;
-    }
-    s_prevCtlYaw = errYaw; s_prevCtlPitch = errPitch; s_haveCtlErr = true;
-    k *= s_flipDamp;
-
-    // Soft-start a new lock. Previously, the first frame could use the old
-    // pixel cap (0.15*sh, about 162 px here). Android touch can take 2-8 frames
-    // to reach the camera, so commands accumulated and caused an overshoot
-    // before the in-flight window caught up. Ramp the first 0.2 s from one-third
-    // to full strength; the in-flight accounting handles the remaining delay.
-    if (pick.switched) s_acquire = 0.f;
-    s_acquire += dt / 0.20f;
-    if (s_acquire > 1.f) s_acquire = 1.f;
-    k *= 0.3f + 0.7f * s_acquire;
-
-    // Спад доли шага у цели: чем меньше остаток, тем меньшую его долю
-    // заказываем за такт. Иначе заказы, сделанные на последних градусах,
-    // прилетают по длинной трубе уже ПОСЛЕ того, как остаток закрыт, и
-    // камера перелетает кость (захват «маятником» первых секунд). На
-    // скорости захвата почти не сказывается: большой остаток заказывает
-    // полный потолок шага.
-    {
-        const float maxEff = (fabsf(errYaw) > fabsf(errPitch)) ? fabsf(errYaw) : fabsf(errPitch);
-        float ramp = maxEff / kTouchRampBand;
-        if (ramp > 1.f) ramp = 1.f;
-        if (ramp < kTouchRampMin) ramp = kTouchRampMin;
-        k *= ramp;
-    }
-
-    float dx =  errYaw   * k / gy;
-    float dy = -errPitch * k / gp;
-
-    // Final approach: within a few input steps of the target, stop smoothing
-    // and jump straight to the nearest reachable grid position. Smoothing
-    // here would either creep for many frames or, once rounded, overshoot
-    // and oscillate by a full step around the head.
-    if (gainKnownYaw && fabsf(errYaw) < qYaw * 3.f)
-        dx = roundf((errYaw / gy) * unitsPerPx) / unitsPerPx;
-    if (gainKnownPitch && fabsf(errPitch) < qPitch * 3.f)
-        dy = roundf((-errPitch / gp) * unitsPerPx) / unitsPerPx;
-
-    // Шаг не больше оставшейся ошибки. Иначе собственный шаг перелетает цель, и
-    // следующий шаг считается уже по ошибке другого знака — то самое «дёргается»
-    // (камера отрабатывает шаг не сразу, поэтому перелёт виден глазом).
-    if (fabsf(dx * gy) > fabsf(errYaw)) dx = errYaw / gy;
-    if (fabsf(dy * gp) > fabsf(errPitch)) dy = -errPitch / gp;
-
-    // Bound each command in camera degrees as well as screen pixels. Learned
-    // sensitivity must not multiply the first ADS correction into a large jump.
-    const float maxAnglePerFrame = 1.0f + 0.65f * sm;
-    const float maxYawStep = aim_control::touch_step_limit_pixels(sh, gy, maxAnglePerFrame);
-    const float maxPitchStep = aim_control::touch_step_limit_pixels(sh, gp, maxAnglePerFrame);
-    if (dx >  maxYawStep) dx =  maxYawStep;
-    if (dx < -maxYawStep) dx = -maxYawStep;
-    if (dy >  maxPitchStep) dy =  maxPitchStep;
-    if (dy < -maxPitchStep) dy = -maxPitchStep;
-
-    // Move in whole device units so the applied delta is exactly what we
-    // measure next frame (gain learning) and the finger never accumulates a
-    // hidden sub-unit remainder that later pops out as an unplanned step.
-    float nx = snapGrid(s_fx + dx), ny = snapGrid(s_fy + dy);
-    dx = nx - s_fx; dy = ny - s_fy;
-    if (dx == 0.f && dy == 0.f) {
-        s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
+    if (cmd.action != aim_touch::kMove) {
+        // Держим тач живым, ничего не двигаем: заказы прошлых тактов игра
+        // дорабатывает без нового ввода.
         Touch_Move(s_fx, s_fy);
         return;
     }
 
-    // Keep the finger in the look area around the chosen point. If it drifts to
-    // an edge, lift and re-place it on the point instead of getting stuck.
-    // Размеры области — те же, что были у жёсткой правой полосы (56..97% по X
-    // и 12..88% по Y при точке 74%/50%), но привязаны к выбранной точке, чтобы
-    // она могла стоять в любой части экрана. За экран область не выпускаем.
+    // Палец не выпускаем из зоны вокруг выбранной точки: у края игра начинает
+    // считать свайп по-своему. Размеры области — те же, что были у жёсткой
+    // правой полосы (56..97% по X и 12..88% по Y при точке 74%/50%), но
+    // привязаны к выбранной точке, чтобы она могла стоять в любой части экрана.
+    float nx = s_fx + cmd.dx, ny = s_fy + cmd.dy;
     float minX = ptX - 0.18f * sw, maxX = ptX + 0.23f * sw;
     float minY = ptY - 0.38f * sh, maxY = ptY + 0.38f * sh;
     if (minX < sw * 0.02f) minX = sw * 0.02f;
@@ -1261,26 +876,21 @@ static void UpdateAimTouch(float dt) {
         s_fingerDown = false;
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
-        s_ackCameraYaw = s_ackCameraPitch = 0.f;
         // Палец отпущен — заказанное игра не отработает вовсе.
-        clearFlight();
+        s_touchCtl.clearOrders();
+        s_heldTick = false;
         s_haveLast = false;
         // Перенос пальца — это не шаг прицела: замер по нему покажет мусор.
         s_trackYaw.reset(); s_trackPitch.reset();
         return;
     }
+
+    // Приказ такта уходит не одним пакетом, а частями: игра разбирает их по
+    // разным кадрам, и камера поворачивается плавно вместо одного броска.
+    // partX/partY — НАКОПЛЕННЫЕ позиции, поэтому пишем их подряд как есть.
     s_fx = nx; s_fy = ny;
-    s_pendDx += dx; s_pendDy += dy;   // ждёт отработки камерой (ack-такт)
-    if (useFlight) {
-        // Заказ — «в полёт»: в градусах остатка. Рысканье: шаг dx поворачивает
-        // камеру на dx*gy к цели (остаток упадёт на столько); тангаж: сдвиг dy
-        // вниз уменьшает возвышение, то есть остаток упадёт на -dy*gp.
-        const float ordYaw = dx * gy, ordPitch = -dy * gp;
-        s_flight.push_back({ordYaw, ordPitch, 0.f});
-        s_absorbYaw   += ordYaw;   s_stallYaw   = 0.f;
-        s_absorbPitch += ordPitch; s_stallPitch = 0.f;
-    }
-    Touch_Move(s_fx, s_fy);
+    for (int i = 0; i < cmd.parts; ++i)
+        Touch_Move(s_fx - cmd.dx + cmd.partX[i], s_fy - cmd.dy + cmd.partY[i]);
 }
 
 // ---- диагностика режимов: по 4 строки в секунду в лог (Загрузки) ----------
