@@ -3,7 +3,8 @@
 # (без устройства и NDK). Каталог .stubs/ gitignored и исчезает между
 # сессиями — запускать перед проверками:  bash scripts/host_stubs.sh
 set -e
-cd "$(dirname "$0")/.."
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${DIR}/.."
 mkdir -p .stubs/EGL .stubs/GLES3 .stubs/KHR .stubs/android .stubs/sys .stubs/SLES
 cat > .stubs/KHR/khrplatform.h <<'EOF'
 #pragma once
@@ -447,3 +448,19 @@ cat > .stubs/SLES/OpenSLES_Android.h <<'EOF'
 #define SL_ANDROID_RECORDING_PRESET_NONE ((SLuint32)0)
 EOF
 echo "stubs ready"
+
+# --- Дополнения к сгенерированному минимуму -----------------------------------
+# Минимум выше покрывал только «наши» TU. Полные TU (Android_draw/draw.cpp,
+# Blur/Blur.cpp, backends ImGui) тянут из NDK-заголовков ещё и ES3-функции,
+# android/input.h и android/keycodes.h — без них -fsyntax-only падает не на
+# коде, а на заглушке. Правим две неточности минимума и довешиваем остальное:
+#   EGLNativeWindowType в NDK — void* (ANativeWindow*), а не intptr_t;
+#   glBlendFunc в минимуме объявлен с четырьмя аргументами (слит с Separate).
+sed -i 's/^typedef intptr_t EGLNativeDisplayType; typedef intptr_t EGLNativeWindowType;$/typedef intptr_t EGLNativeDisplayType; typedef void* EGLNativeWindowType;/' .stubs/EGL/egl.h
+sed -i 's/^void glBlendFunc(GLenum, GLenum, GLenum, GLenum);$/void glBlendFunc(GLenum, GLenum);/' .stubs/GLES3/gl3.h
+
+cat "${DIR}/stubs/gles3_extra.h" >> .stubs/GLES3/gl3.h
+cat "${DIR}/stubs/egl_extra.h"   >> .stubs/EGL/egl.h
+cp "${DIR}/stubs/android_input.h"    .stubs/android/input.h
+cp "${DIR}/stubs/android_keycodes.h" .stubs/android/keycodes.h
+echo "stubs ready in $(pwd)/.stubs"
