@@ -10,6 +10,50 @@ constexpr double kPredictionDelaySeconds = 0.008;
 constexpr double kPredictionMaxSeconds = 0.100;
 constexpr float kPredictionMaxDistance = 1.20F;
 
+// Recent direction changes matter more than a long average when predicting strafes.
+inline Vec3 blend_velocity(const Vec3& previous, const Vec3& measured) {
+    const bool previous_finite = std::isfinite(previous.x) && std::isfinite(previous.y) &&
+                                 std::isfinite(previous.z);
+    const bool measured_finite = std::isfinite(measured.x) && std::isfinite(measured.y) &&
+                                 std::isfinite(measured.z);
+    if (!measured_finite) return previous_finite ? previous : Vec3{};
+    if (!previous_finite) return measured;
+
+    const float previous_speed = std::sqrt(previous.x * previous.x + previous.y * previous.y +
+                                           previous.z * previous.z);
+    const float measured_speed = std::sqrt(measured.x * measured.x + measured.y * measured.y +
+                                           measured.z * measured.z);
+    if (!std::isfinite(previous_speed) || !std::isfinite(measured_speed)) return measured;
+
+    const float previous_horizontal_speed =
+        std::sqrt(previous.x * previous.x + previous.z * previous.z);
+    const float measured_horizontal_speed =
+        std::sqrt(measured.x * measured.x + measured.z * measured.z);
+    float horizontal_weight = 0.5F;
+    if (previous_horizontal_speed < 0.5F) {
+        horizontal_weight = 1.0F;
+    } else if (measured_horizontal_speed < 0.5F) {
+        horizontal_weight = 0.8F;
+    } else {
+        const float dot = previous.x * measured.x + previous.z * measured.z;
+        const float direction_cosine = dot /
+            (previous_horizontal_speed * measured_horizontal_speed);
+        if (std::isfinite(direction_cosine) && direction_cosine < 0.5F)
+            horizontal_weight = 0.85F;
+    }
+
+    float vertical_weight = 0.5F;
+    if (previous_speed < 0.5F) vertical_weight = 1.0F;
+    else if (measured_speed < 0.5F) vertical_weight = 0.8F;
+    const float previous_horizontal_weight = 1.0F - horizontal_weight;
+    const float previous_vertical_weight = 1.0F - vertical_weight;
+    return {
+        previous.x * previous_horizontal_weight + measured.x * horizontal_weight,
+        previous.y * previous_vertical_weight + measured.y * vertical_weight,
+        previous.z * previous_horizontal_weight + measured.z * horizontal_weight
+    };
+}
+
 inline Vec3 predict(const Vec3& sample, const Vec3& velocity,
                     double sample_time, double now) {
     double age = now - sample_time - kPredictionDelaySeconds;
