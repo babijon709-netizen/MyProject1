@@ -11,10 +11,11 @@ on:
 
   workflow_dispatch:
 
-# Бинарник только собирается и загружается как artifact.
-# Автоматический git push отключён, чтобы избежать non-fast-forward.
+# Бинарник только собирается и публикуется (artifact + ассет релиза).
+# Автоматический git push отключён, чтобы избежать non-fast-forward;
+# contents: write нужен только для тега/релиза со сборкой.
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-${{ github.ref }}
@@ -67,9 +68,36 @@ jobs:
           chmod +x build.sh
           ./build.sh
 
-      - name: Upload binary
+      # Артефактное хранилище — общий лимит аккаунта (500 МБ на free-плане), и
+      # он уже выбран: upload падает «Artifact storage quota has been hit»,
+      # роняя весь прогон. Сборка от этого не ломается, поэтому шаг
+      # необязательный — бинарник всё равно уезжает ассетом релиза ниже.
+      - name: Upload artifact (best effort)
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: xvcen-arm64-v8a
           path: libs/arm64-v8a/xvcen
           if-no-files-found: error
+          retention-days: 7
+
+      # Ассеты релиза в лимит артефактов не входят: один rolling-релиз на ветку,
+      # ассет перезаписывается каждым прогоном (--clobber), так что они не копятся.
+      - name: Publish release asset
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="ci/$(printf '%s' "${GITHUB_REF_NAME}" | tr '/' '-')"
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" \
+              --title "CI: ${GITHUB_REF_NAME}" \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --notes "Сборка xvcen (arm64-v8a) из ветки ${GITHUB_REF_NAME}. Ассет перезаписывается каждым прогоном." \
+              || echo "::warning::релиз ${TAG} создать не удалось — пробуем залить ассеты в существующий"
+          fi
+          sha256sum libs/arm64-v8a/xvcen > libs/arm64-v8a/xvcen.sha256
+          gh release upload "${TAG}" libs/arm64-v8a/xvcen libs/arm64-v8a/xvcen.sha256 --clobber
+          gh release view "${TAG}" --json assets --jq '.assets[] | "\(.name) \(.size) bytes"'
