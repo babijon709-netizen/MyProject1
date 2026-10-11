@@ -42,6 +42,14 @@ struct Diagnostics {
     bool scan_active = false, class_known = false;
 };
 
+inline bool valid_il2cpp_pointer(uint64_t value) {
+    return value >= 0x10000 && value < 0x0001000000000000ULL && (value & 0x7u) == 0;
+}
+
+inline bool valid_user_pointer(uint64_t value) {
+    return value >= 0x10000 && value < 0x0001000000000000ULL;
+}
+
 inline constexpr const char* kClassName = "BulletProjectile";
 inline constexpr const char* kNamespace = "HyperHug.Games.Oxide.Features.Weapons";
 inline constexpr size_t kObjectSpan = game_offsets::BULLET_PROJECTILE_PREVIOUS_POSITION + sizeof(Vec3);
@@ -238,7 +246,7 @@ template<class IO> class Controller {
             if (seen_.find(address) != seen_.end()) continue;
 
             const uint64_t klass = io_.object_class(address);
-            if (klass < 0x10000 || (klass & (alignof(void*) - 1)) != 0) {
+            if (!valid_il2cpp_pointer(klass)) {
                 ++diagnostics_.invalid_class_pointers;
                 continue;
             }

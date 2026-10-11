@@ -64,6 +64,10 @@ void install_projectile(FakeIO& io, uint64_t address, uint64_t klass,
 }
 
 void test_offsets_and_samples() {
+    assert(bullet_tp::valid_il2cpp_pointer(0x70000));
+    assert(!bullet_tp::valid_il2cpp_pointer(0x70003));
+    assert(!bullet_tp::valid_il2cpp_pointer(0x0001000000000000ULL));
+    assert(bullet_tp::valid_user_pointer(0x70001));
     assert(game_offsets::BULLET_PROJECTILE_SLOWDOWN == 0x20);
     assert(game_offsets::BULLET_PROJECTILE_MINSPEED == 0x24);
     assert(game_offsets::BULLET_PROJECTILE_TRACESIZE == 0x30);

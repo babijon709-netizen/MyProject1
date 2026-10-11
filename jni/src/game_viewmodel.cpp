@@ -316,13 +316,15 @@ struct HeapMemory {
     ClassIdentityResult exact_result(uint64_t object, const char* name, const char* namespaze) {
         if (object < 0x10000) return ClassIdentityResult::Invalid;
         const uint64_t klass = memory.ptr(object);
-        if (klass < 0x10000 || (klass & (alignof(void*) - 1)) != 0)
-            return ClassIdentityResult::Invalid;
+        if (!bullet_tp::valid_il2cpp_pointer(klass)) return ClassIdentityResult::Invalid;
+        const uint64_t image = memory.ptr(klass);
         const uint64_t np = memory.ptr(klass + go_active::IL2CPP_CLASS_NAME);
         const uint64_t sp = memory.ptr(klass + go_active::IL2CPP_CLASS_NAMESPACE);
         char n[96]{}, ns[96]{};
         const size_t nl = std::strlen(name) + 1, sl = std::strlen(namespaze) + 1;
-        if (np < 0x10000 || sp < 0x10000 || nl > sizeof(n) || sl > sizeof(ns))
+        if (!bullet_tp::valid_il2cpp_pointer(image) ||
+            !bullet_tp::valid_user_pointer(np) || !bullet_tp::valid_user_pointer(sp) ||
+            nl > sizeof(n) || sl > sizeof(ns))
             return ClassIdentityResult::Invalid;
         if (!esp_silent_read(np, n, nl) || !esp_silent_read(sp, ns, sl))
             return ClassIdentityResult::Unreadable;
