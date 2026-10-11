@@ -586,6 +586,9 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
 // мёртвая зона и контроллер. Отличия от oldsc только интеграционные:
 //   - упреждение — как у мемори в нынешнем сурсе: скоростной сдвиг точки в
 //     game.cpp (см. ниже в функции), без старой доводки по угловой скорости;
+//   - предохранители захвата — мягкий старт (0.2 с от трети шага до полного)
+//     и потолок шага в градусах камеры из сурса до замены: старый пиксельный
+//     потолок 0.15*sh давал рывок камеры в момент входа цели в круг ФОВ;
 //   - там строки состояния писались в farmlog — здесь такого логгера нет;
 //   - точка, из которой водится палец, берётся из AimTouchFracX/Y: дефолт
 //     74%/50% ровно как в oldsc, плюс продолжает работать калибровка «Точка
@@ -621,6 +624,9 @@ static void UpdateAimTouch(float dt) {
     static unsigned long long s_lastId = 0;        // sticky target
     static int   s_lostFrames = 0;
     static int   s_holdFrames = 0;
+    // Доля шага при захвате цели: 0 сразу после взятия, 1.0 через 0.2 с
+    // (мягкий старт — см. ниже в контроллере).
+    static float s_acquire = 0.f;
 
     const bool menuOpen = g_sheet.visible || (g_pop.visible && !g_pop.closing);
     bool active = g_state.aim_touch && g_esp_attached && !menuOpen &&
@@ -637,6 +643,7 @@ static void UpdateAimTouch(float dt) {
         AimReleaseFinger(s_fingerDown);
         g_aimActive = false;
         s_haveLast = false; s_lastId = 0; s_lostFrames = 0; s_holdFrames = 0;
+        s_acquire = 0.f;
         return;
     }
 
@@ -753,6 +760,7 @@ static void UpdateAimTouch(float dt) {
     // Старая доводка по угловой скорости цели из oldsc убрана: она считала то
     // же самое движение вторично и по поверх углов, а не мировых скоростей.
     if (best.id != s_lastId) {
+        s_acquire = 0.f;   // новый захват — первые 0.2 с шаг нарастает плавно
         // Цель взята: первый период «вдоха» рамки (см. g_aim_pulse_* в aim.h).
         const double now = MonoNow();
         g_aim_pulse_target.store(best.id, std::memory_order_relaxed);
@@ -917,8 +925,8 @@ static void UpdateAimTouch(float dt) {
     // |sent| * 0.10 / |err| = 0.982 (медиана, 167 строк), смена знака ошибки в
     // 45% пар соседних строк, шаги до потолка 54 px — «аим дёргается».
     // Половина ошибки за такт даёт |z| <= 0.71: хвост гаснет за 2-3 такта.
-    // Захват цели при этом не замедляется — при ошибке больше 5 градусов шаг
-    // всё равно упирается в потолок maxStep (0.05*sh = 54 px на этом экране),
+    // Захват цели при этом не замедляется — при ошибке больше нескольких
+    // градусов шаг всё равно упирается в градусный потолок (см. ниже),
     // и скорость наведения задаёт он. Слайдер ниже середины продолжает
     // работать: доля считается от устойчивого предела пропорционально frac.
     const float kStable = 0.5f;
@@ -927,6 +935,14 @@ static void UpdateAimTouch(float dt) {
     if (frac < fracMid) k *= frac / fracMid;
     if (k > 1.f) k = 1.f;
     if (k < 0.05f) k = 0.05f;
+
+    // Мягкий старт нового захвата: первые 0.2 с доля шага растёт с трети до
+    // полной. Полный первый шаг не нужен и вреден: касание доходит до камеры
+    // не в тот же кадр (2-8 кадров), приказы накапливаются в трубе и камера
+    // перелетает цель — это и есть рывок при появлении противника в круге ФОВ.
+    s_acquire += dt / 0.20f;
+    if (s_acquire > 1.f) s_acquire = 1.f;
+    k *= 0.3f + 0.7f * s_acquire;
 
     float dx =  best.yaw   * k / gy;
     float dy = -best.pitch * k / gp;
@@ -941,11 +957,16 @@ static void UpdateAimTouch(float dt) {
         dy = roundf((-best.pitch / gp) * unitsPerPx) / unitsPerPx;
 
     // Clamp per-frame travel so a bad gain estimate never slingshots.
-    const float maxStep = learned ? sh * 0.15f : sh * 0.05f;
-    if (dx >  maxStep) dx =  maxStep;
-    if (dx < -maxStep) dx = -maxStep;
-    if (dy >  maxStep) dy =  maxStep;
-    if (dy < -maxStep) dy = -maxStep;
+    // Потолок — в градусах камеры, а не в пикселях: старый пиксельный потолок
+    // 0.15*sh разрешал за такт ~16 градусов, и пока касание летело до камеры,
+    // такие приказы копились и перелетали цель (рывок при захвате).
+    const float maxAnglePerFrame = 1.0f + 0.65f * sm;   // град за такт
+    const float maxYawStep   = aim_control::touch_step_limit_pixels(sh, gy, maxAnglePerFrame);
+    const float maxPitchStep = aim_control::touch_step_limit_pixels(sh, gp, maxAnglePerFrame);
+    if (dx >  maxYawStep)   dx =  maxYawStep;
+    if (dx < -maxYawStep)   dx = -maxYawStep;
+    if (dy >  maxPitchStep) dy =  maxPitchStep;
+    if (dy < -maxPitchStep) dy = -maxPitchStep;
 
     // Move in whole device units so the applied delta is exactly what we
     // measure next frame (gain learning) and the finger never accumulates a
