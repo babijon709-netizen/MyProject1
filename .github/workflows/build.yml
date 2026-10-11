@@ -1,4 +1,4 @@
-name: Build benzware.sh
+name: Build xvcen (arm64-v8a)
 
 on:
   push:
@@ -26,24 +26,23 @@ env:
 jobs:
   build:
     name: Android arm64-v8a
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'cmdline-tools;latest'
+        uses: android-actions/setup-android@v4
 
       - name: Install Android NDK
         shell: bash
@@ -51,25 +50,26 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "ndk;${NDK_VERSION}"
 
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
-          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
+          {
+            echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+            echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          } >> "${GITHUB_ENV}"
+
+      # jni/tests — хост-прогон без NDK (g++): падение теста не должно выглядеть
+      # как падение сборки, поэтому отдельный шаг.
+      - name: Host unit tests
+        shell: bash
+        run: bash scripts/host_tests.sh
 
       - name: Build
-        env:
-          BENZWARE_STATUS_URL: ${{ vars.BENZWARE_STATUS_URL }}
         shell: bash
         run: |
-          node tests/remote_gate/worker.test.mjs
-          sh tests/remote_gate/native.test.sh
           chmod +x build.sh
           ./build.sh
 
-          file libs/arm64-v8a/benzware.sh
-          sha256sum libs/arm64-v8a/benzware.sh
-
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: benzware-sh-arm64-v8a
-          path: libs/arm64-v8a/benzware.sh
+          name: xvcen-arm64-v8a
+          path: libs/arm64-v8a/xvcen
           if-no-files-found: error
