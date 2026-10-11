@@ -75,13 +75,13 @@ jobs:
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
           echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
 
+      # Хост-тесты и стенд тач-аима гоняет джоба host: они не требуют NDK и
+      # падают за секунды, поэтому в сборке их дублировать незачем.
       - name: Build
         env:
           BENZWARE_STATUS_URL: ${{ vars.BENZWARE_STATUS_URL }}
         shell: bash
         run: |
-          node tests/remote_gate/worker.test.mjs
-          sh tests/remote_gate/native.test.sh
           chmod +x build.sh
           ./build.sh
 
@@ -92,5 +92,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: benzware-sh-arm64-v8a
-          path: libs/arm64-v8a/benzware.sh
+          path: |
+            libs/arm64-v8a/benzware.sh
+            libs/arm64-v8a/xvcen-arm64-v8a
           if-no-files-found: error
