@@ -220,7 +220,7 @@ static bool ReadWeaponTrailer(std::istream& f, viewmodel::WeaponConfigExtension&
         return false;
     }
     XorBuf(buf, sizeof(buf));
-    viewmodel::ViewmodelSettings probe;
+    ViewmodelSettings probe;
     if (!viewmodel::decode_weapon(buf, sizeof(buf), probe)) {
         f.clear();
         f.seekg(start);
