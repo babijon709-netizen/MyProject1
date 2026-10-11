@@ -582,8 +582,10 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
 // ============================ Тач-аим ======================================
 //
 // Тач-аим из старого сурса (oldsc): петля перенесена оттуда целиком — выбор
-// цели, упреждение, обучение коэффициента, такт с подтверждением, квант ввода,
+// цели, обучение коэффициента, такт с подтверждением, квант ввода,
 // мёртвая зона и контроллер. Отличия от oldsc только интеграционные:
+//   - упреждение — как у мемори в нынешнем сурсе: скоростной сдвиг точки в
+//     game.cpp (см. ниже в функции), без старой доводки по угловой скорости;
 //   - там строки состояния писались в farmlog — здесь такого логгера нет;
 //   - точка, из которой водится палец, берётся из AimTouchFracX/Y: дефолт
 //     74%/50% ровно как в oldsc, плюс продолжает работать калибровка «Точка
@@ -744,53 +746,12 @@ static void UpdateAimTouch(float dt) {
     g_aim_hold_at.store(MonoNow(), std::memory_order_relaxed);
     if (best.id != s_lastId) s_haveLast = false; // do not learn gain across a target switch
 
-    // Lead a moving target: the game applies our finger delta next frame, by
-    // which time the target has moved on. Use the target's angular velocity
-    // relative to the camera (with the camera's own rotation removed) and
-    // aim one frame ahead. Reset on target switch.
-    //
-    // Камера здесь та же, что и в обучении коэффициента (esp_aim_camera_angles):
-    // вычитать отстающий базис из матрицы вида из угловой скорости цели нельзя —
-    // в поправку попадал бы его запаздывающий поворот, и прицел уезжал бы в
-    // сторону. Нет настоящей оси — нет и упреждения: так вёл цель эталонный аим.
-    static float s_prevTgtYaw = 0.f, s_prevTgtPitch = 0.f, s_prevCamYawT = 0.f, s_prevCamPitchT = 0.f;
-    static bool  s_havePrevTgt = false;
-    {
-        float cy = 0.f, cp = 0.f;
-        bool haveC = esp_aim_camera_angles(cy, cp);
-        if (best.id == s_lastId && s_havePrevTgt && haveC) {
-            float dCamYaw = cy - s_prevCamYawT;
-            while (dCamYaw > 180.f) dCamYaw -= 360.f;
-            while (dCamYaw < -180.f) dCamYaw += 360.f;
-            float dCamPitch = cp - s_prevCamPitchT;
-            // world-space angular motion of the target = change in offset + camera rotation
-            float vYaw = (best.yaw - s_prevTgtYaw) + dCamYaw;
-            float vPitch = (best.pitch - s_prevTgtPitch) + dCamPitch;
-            if (std::isfinite(vYaw) && std::isfinite(vPitch) && fabsf(vYaw) < 10.f && fabsf(vPitch) < 10.f) {
-                s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
-                // Below this the "motion" is bone animation jitter (breathing,
-                // sway), which at long range is larger than the head itself.
-                // Extrapolating it would double the error, so only lead real
-                // movement. Aim more than a frame ahead for fast movers so the
-                // crosshair stays on a laterally running target (the controller
-                // smoothing otherwise makes it trail behind).
-                const float leadMin = degPerPx * 2.f;
-                float vMag = sqrtf(vYaw * vYaw + vPitch * vPitch);
-                if (vMag > leadMin) {
-                    float k = 1.1f * (1.f - leadMin / vMag);
-                    if (k > 1.5f) k = 1.5f;
-                    best.yaw += vYaw * k;
-                    best.pitch += vPitch * k;
-                }
-            } else {
-                s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
-            }
-        } else {
-            s_prevTgtYaw = best.yaw; s_prevTgtPitch = best.pitch;
-        }
-        if (haveC) { s_prevCamYawT = cy; s_prevCamPitchT = cp; s_havePrevTgt = true; }
-        else s_havePrevTgt = false;
-    }
+    // Упреждение — то же, что у мемори-режима: скоростной сдвиг точки кости
+    // ещё ДО проекции в game.cpp (set_aim_point: world + vel * aim_lead_seconds,
+    // секунды = автопорог/слайдер + время полёта пули по баллистике оружия).
+    // В aim_yaw/aim_pitch бокса оно уже заложено, второго слоя не нужно.
+    // Старая доводка по угловой скорости цели из oldsc убрана: она считала то
+    // же самое движение вторично и по поверх углов, а не мировых скоростей.
     if (best.id != s_lastId) {
         // Цель взята: первый период «вдоха» рамки (см. g_aim_pulse_* в aim.h).
         const double now = MonoNow();
