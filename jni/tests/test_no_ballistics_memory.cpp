@@ -317,7 +317,9 @@ int main() {
         assert(go_active::FPROCKETLAUNCHER_PROJECTILE_PREFAB == 0x148);
         assert(go_active::FPEXPLOSIVECHARGE_PROJECTILE_PREFAB == 0x130);
         assert(go_active::FPSNOWBALL_PROJECTILE_PREFAB == 0x130);
-        assert(go_active::FPSPEAR_PROJECTILE_PREFAB == 0x170);
+        // У FPSpear в бете 11957 хвост переработан: префаб уехал на 0x178.
+        assert(go_active::FPSPEAR_PROJECTILE_PREFAB ==
+               (version == go_active::GameVersion::Beta ? 0x178 : 0x170));
         assert(go_active::HITSCANCONFIG_BALLISTIC_PROFILE == 0x60);
         assert(go_active::BALLISTICPROFILE_GRAVITY == 0x10);
         assert(go_active::SHAFTEDPROJECTILE_GRAVITY == 0xAC);

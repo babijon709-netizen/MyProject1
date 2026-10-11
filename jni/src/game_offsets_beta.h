@@ -3,7 +3,12 @@
 
 // Beta profile, snapshot 2026-10-10, build 11957.
 // Source: dumpbeta11957.7z (dump.cs + libil2cpp.so + script.json), 31882 types.
-// Managed layouts used by the reader match release 11949; metadata slots differ.
+// Managed layouts used by the reader match release 11949 EXCEPT the FPMelee
+// family (see below): beta 11957 inserted hitsPerAttack+int at the head of
+// FPMelee and reworked the FPSpear tail (trajectory-preview refs), so FPMelee /
+// FPTool / FPSpear field offsets differ from the release aliases by +8 (and the
+// spear throw cache by +0x18). Everything else is aliased from game_offsets
+// after a positional check against this dump's dump.cs.
 // TypeInfo slots taken from the dump's TypeInfoPointers table and cross-checked
 // by the adrp/ldr -> R_AARCH64_RELATIVE addend vote over each class's own
 // methods (see game_offsets.h for the methodology).
@@ -58,7 +63,9 @@ inline constexpr std::uint64_t FPROCKETLAUNCHER_CONFIG = game_offsets::FPROCKETL
 inline constexpr std::uint64_t FPROCKETLAUNCHER_PROJECTILE_PREFAB = game_offsets::FPROCKETLAUNCHER_PROJECTILE_PREFAB;
 inline constexpr std::uint64_t FPEXPLOSIVECHARGE_PROJECTILE_PREFAB = game_offsets::FPEXPLOSIVECHARGE_PROJECTILE_PREFAB;
 inline constexpr std::uint64_t FPSNOWBALL_PROJECTILE_PREFAB = game_offsets::FPSNOWBALL_PROJECTILE_PREFAB;
-inline constexpr std::uint64_t FPSPEAR_PROJECTILE_PREFAB = game_offsets::FPSPEAR_PROJECTILE_PREFAB;
+// beta 11957: у FPSpear хвост переработан (добавлены trajectoryPreviewPrefab/BSB),
+// поэтому период/префаб/кеш броска уехали от релизных +8/+0x18 (см. ниже).
+inline constexpr std::uint64_t FPSPEAR_PROJECTILE_PREFAB = 0x178; // beta 11957: m_SpearPrefab (в релизе 0x170)
 inline constexpr std::uint64_t FPWEAPON_EFFECTIVE_RELOAD_PERIOD = game_offsets::FPWEAPON_EFFECTIVE_RELOAD_PERIOD;
 inline constexpr std::uint64_t FPWEAPON_SHOT_PERIOD = game_offsets::FPWEAPON_SHOT_PERIOD;
 inline constexpr std::uint64_t FPHITSCAN_FIRE_MODE = game_offsets::FPHITSCAN_FIRE_MODE;
@@ -73,8 +80,12 @@ inline constexpr std::uint64_t FPCROSSBOW_MIN_SHOT_PERIOD = game_offsets::FPCROS
 inline constexpr std::uint64_t FPROCKETLAUNCHER_MIN_SHOT_PERIOD = game_offsets::FPROCKETLAUNCHER_MIN_SHOT_PERIOD;
 inline constexpr std::uint64_t FPSNOWBALL_MIN_THROW_PERIOD = game_offsets::FPSNOWBALL_MIN_THROW_PERIOD;
 inline constexpr std::uint64_t FPEXPLOSIVECHARGE_MIN_THROW_PERIOD = game_offsets::FPEXPLOSIVECHARGE_MIN_THROW_PERIOD;
-inline constexpr std::uint64_t FPSPEAR_MIN_THROW_PERIOD = game_offsets::FPSPEAR_MIN_THROW_PERIOD;
-inline constexpr std::uint64_t FPSPEAR_CACHED_THROW_PERIOD = game_offsets::FPSPEAR_CACHED_THROW_PERIOD;
+// beta 11957: m_MinTimeBetweenThrows у FPSpear на 0x170 (в релизе 0x168).
+inline constexpr std::uint64_t FPSPEAR_MIN_THROW_PERIOD = 0x170; // beta 11957: m_MinTimeBetweenThrows
+// Кеш периода броска. Подтверждено дизассемблером беты: метод 0x68CF868 делает
+// `ldr s0,[x19,#0x170]` (источник) -> `str s0,[x19,#0x1c0]` (кеш <BSv>).
+// В релизе тот же перенос: 0x686185C `ldr s0,[x19,#0x168]` -> `str s0,[x19,#0x1a8]`.
+inline constexpr std::uint64_t FPSPEAR_CACHED_THROW_PERIOD = 0x1C0; // beta 11957: <BSv>k__BackingField (в релизе 0x1A8)
 inline constexpr std::uint64_t FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD = game_offsets::FPHITSCAN_EFFECTIVE_LOOP_RELOAD_PERIOD;
 inline constexpr std::uint64_t FPHITSCAN_CALCULATOR = game_offsets::FPHITSCAN_CALCULATOR;
 inline constexpr std::uint64_t CALCULATOR_DISPERSION_CONFIG = game_offsets::CALCULATOR_DISPERSION_CONFIG;
@@ -172,11 +183,14 @@ inline constexpr std::uint64_t FPOBJECT_PLAYER_BACKREF = game_offsets::FPOBJECT_
 inline constexpr std::uint64_t FPWEAPON_IS_AIMING = game_offsets::FPWEAPON_IS_AIMING;
 inline constexpr std::uint64_t FPOBJECT_RAYCAST_MANAGER = game_offsets::FPOBJECT_RAYCAST_MANAGER;
 inline constexpr std::uint64_t FPOBJECT_EVENT_HANDLER = game_offsets::FPOBJECT_EVENT_HANDLER;
-inline constexpr std::uint64_t FPMELEE_MAX_REACH = game_offsets::FPMELEE_MAX_REACH;
-inline constexpr std::uint64_t FPMELEE_HIT_RADIUS = game_offsets::FPMELEE_HIT_RADIUS;
-inline constexpr std::uint64_t FPMELEE_TIME_BETWEEN_ATTACKS = game_offsets::FPMELEE_TIME_BETWEEN_ATTACKS;
-inline constexpr std::uint64_t FPMELEE_PAUSE_AFTER_ATTACK = game_offsets::FPMELEE_PAUSE_AFTER_ATTACK;
-inline constexpr std::uint64_t FPTOOL_TOOL_PURPOSES = game_offsets::FPTOOL_TOOL_PURPOSES;
+// beta 11957: в начало FPMelee вставлены hitsPerAttack (0x128) и int (0x12C),
+// поэтому все собственные поля FPMelee и наследников сдвинуты на +8
+// (раскладка сверена поимённо с dump.cs беты; FPTool и FPSpear — вместе с ней).
+inline constexpr std::uint64_t FPMELEE_MAX_REACH = 0x130; // beta 11957: m_MaxReach (в релизе 0x128)
+inline constexpr std::uint64_t FPMELEE_HIT_RADIUS = 0x134; // beta 11957: hitRadius (в релизе 0x12C)
+inline constexpr std::uint64_t FPMELEE_TIME_BETWEEN_ATTACKS = 0x138; // beta 11957: m_TimeBetweenAttacks (в релизе 0x130)
+inline constexpr std::uint64_t FPMELEE_PAUSE_AFTER_ATTACK = 0x13C; // beta 11957: pauseAfterAttack (в релизе 0x134)
+inline constexpr std::uint64_t FPTOOL_TOOL_PURPOSES = 0x168; // beta 11957: m_ToolPurposes (в релизе 0x160)
 inline constexpr std::uint64_t RAYCASTMAN_PLAYER = game_offsets::RAYCASTMAN_PLAYER;
 inline constexpr std::uint64_t RAYCASTMAN_RAY_LENGTH = game_offsets::RAYCASTMAN_RAY_LENGTH;
 inline constexpr std::uint64_t RAYCASTMAN_AIM_RAY_LENGTH = game_offsets::RAYCASTMAN_AIM_RAY_LENGTH;

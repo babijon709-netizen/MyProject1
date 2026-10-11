@@ -2,7 +2,7 @@
 #include <cstdint>
 
 // Release profile, build 11949.
-// Source: dump11949.7z (dump.cs + libil2cpp.so), 31802 types.
+// Source: dump11949.7z (dump.cs + libil2cpp.so), 31799 types.
 // Managed fields are resolved from dump.cs; TypeInfo RVAs are inner slots from
 // AArch64 adrp/ldr references and R_AARCH64_RELATIVE addends.
 
@@ -415,8 +415,12 @@ inline constexpr std::uint64_t RAYCASTHIT_COLLIDER           = 0x28;  // UnityEn
 //   PlayerManager.kccReference (0xB0, possibly a wrapper) -> KCC
 //   KCC.ZMl = CharacterAnimation (0x108); KCC.player back-ref (0x78) validates
 //   CharacterAnimation.ragdoll (0x38); CharacterAnimation.ZCu back-ref (0x78)
-//   Ragdoll.m_Pelvis Rigidbody (0x20), Ragdoll.m_Bones BodyPart[] (0x88)
+//   Ragdoll.m_Pelvis Rigidbody (0x20), Ragdoll.m_Bones (0x88)
 //   Ragdoll.BodyPart.transform (0x10)
+// m_Bones в дампах 11949/11957 объявлен как Rigidbody[] (не BodyPart[]): это
+// массив управляемых объектов-компонентов, читалка для каждого элемента
+// пробует и BodyPart.transform (+0x10), и нативный transform компонента.
+// Отдельный List<Ragdoll.BodyPart> (BodyPart.transform 0x10) лежит на 0xA0.
 inline constexpr std::uint64_t PLAYER_KCC_REFERENCE        = 0xB0;
 inline constexpr std::uint64_t KCC_PLAYER_BACKREF          = 0x78;
 inline constexpr std::uint64_t KCC_HEAD_TRANSFORM          = 0x88; // KCC.head (managed UnityEngine.Transform)
@@ -660,9 +664,10 @@ inline constexpr std::uint64_t OREMARK_AGE             = 0x58; // lHG, float —
 inline constexpr float         OREMARK_LIFETIME        = 15.0F;
 
 // MineableObjectExtension_TreeHitstreaks : JE — деревья.
-// (было TREEHS_MOVING_METHOD = 0x20 — поля MovingMethod в этом билде больше
-// нет: 0x20 теперь шаблон маркера, а перемещение настраивают
-// RandomMovingAmplitude/MinDegrees на 0x30/0x38; константа удалена)
+// (константа TREEHS_MOVING_METHOD удалена: читалке enum-поле movingMethod на
+// 0x20 не нужно; шаблон маркера — 0x28, RandomMovingAmplitude/MinDegrees —
+// 0x30/0x38. ВНИМАНИЕ: поле movingMethod в билдах 11949/11957 на месте,
+// более ранний комментарий об его удалении был неверен.)
 inline constexpr std::uint64_t TREEHS_MARKER_TEMPLATE  = 0x28; // HitMarkerItem — шаблон
 inline constexpr std::uint64_t TREEHS_STREAK           = 0x48; // MTz (сбрасывается в gie)
 inline constexpr std::uint64_t TREEHS_MARKER           = 0x50; // MTn — живой клон (X), null до первого удара
