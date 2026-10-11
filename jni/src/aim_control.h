@@ -94,6 +94,48 @@ inline float touch_lock_deadband(float degrees_per_pixel, float range_metres,
     return deadband;
 }
 
+inline bool touch_camera_response_acknowledged(float expected_degrees,
+                                               float observed_degrees) {
+    if (!finite(expected_degrees) || !finite(observed_degrees) ||
+        expected_degrees * observed_degrees <= 0.0f) return false;
+    const float threshold = std::min(0.02f,
+        std::max(0.002f, std::fabs(expected_degrees) * 0.5f));
+    return std::fabs(observed_degrees) >= threshold;
+}
+
+inline float touch_accumulate_camera_response(float accumulated_degrees,
+                                              float observed_degrees,
+                                              float expected_degrees) {
+    if (!finite(accumulated_degrees) || !finite(observed_degrees) ||
+        !finite(expected_degrees) || std::fabs(expected_degrees) < 0.001f) {
+        return 0.0f;
+    }
+    if (accumulated_degrees * expected_degrees < 0.0f)
+        accumulated_degrees = 0.0f;
+    if (observed_degrees == 0.0f) return accumulated_degrees;
+    if (observed_degrees * expected_degrees <= 0.0f) return 0.0f;
+    return accumulated_degrees + observed_degrees;
+}
+
+inline float touch_jitter_gate(float error, int& streak, float band,
+                               int required_frames) {
+    if (!finite(error) || !(band >= 0.0f) || required_frames < 1) {
+        streak = 0;
+        return 0.0f;
+    }
+    if (error == 0.0f) {
+        streak = 0;
+        return 0.0f;
+    }
+    if (std::fabs(error) >= band) {
+        streak = 0;
+        return error;
+    }
+    const int sign = error > 0.0f ? 1 : -1;
+    streak = (streak * sign > 0) ? streak + sign : sign;
+    return streak * sign >= required_frames ? error : 0.0f;
+}
+
 inline float memory_step(float error_degrees, float dt, float speed,
                          float range_metres) {
     if (!finite(error_degrees)) return 0.0f;

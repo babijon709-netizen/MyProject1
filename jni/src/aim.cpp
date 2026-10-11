@@ -602,6 +602,7 @@ static void UpdateAimTouch(float dt) {
     // «камера не двинулась в этом кадре» заставляло ждать лишний такт на каждом
     // шаге — ведение становилось в несколько раз медленнее.
     static bool  s_camMovedPrev = false;
+    static float s_ackCameraYaw = 0.f, s_ackCameraPitch = 0.f;
     static int   s_lostFrames = 0;
     // Доля шага при захвате цели: 0.3 сразу после захвата, 1.0 через 0.2 с
     // (см. «мягкий старт» ниже — страховка первого шага при наведении).
@@ -636,6 +637,7 @@ static void UpdateAimTouch(float dt) {
         s_trackYaw.reset(); s_trackPitch.reset();
         s_pendDx = s_pendDy = s_pendTime = 0.0f;
         s_camMovedPrev = false;
+        s_ackCameraYaw = s_ackCameraPitch = 0.0f;
         s_lostFrames = s_holdFrames = 0;
         s_acquire = 0.0f;
         s_flight.clear();
@@ -689,6 +691,8 @@ static void UpdateAimTouch(float dt) {
             s_stallYaw = s_stallPitch = 0.f;
             s_havePrevRaw = false;
             s_streakYaw = s_streakPitch = 0;
+            s_ackCameraYaw = s_ackCameraPitch = 0.f;
+            s_pendDx = s_pendDy = s_pendTime = 0.f;
         }
         return;
     }
@@ -702,6 +706,8 @@ static void UpdateAimTouch(float dt) {
         s_stallYaw = s_stallPitch = 0.f;
         s_havePrevRaw = false;
         s_streakYaw = s_streakPitch = 0;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
+        s_pendDx = s_pendDy = s_pendTime = 0.f;
     }
 
     // ---- оценка коэффициента по реакции прицела ----
@@ -753,7 +759,11 @@ static void UpdateAimTouch(float dt) {
         s_pendTime = 0.f;
     }
     if (haveCam) { s_lastCamYaw = camYaw; s_lastCamPitch = camPitch; s_haveLast = true; }
-    else { s_haveLast = false; s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f; }
+    else {
+        s_haveLast = false;
+        s_pendDx = s_pendDy = s_pendTime = 0.f;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
+    }
 
     // ---- чувствительность пальца: град поворота камеры на пиксель экрана ----
     // Шаг считается как err / gain, поэтому ЗАВЫШЕННЫЙ запасной коэффициент это
@@ -820,27 +830,23 @@ static void UpdateAimTouch(float dt) {
     const float gy = probeGainYaw   * s_trimYaw;
     const float gp = probeGainPitch * s_trimPitch;
 
-    // Такт с подтверждением: если наш прошлый сдвиг ещё не отразился в
-    // камере (игра не отрендерила кадр — низкий FPS), НЕ шлём новую
-    // коррекцию: ошибка на экране устаревшая, и вторая поправка по ней —
-    // это двойная коррекция, тот самый перелёт-раскачка. Держим палец на
-    // месте и ждём реакции камеры (таймаут на случай проглоченного ввода).
-    //
-    // Ответ принимаем и за прошлый кадр: поза камеры читается до того, как игра
-    // успевает применить наш ввод, и без этого запаса шаг ждал лишний такт.
-    // Настоящий обрыв ввода всё равно ловится: ответа нет ни в этом кадре, ни в
-    // прошлом — значит игра шаг не отработала.
-    //
-    // Такт работает только когда углы есть (cam_st != 0). Без настоящей оси
-    // s_pendDx обнуляется каждый кадр (см. ветку haveCam выше), поэтому шаг
-    // никогда не «ждёт ответа» — иначе аим, у которого углов нет вовсе, стоял бы
-    // по 0.25 с на каждом шаге.
-    // Ось камеры может быть «живой» по чтению и при этом не отражать наши шаги
-    // (замершая поза). Тогда подтверждения не будет никогда, и каждый шаг ждал бы
-    // свой таймаут: аим двигался бы рывками. Считаем таймауты подряд — после
-    // третьего выключаем такт на 5 с и работаем шагами по ошибке (он устойчив и
-    // без подтверждения: доля ошибки за такт ограничена половиной).
-    const bool camAnswered = camMoved || s_camMovedPrev;
+    // Count same-direction camera deltas while a touch correction is pending.
+    // Small per-frame rotations can add up to a valid response even when each
+    // one is below the camera reader's 0.02-degree movement threshold.
+    const float expectedYaw = s_pendDx * gy;
+    const float expectedPitch = -s_pendDy * gp;
+    if (!haveCam || !s_fingerDown || camMoved) {
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
+    } else {
+        s_ackCameraYaw = aim_control::touch_accumulate_camera_response(
+            s_ackCameraYaw, camYawDelta, expectedYaw);
+        s_ackCameraPitch = aim_control::touch_accumulate_camera_response(
+            s_ackCameraPitch, camPitchDelta, expectedPitch);
+    }
+    const bool partialCameraAck =
+        aim_control::touch_camera_response_acknowledged(expectedYaw, s_ackCameraYaw) ||
+        aim_control::touch_camera_response_acknowledged(expectedPitch, s_ackCameraPitch);
+    const bool camAnswered = camMoved || s_camMovedPrev || partialCameraAck;
     s_camMovedPrev = camMoved;
     if (s_ackDisabled > 0.f) s_ackDisabled -= dt;
     const bool ackGate = (s_ackDisabled <= 0.f);
@@ -853,9 +859,12 @@ static void UpdateAimTouch(float dt) {
         }
         s_pendDx = s_pendDy = 0.f;    // ввод потерялся — продолжаем
         s_pendTime = 0.f;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
         if (++s_ackTimeouts >= 3) { s_ackTimeouts = 0; s_ackDisabled = 5.f; }
     } else if (camAnswered) {
         s_ackTimeouts = 0;
+        s_pendTime = 0.f;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
     }
 
     // ---- «шаг в полёте» -----------------------------------------------------
@@ -922,7 +931,7 @@ static void UpdateAimTouch(float dt) {
     // Без порога контроллер гонял палец за дрожью с частотой кадров —
     // 110 реверсов на стенде, видимый маятник у цели.
     static constexpr float kTouchJitterBand  = 0.45f;
-    static constexpr int   kTouchDriftStreak = 3;
+    static constexpr int   kTouchDriftStreak = 2;
     // Доля шага у цели падает вместе с остатком (до минимума): при длинной
     // трубе касания поздние прилёты заказанного не перелетают кость. На
     // стенде перелёт на дрожи ±0.4° падает с 0.9° до 0.4°, реверсов 0.
@@ -937,6 +946,7 @@ static void UpdateAimTouch(float dt) {
         s_stallYaw = s_stallPitch = 0.f;
         s_havePrevRaw = false;
         s_streakYaw = s_streakPitch = 0;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
     };
     float errYaw = best.yaw, errPitch = best.pitch;
     bool s_flowOkTick = false;
@@ -1080,6 +1090,7 @@ static void UpdateAimTouch(float dt) {
         degPerPx, best.world_dist, gainKnownPitch ? qPitch : 0.0f);
     if (fabsf(errYaw) < deadYaw && fabsf(errPitch) < deadPitch) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
         // Orders from previous frames continue resolving without new input;
         // each expires after the adaptive responseWindow.
         if (s_fingerDown) Touch_Move(s_fx, s_fy); // hold still, keep the touch alive
@@ -1092,15 +1103,10 @@ static void UpdateAimTouch(float dt) {
     // сторону (порог тактов): дрожь знак чередует и не проходит вовсе,
     // настоящий дрейф проходит целиком. Та же пара фильтров, что в
     // мемори-локе — оба режима у цели ведут себя одинаково спокойно.
-    auto jitterGate = [&](float eff, int& streak) {
-        if (eff == 0.f) { streak = 0; return 0.f; }
-        if (fabsf(eff) >= kTouchJitterBand) { streak = 0; return eff; }
-        const int s = (eff > 0.f) ? 1 : -1;
-        streak = (streak * s > 0) ? streak + s : s;
-        return (streak * s >= kTouchDriftStreak) ? eff : 0.f;
-    };
-    errYaw   = jitterGate(errYaw,   s_streakYaw);
-    errPitch = jitterGate(errPitch, s_streakPitch);
+    errYaw = aim_control::touch_jitter_gate(
+        errYaw, s_streakYaw, kTouchJitterBand, kTouchDriftStreak);
+    errPitch = aim_control::touch_jitter_gate(
+        errPitch, s_streakPitch, kTouchJitterBand, kTouchDriftStreak);
     if (errYaw == 0.f && errPitch == 0.f) {
         // Дрожь: палец стоит, камера не ходит за костью.
         if (s_fingerDown) Touch_Move(s_fx, s_fy);
@@ -1115,6 +1121,7 @@ static void UpdateAimTouch(float dt) {
         Touch_Down(s_fx, s_fy);
         s_fingerDown = true;
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
         s_holdFrames = 0;
         s_acquire = 0.f;
         // Палец опустился заново: окно замера начинается с нуля, иначе первая
@@ -1233,6 +1240,7 @@ static void UpdateAimTouch(float dt) {
     dx = nx - s_fx; dy = ny - s_fy;
     if (dx == 0.f && dy == 0.f) {
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
         Touch_Move(s_fx, s_fy);
         return;
     }
@@ -1253,6 +1261,7 @@ static void UpdateAimTouch(float dt) {
         s_fingerDown = false;
         s_fx = snapGrid(ptX); s_fy = snapGrid(ptY);
         s_pendDx = s_pendDy = 0.f; s_pendTime = 0.f;
+        s_ackCameraYaw = s_ackCameraPitch = 0.f;
         // Палец отпущен — заказанное игра не отработает вовсе.
         clearFlight();
         s_haveLast = false;
