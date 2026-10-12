@@ -3588,13 +3588,8 @@ bool esp_silent_publish(uint64_t target, const float aim[3],
                                 g_aim_is_instant_ray ? aim_ballistics::Parameters{}
                                                      : g_aim_ballistic_params,
                                 sample_age, g_aim_lead_seconds, c)) return fail();
-    // Shot axis is not the camera view axis. Both the synchronous first write
-    // and the worker guard the Player -> Handler -> Look chain before writing.
-    struct LiveMemory {
-        bool read(uint64_t addr, void* out, size_t len) { return esp_silent_read(addr, out, len); }
-        bool write(uint64_t addr, const void* in, size_t len) { return esp_silent_write(addr, in, len); }
-    } live;
-    if (silent_aim::tick(live, c) != silent_aim::Result::written) return fail();
+    // Shot axis is not the camera view axis. The immediate write and the
+    // worker now share one IO lock; an old target cannot overwrite this one.
     static uint64_t previous_player = 0;
     static float previous_shot = 0.f;
     static double hot_until = 0.0;
@@ -3609,7 +3604,7 @@ bool esp_silent_publish(uint64_t target, const float aim[3],
         previous_shot = shot;
     }
     c.recent_shot = now < hot_until;
-    return silent_aim::publish(c);
+    return silent_aim::publish_sync(c);
 }
 
 

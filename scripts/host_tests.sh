@@ -12,3 +12,9 @@ for t in test_bot_life test_bot_lead test_fast_fire_memory test_fps_memory test_
         "jni/tests/$t.cpp" -o "$OUT/$t"
     "$OUT/$t"
 done
+# The worker test links the real writer against a fake selected transport.
+$CXX -std=gnu++17 -Wall -Wextra -pthread \
+    -I jni/src -I jni/include \
+    jni/tests/test_silent_aim_writer.cpp jni/src/silent_aim.cpp \
+    -o "$OUT/test_silent_aim_writer"
+"$OUT/test_silent_aim_writer"

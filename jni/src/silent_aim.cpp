@@ -30,12 +30,22 @@ public:
 };
 class Writer {
     std::mutex mutex_;
+    // Serialize the synchronous frame write, worker tick, and clear. Otherwise
+    // a worker already inside RPM/WPM can restore an OLD target after the new
+    // frame has written its direction, or even after aiming was turned off.
+    std::mutex io_mutex_;
     std::condition_variable wake_;
     std::thread thread_;
     Command command_{};
     Stats stats_{};
     uint64_t published_ = 0, session_ = 0, revision_ = 0;
     bool stopping_ = false;
+
+    void invalidate_locked() {
+        stats_.active = stats_.axis = false;
+        ++session_; ++revision_;
+        wake_.notify_all();
+    }
 
     void loop() {
         Memory memory;
@@ -65,14 +75,21 @@ class Writer {
             const uint64_t command_revision = revision_;
             const uint64_t published = published_;
             lock.unlock();
-            const uint64_t now = now_ms();
-            const Result result = fresh(published, now)
-                ? tick(memory, command, (now - published) * 0.001f)
-                : Result::invalid;
+            std::unique_lock<std::mutex> io(io_mutex_);
             lock.lock();
-            // Do not publish status for a snapshot superseded while the transport
-            // read/write was in flight; the next iteration uses the newest copy.
-            if (stopping_ || session_ != command_session || revision_ != command_revision) continue;
+            // Recheck AFTER obtaining the IO lock. A newer frame/clear may
+            // have completed while this tick was waiting for that lock.
+            if (stopping_ || !stats_.active || session_ != command_session ||
+                revision_ != command_revision || !fresh(published, now_ms())) {
+                io.unlock();
+                continue;
+            }
+            const uint64_t now = now_ms();
+            lock.unlock();
+            const Result result = tick(memory, command, (now - published) * 0.001f);
+            lock.lock();
+            // Neither publish_sync nor clear can pass the IO lock while tick
+            // writes, so a completed old write cannot follow the new one.
             stats_.axis = result == Result::written;
             if (result == Result::written) { ++stats_.writes; }
             else {
@@ -80,6 +97,7 @@ class Writer {
                 if (result == Result::guard_failed) ++stats_.guard_failures;
                 stats_.active = false; // нужен новый снимок кадра
             }
+            io.unlock();
             const auto interval = std::chrono::microseconds(command_.recent_shot ? kHotUs : kTickUs);
             wake_.wait_for(lock, interval, [&] {
                 return stopping_ || !stats_.active || revision_ != command_revision;
@@ -88,37 +106,59 @@ class Writer {
     }
 public:
     ~Writer() { stop(); }
-    bool publish(const Command& command) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (stopping_ || !valid_command(command)) {
-            stats_.active = stats_.axis = false;
-            ++session_; ++revision_;
-            wake_.notify_all();
+    bool publish_sync(const Command& command) {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_ || !valid_command(command)) {
+                invalidate_locked();
+                return false;
+            }
+        }
+        Memory memory;
+        if (!memory.open(command.pid)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++stats_.failures;
+            invalidate_locked();
             return false;
         }
+        // Guard and write immediately in the publishing frame, before waking
+        // the worker. The worker can never overwrite it with an older target.
+        const Result result = tick(memory, command);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (result != Result::written || stopping_) {
+            ++stats_.failures;
+            if (result == Result::guard_failed) ++stats_.guard_failures;
+            invalidate_locked();
+            return false;
+        }
+        ++stats_.writes;
         if (!thread_.joinable()) {
             try { thread_ = std::thread(&Writer::loop, this); }
-            catch (...) { ++stats_.failures; return false; }
+            catch (...) {
+                ++stats_.failures;
+                invalidate_locked();
+                return false;
+            }
         }
         command_ = command;
         published_ = now_ms();
         ++revision_;
-        stats_.active = true;
+        stats_.active = stats_.axis = true;
         wake_.notify_all();
         return true;
     }
     void clear() {
+        std::lock_guard<std::mutex> io(io_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
-        stats_.active = stats_.axis = false;
-        ++session_; ++revision_;
-        wake_.notify_all();
+        invalidate_locked();
     }
     void stop() {
         {
+            std::lock_guard<std::mutex> io(io_mutex_);
             std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
-            stats_.active = stats_.axis = false;
-            wake_.notify_all();
+            invalidate_locked();
         }
         if (thread_.joinable()) thread_.join();
     }
@@ -126,7 +166,7 @@ public:
 };
 Writer& writer() { static Writer value; return value; }
 }
-bool publish(const Command& command) { return writer().publish(command); }
+bool publish_sync(const Command& command) { return writer().publish_sync(command); }
 void clear() { writer().clear(); }
 void shutdown() { writer().stop(); }
 Stats stats() { return writer().stats(); }

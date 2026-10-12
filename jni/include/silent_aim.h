@@ -1,8 +1,8 @@
 #pragma once
 #include <cstdint>
 
-// Изолированный писатель сайлента. Главный поток публикует только неизменяемый
-// снимок уже проверенных владельцев; worker не трогает g_mem и его кадровый кэш.
+// Изолированный писатель сайлента. Главный поток публикует неизменяемый
+// снимок; оба потока читают игру через выбранный транспорт, минуя кадровый кэш.
 namespace silent_aim {
 // LookDirection belongs to PlayerEventHandler, not to FPHitscan.  Do not put a
 // concrete current-weapon chain in this snapshot: projectile weapons (such as
@@ -30,7 +30,8 @@ struct Stats {
     uint64_t writes = 0, failures = 0, guard_failures = 0;
     bool active = false, axis = false;
 };
-bool publish(const Command& command);
+// Guarded immediate write and worker publication are serialized as one operation.
+bool publish_sync(const Command& command);
 void clear();
 void shutdown();
 Stats stats();
