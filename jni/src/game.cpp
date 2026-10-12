@@ -7163,10 +7163,14 @@ int esp_local_aim_source() {
 // m_TimeBetweenAttacks 0.85, m_DamagePerHit 15, m_ImpactForce 15). Поэтому
 // читаем живой объект в руках.
 //
-// Как игру это использует (FPMelee.ZkX, дизасм билда 62a8534):
+// Как игру это использует (FPMelee.ZkX, дизасм билда 62a8534; перепроверено
+// на дампе 11949 — функция melee-удара при 0x684E86C, check дистанции
+// 0x684E914..0x684E93C, vtable-слот 35 = On_Hit по [klass+0x258+0x110]):
 //   data = handler.RaycastData(0x160); если невалиден — handler.AimRaycast(0x168)
 //   if (data.RaycastHit.distance < m_MaxReach + hitRadius) On_Hit(data)
 //   else On_Woosh()
+// Никакой ветки по состоянию бега в этой функции НЕТ: попадание/мимо —
+// чисто геометрия прицельного луча.
 // distance — UnityEngine.RaycastHit.get_distance(), то есть 3D-метры от
 // камеры/оси выстрела, а НЕ горизонтальное расстояние до узла.
 
