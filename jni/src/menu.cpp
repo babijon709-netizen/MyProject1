@@ -1875,9 +1875,10 @@ void RenderMenu() {
 
         // Подпись, что тапать.
         auto* fn = ImGui::GetFont();
-        const char* title = (g_calibMode == 1)
-            ? XS("Тапни по центру джойстика движения")
-            : (g_calibMode == 2) ? XS("Тапни по кнопке огня / атаки")
+        // Режим 1 (зона джойстика движения) снят: стик ходит через память
+        // игры, калибровать больше нечего — кнопка огня осталась (2).
+        const char* title = (g_calibMode == 2)
+            ? XS("Тапни по кнопке огня / атаки")
             : (g_calibMode == 4) ? XS("Тапни куда поставить джойстик фрикама")
             : (g_calibMode == 5) ? XS("Тапни куда поставить счётчик игроков")
             : (g_calibMode == 6) ? XS("Тапни куда поставить кнопку фрикама")
@@ -1901,7 +1902,6 @@ void RenderMenu() {
         // Пульсирующий маркер текущей сохранённой точки (если есть).
         {
             float zx = -1.f, zy = -1.f;
-            if (g_calibMode == 1 && g_state.farm_joy_x >= 0.f) { zx = g_state.farm_joy_x * dw; zy = g_state.farm_joy_y * dh; }
             if (g_calibMode == 2 && g_state.farm_fire_x >= 0.f) { zx = g_state.farm_fire_x * dw; zy = g_state.farm_fire_y * dh; }
             if (g_calibMode == 4) {
                 if (g_state.freecam_joy_x >= 0.f) { zx = g_state.freecam_joy_x * dw; zy = g_state.freecam_joy_y * dh; }
@@ -2027,17 +2027,14 @@ void RenderMenu() {
         if (io.MouseReleased[0]) {
             float rx = io.MousePos.x / dw, ry = io.MousePos.y / dh;
             if (rx > 0.f && rx < 1.f && ry > 0.f && ry < 1.f) {
-                const bool farm = (g_calibMode == 1 || g_calibMode == 2);
+                const bool farm = (g_calibMode == 2);
                 const bool hud  = (g_calibMode == 5);
                 const bool fcb  = (g_calibMode == 6);
                 const bool fcj  = (g_calibMode == 4);
                 const bool fcl  = (g_calibMode == 7);
                 const bool flb  = (g_calibMode == 8);
                 const bool xrb  = (g_calibMode == 9);
-                if (g_calibMode == 1) {
-                    g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
-                    ShowToast(XS("Зона джойстика сохранена"));
-                } else if (g_calibMode == 2) {
+                if (g_calibMode == 2) {
                     g_state.farm_fire_x = rx; g_state.farm_fire_y = ry;
                     ShowToast(XS("Зона огня сохранена"));
                 } else if (g_calibMode == 4) {

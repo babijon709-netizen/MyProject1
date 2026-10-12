@@ -7,6 +7,7 @@
 #include "audio.h"               // PlaySound
 #include "config.h"
 #include "menu.h"                // g_calibMode (калибровка зон)
+#include "farm_joy.h"            // состояние памяти-джойстика автофарма
 #include "Blur/Blur.h"
 #include "lang.h"
 #include <cfloat>
@@ -780,8 +781,36 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         // Автофарм: всё управление ботом в одном окне.
         // (secId 4 занят палитрой цветов — там скролл выключен.)
         FgSHdr(XS("Автофарм"));
-        FgCardBg(rH * 1);
-        FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true);
+        FgCardBg(rH * 2);
+        FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, false);
+        // Джойстик движения ведётся ПАМЯТЬЮ игры (farm_joy.cpp): синтетического
+        // тача по зоне стика больше нет, калибровать нечего. Вместо калибровки —
+        // состояние: какой слой ввода игра реально слушает (номер кандидата —
+        // #1 стик UI, #2 слот A, #3 слот B, #4 канал движения, #5 ввод игрока,
+        // #6/#7 те же слоты в запасной раскладке) и с какой скоростью бот
+        // сближается с целью. Номер с точкой — кандидат
+        // подтверждён (именно он ведёт ходьбу), без точки — идёт проба; прочерк с
+        // причиной — писать пока некуда (farmjoy::why_text).
+        {
+            const farmjoy::Status js = farmjoy::status();
+            const float cy2 = curY + rH * 0.5f;
+            fg->AddText(fn, fs * 1.15f,
+                {cX + inset + padX, cy2 - fs * 1.15f * 0.5f},
+                C::UA(C::Txt(), alpha), XS("Джойстик"));
+            char jv[48];
+            if (js.writes > 0)
+                snprintf(jv, sizeof(jv), "#%d · %.1f %s", js.candidate + 1,
+                         fabsf(js.closing_mps), XS("м/с"));
+            else
+                snprintf(jv, sizeof(jv), "— %s", farmjoy::why_text(js.why));
+            const auto jsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, jv);
+            const float jx = cX + cW - inset - padX - jsz.x;
+            fg->AddText(fn, fs * 1.0f, {jx, cy2 - jsz.y * 0.5f},
+                        C::UA(js.confirmed ? C::Acc() : C::Dim(), alpha), jv);
+            if (js.confirmed)
+                fg->AddCircleFilled({jx - 16.f, cy2}, 5.f, C::UA(C::Acc(), alpha), 16);
+            curY += rH;
+        }
 
         FgSHdr(XS("Что добывать"));
         FgCardBg(rH * 4);
@@ -795,7 +824,9 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgSliderRow(XS("Искать до"), &g_state.farm_range, 10.f, 300.f,
                     XS("%.0f м"), true, g_state.sl_farm_range);
 
-        // Зоны бота: куда жать джойстик движения и кнопку огня.
+        // Зона бота: куда жать кнопку огня. Зона джойстика движения убрана —
+        // стик ходит через память и ни в какой доле экрана больше не нуждается
+        // (g_state.farm_joy_x/y остались в конфиге для совместимости блоба).
         FgSHdr(XS("Зоны бота"));
         {
             struct ZoneRow {
@@ -803,13 +834,12 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                 int   calib;         // g_calibMode для этой зоны
                 float zx, zy;        // сохранённые доли экрана (-1 = нет)
             };
-            const ZoneRow zrows[2] = {
-                {XS("Зона джойстика"), 1, g_state.farm_joy_x,  g_state.farm_joy_y},
+            const ZoneRow zrows[1] = {
                 {XS("Зона огня"),      2, g_state.farm_fire_x, g_state.farm_fire_y},
             };
 
-            FgCardBg(rH * 2);
-            for (int zi = 0; zi < 2; ++zi) {
+            FgCardBg(rH * 1);
+            for (int zi = 0; zi < 1; ++zi) {
                 const ZoneRow& z = zrows[zi];
 
                 if (!blocked && !g_scrollPop.dragging && mouseReleased
@@ -838,15 +868,11 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                 if (set)
                     fg->AddCircleFilled({stx - 16.f, cy2}, 5.f, C::UA(C::Acc(), alpha), 16);
 
-                if (zi == 0 && g_state.ui_show_sep)
-                    fg->AddLine({cX + inset + padX, curY + rH - 0.5f},
-                                {cX + cW - inset - padX, curY + rH - 0.5f},
-                                C::UA(C::Sep(), alpha), 0.8f);
                 curY += rH;
             }
 
-            // Сброс зон к дефолту (если наставил мимо).
-            if (g_state.farm_joy_x >= 0.f || g_state.farm_fire_x >= 0.f) {
+            // Сброс зоны к дефолту (если наставил мимо).
+            if (g_state.farm_fire_x >= 0.f) {
                 curY += 8.f;
                 FgCardBg(rH * 1);
                 if (!blocked && !g_scrollPop.dragging && mouseReleased
@@ -854,9 +880,8 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
                     && mousePos.y >= curY && mousePos.y <= curY + rH
                     && clickedPos.x >= cX + inset && clickedPos.x <= cX + cW - inset
                     && clickedPos.y >= curY && clickedPos.y <= curY + rH) {
-                    g_state.farm_joy_x = g_state.farm_joy_y = -1.f;
                     g_state.farm_fire_x = g_state.farm_fire_y = -1.f;
-                    ShowToast(XS("Зоны сброшены"));
+                    ShowToast(XS("Зона сброшена"));
                     PlaySound(SND_CLICK);
                 }
                 const char* rt = XS("Сброс");

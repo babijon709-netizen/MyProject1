@@ -1,4 +1,5 @@
 #include "farm.h"
+#include "farm_joy.h"          // память-джойстик: движение без тача
 #include "cfg.h"
 #include "main.h"
 #include "game.h"
@@ -182,7 +183,7 @@ void UpdateFarm(float dt) {
 }
 
 static void UpdateFarmInner(float dt) {
-    static bool  s_moveDown = false;  // палец 0: джойстик движения
+    static bool  s_moveDown = false;  // стик движения ведём (память, не тач)
     static bool  s_camTurn = false;   // камера ведётся памятью: идёт доводка
     static bool  s_tapDown  = false;  // палец 2: удары
     static float s_memWX = 0.f, s_memWY = 0.f; // последняя запись в накопитель
@@ -211,7 +212,7 @@ static void UpdateFarmInner(float dt) {
     static int   s_evadeCount = 0;
     static int   s_evadeWhy = 0;      // 0 нет, 1 застрял на подходе, 2 узел перекрыт
     static float s_walkOffTime = 0.f; // гистерезис отпускания джойстика
-    static float s_stickPx = 0.f, s_stickPy = 0.f; // сглаженная позиция стика
+    static float s_joyX = 0.f, s_joyY = 0.f;         // сглаженный вектор стика
     static float s_noRayTime = 0.f;   // сколько подряд у игры нет луча прицела
     static int   s_blindSwings = 0;   // замахов вслепую (без луча) уже ушло
     static float s_blindHp = -1.f;    // здоровье узла перед последним слепым
@@ -220,7 +221,7 @@ static void UpdateFarmInner(float dt) {
     static float s_flickerTime = 0.f; // сколько держимся прежнего, с
 
     auto releaseAll = [&]() {
-        if (s_moveDown) { Touch_Up_N(0); s_moveDown = false; }
+        if (s_moveDown) { farmjoy::release(); s_moveDown = false; }
         s_camTurn = false; s_memPend = false;
         if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
         esp_farm_cross_pin(FarmTarget{}, false);
@@ -243,6 +244,8 @@ static void UpdateFarmInner(float dt) {
 
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
+    // Память-джойстик: кэш цели движения и его периодическая перепроверка.
+    farmjoy::tick(dt);
 
     unsigned mask = 0;
     if (g_state.farm_on) {
@@ -584,7 +587,21 @@ static void UpdateFarmInner(float dt) {
         }
     }
 
-    // ---- палец 0: джойстик движения -------------------------------------------
+    // Обратная связь памяти-джойстика: пока кандидат ведёт стик, дистанция до
+    // точки подхода обязана сокращаться — по этому признаку модуль и выбирает
+    // рабочий слой ввода (см. farm_joy.h). «Чистой» ходьбой считаем только
+    // фазу подхода с курсом вперёд: на подводе (фаза 3) стик жмёт в упор, там
+    // сближение меряется иначе, а манёвр обхода ведёт стик сам.
+    {
+        const bool walkClean = (phase == 2) && (s_evadeTime <= 0.f) &&
+                               (fabsf(tgt.walk_yaw) <= 60.f) && (tgt.walk_dist > 0.f);
+        farmjoy::observe(tgt.walk_dist, walkClean);
+    }
+
+    // ---- стик: движение через ПАМЯТЬ игры, без тача ----------------------------
+    // Вектор стика (x — вправо, y — вперёд, магнитуда 0..1) уходит в память
+    // игры (farm_joy.cpp: UI-стик / ввод хендлера / канал MovementInput),
+    // синтетический тач по зоне джойстика больше не используется вовсе.
     {
         // В фазе удара всё ещё поджимаем вперёд, пока до точки прицела дальше
         // meleeTight: у тонких деревьев пивот в центре ствола, и остановка в
@@ -617,19 +634,16 @@ static void UpdateFarmInner(float dt) {
         }
 
         if (wantWalk) {
-            // Центр виртуального стика: направление на цель задаёт сам вектор
-            // стика (см. ниже), камера лишь доводит прицел до точки удара.
-            const float cx = (g_state.farm_joy_x >= 0.f) ? sw * g_state.farm_joy_x : sw * 0.165f;
-            const float cy = (g_state.farm_joy_y >= 0.f) ? sh * g_state.farm_joy_y : sh * 0.70f;
-            const float r  = sh * 0.16f;
-            float px, py;
+            // Направление на цель задаёт сам вектор стика, камера лишь доводит
+            // прицел до точки удара.
+            float wantX = 0.f, wantY = 0.f;
             if (s_evadeTime > 0.f) {
                 // Обход препятствия: коротко назад, затем жёстко вбок и чуть
                 // вперёд — скользим вокруг камня/стены, в которые упирается
                 // прямолинейная ходьба.
                 s_evadeTime -= dt;
-                if (s_evadeTime > kEvadeTime - 0.6f) { px = cx; py = cy + r * 0.9f; }
-                else                                 { px = cx + r * 0.95f * s_evadeDir; py = cy - r * 0.35f; }
+                if (s_evadeTime > kEvadeTime - 0.6f) { wantX = 0.f;                  wantY = -0.90f; }
+                else                                 { wantX = 0.95f * s_evadeDir;   wantY =  0.35f; }
                 if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastWalk = 1e9f; }
             } else {
                 // Мёртвая зона: пара градусов дрожания yaw не должна рулить
@@ -644,8 +658,8 @@ static void UpdateFarmInner(float dt) {
                     float s3 = tgt.yaw / 45.f;
                     if (s3 >  1.f) s3 =  1.f;
                     if (s3 < -1.f) s3 = -1.f;
-                    px = cx + r * 0.35f * s3;
-                    py = cy - r * 0.75f;
+                    wantX = 0.35f * s3;
+                    wantY = 0.75f;
                 } else {
                     // Полный аналог, 360°: стик давит ПРЯМО в сторону точки
                     // подхода относительно камеры — идём к цели с первого же
@@ -657,27 +671,23 @@ static void UpdateFarmInner(float dt) {
                     // камера тем временем сводит yaw к нулю, и направление
                     // само становится «вперёд» (самый быстрый ход).
                     const float a = steerYaw * 0.017453293f;
-                    px = cx + r * sinf(a);
-                    py = cy - r * cosf(a);
+                    wantX = sinf(a);
+                    wantY = cosf(a);
                 }
-                if (s_walkOffTime > 0.f) { px = cx; py = cy; }  // доезжаем к центру
+                if (s_walkOffTime > 0.f) { wantX = 0.f; wantY = 0.f; }  // доезжаем к центру
             }
-            if (!s_moveDown) {
-                Touch_Down_N(0, cx, cy);       // сначала ставим в центр стика
-                s_moveDown = true;
-                s_stickPx = cx; s_stickPy = cy;
-            } else {
-                // Гладим стик к нужному отклонению вместо телепорта: некоторые
-                // устройства/сборки принимают резкий скачок за боковой флик, и
-                // бота уносило с линии подхода. 26/с — 90% пути за ~90 мс:
-                // отклик почти мгновенный, рывка всё ещё нет.
-                const float k = 1.f - expf(-26.f * dt);
-                s_stickPx += (px - s_stickPx) * k;
-                s_stickPy += (py - s_stickPy) * k;
-                Touch_Down_N(0, s_stickPx, s_stickPy);
-            }
+            // Гладим вектор к нужному отклонению вместо телепорта: прежний
+            // сглаженный тач делал то же самое с позицией пальца, и на памяти
+            // ощущение хода должно остаться прежним — 26/с, 90% пути за ~90 мс.
+            const float k = 1.f - expf(-26.f * dt);
+            s_joyX += (wantX - s_joyX) * k;
+            s_joyY += (wantY - s_joyY) * k;
+            farmjoy::command(s_joyX, s_joyY);
+            s_moveDown = true;
         } else if (s_moveDown) {
-            Touch_Up_N(0); s_moveDown = false;
+            farmjoy::release();
+            s_joyX = 0.f; s_joyY = 0.f;
+            s_moveDown = false;
         }
     }
 

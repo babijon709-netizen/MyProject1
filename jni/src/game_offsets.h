@@ -178,6 +178,65 @@ inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDD753D8; // rele
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD   = 0x10; // <ukT>k__BackingField (PlayerManager)
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = 0x38; // <ukA>k__BackingField (CameraManager)
 inline constexpr std::uint64_t CAMERA_MANAGER_CAMERA_FIELD          = 0x20; // m_Camera
+// Статические поля GameControllerBase (dump 11949, OxIDE.GameControllerBase):
+// вход в UI-ветку ввода и в хендлер ввода — оба нужны «память-джойстику»
+// автофарма (стик вместо синтетического тача).
+//   +0x18 <qSp> = Vsh (playerEventHandler локального игрока)
+//   +0x20 <qSt> = Oxide.PlayerInputHandler     (экземпляр в сцене)
+//   +0x50 <qmo> = ScreenControlsManager        (его +0x28 — ScreenControlsReferenceHolder)
+//   +0x60 <qme> = GameControllerBase (сам контроллер; запасной путь к UI)
+// Смещения статиков считаются от klass->static_fields (см. get_class_static_fields).
+inline constexpr std::uint64_t GAME_CONTROLLER_INPUT_HANDLER_FIELD      = 0x20; // <qSt> (PlayerInputHandler)
+inline constexpr std::uint64_t GAME_CONTROLLER_EVENT_HANDLER_FIELD      = 0x18; // <qSp> (Vsh)
+inline constexpr std::uint64_t GAME_CONTROLLER_STATIC_SELF_FIELD        = 0x60; // <qme> (GameControllerBase)
+inline constexpr std::uint64_t GAME_CONTROLLER_SCREEN_CONTROLS_FIELD    = 0x50; // <qmo> (ScreenControlsManager)
+
+// Слой ввода (dump 11949, Oxide.PlayerInputHandler / ScreenControls*).
+// Джойстик движения читается игрой отсюда, а не из тача: у UI-стика
+// (класс Joystick / FixedJoystick / FloatingJoystick — ассет Joystick Pack,
+// неймспейс пустой) есть собственное поле-значение input, которое живёт между
+// кадрами (OnDrag его пишет, OnPointerUp обнуляет) — запись в него и есть
+// «двинуть стик», после чего игра сама разложит вектор по своему вводу.
+//   Joystick Pack: handleRange 0x54, deadZone 0x58, axisOptions 0x5C,
+//                  snapX/Y 0x60/0x61, background 0x68, handle 0x70,
+//                  baseJoystick 0x78, baseRect 0x80, canvas 0x88, cam 0x90,
+//                  input(Vector2) 0x98, Vector3 0xA0, m_ControlPath 0xB0.
+// Осторожно: у игры есть СВОЙ класс Oxide.InputSystem.Joystick (TDI 9815) с
+// полями m_MovementRange 0x20 .. float 0x48 — там 0x98 не поле, и писать в
+// него нельзя. Поэтому компонент опознаём по имени класса, а неймспейс
+// требуем пустой (class_identity), плюс структурная проверка полей стика.
+inline constexpr std::uint64_t JOYSTICK_INPUT_VALUE           = 0x98; // Vector2 input (то, что отдаёт Direction)
+inline constexpr std::uint64_t JOYSTICK_HANDLE_RANGE          = 0x54;
+inline constexpr std::uint64_t JOYSTICK_DEAD_ZONE             = 0x58;
+inline constexpr std::uint64_t JOYSTICK_BACKGROUND            = 0x68; // RectTransform
+inline constexpr std::uint64_t JOYSTICK_HANDLE                = 0x70; // RectTransform
+inline constexpr std::uint64_t JOYSTICK_BASE_JOYSTICK         = 0x78; // GameObject
+// ScreenControlsReferenceHolder: GameObject стиков (+ кнопки 0x20..0x70).
+inline constexpr std::uint64_t SCREEN_CONTROLS_HOLDER_FIXED    = 0x78; // GameObject FixedJoystick
+inline constexpr std::uint64_t SCREEN_CONTROLS_HOLDER_FLOATING = 0x90; // GameObject FloatingJoystick
+// ScreenControlsManager.screenControlsReferenceHolder (0x28) — тот же слот,
+// что и у PlayerInputHandler.screenControlsReferenceHolder.
+inline constexpr std::uint64_t SCREEN_CONTROLS_HOLDER_FIELD    = 0x28;
+// PlayerInputHandler (класс с читаемым именем, Oxide.PlayerInputHandler):
+//   controller 0x20, screenControlsReferenceHolder 0x28,
+//   <qNU> PlayerManager 0x30 (обратная проверка владельца),
+//   <qNF> Vsh 0x38, PlayerInput qNa 0x40 (struct 0x28 байт: MovementInput
+//   Vector2 0x40, LookDirection Vector3 0x48, YRotation 0x54, Jump/Sprint/
+//   Crouch/Aim/Ready 0x58..0x5C, Tick 0x60, TooClose 0x64),
+//   Nullable<Vector2> qNf 0x6C и qNP 0x78 (сырой ввод стика: hasValue по +0,
+//   значение по +4), Nullable<bool> 0x84, floats 0x88/0x8C/0x90,
+//   SprintJoystickHandler 0xB0.
+inline constexpr std::uint64_t PLAYER_INPUT_HANDLER_OWNER_BACKREF = 0x30; // <qNU> PlayerManager
+inline constexpr std::uint64_t PLAYER_INPUT_MOVEMENT_INPUT        = 0x40; // PlayerInput.MovementInput (Vector2)
+inline constexpr std::uint64_t PLAYER_INPUT_YROTATION             = 0x54; // PlayerInput.YRotation (float)
+inline constexpr std::uint64_t PLAYER_INPUT_TICK                  = 0x60; // PlayerInput.Tick (uint)
+inline constexpr std::uint64_t PLAYER_INPUT_HANDLER_OVERRIDE_A    = 0x6C; // Nullable<Vector2> qNf
+inline constexpr std::uint64_t PLAYER_INPUT_HANDLER_OVERRIDE_B    = 0x78; // Nullable<Vector2> qNP
+// Layout Nullable<T> в il2cpp: bool hasValue по +0 (в метадате поле идёт
+// первым), значение — по +4 (Vector2 выравнивается по 4).
+inline constexpr std::uint64_t NULLABLE_HAS_VALUE = 0x0;
+inline constexpr std::uint64_t NULLABLE_VALUE     = 0x4;
+inline constexpr std::uint64_t NULLABLE_STRIDE    = 0x0C; // размер Nullable<Vector2>
 
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
@@ -233,6 +292,11 @@ inline constexpr std::uint64_t IL2CPP_STRING_CHARS  = 0x14;
 inline constexpr std::uint64_t PLAYER_EVENT_HANDLER          = 0x78;
 inline constexpr std::uint64_t EVENT_HANDLER_MANAGER_BACKREF = 0xD0;
 inline constexpr std::uint64_t EVENT_HANDLER_AIM_ACTIVITY    = 0x298;  // было 0x290; класс переименован Gum->WxG (поля теперь с читаемыми именами: Run 0x280, Crouch 0x288, Jump 0x290, Aim 0x298 — вставка +0x8 перед Run)
+// eventHandler.MovementInput (0x128): Vsf<Vector2> — «канал движения» игрока
+// (вход KCC), ровно как LookDirection (0x140) для взгляда. Значение внутри
+// обёртки — по SYNC_VALUE_OFFSET (+0x20). Отдаём его памяти-джойстику
+// автофарма (farm_joy.cpp) как один из кандидатов записи.
+inline constexpr std::uint64_t EVENT_HANDLER_MOVEMENT_INPUT  = 0x128;
 // Remote-player held-weapon candidates (dump.cs Oxide.PlayerManager). The FP
 // manager (0x90) is a local MonoBehaviour and is often empty for other players,
 // so these are the synced/inventory-backed fallbacks to probe:

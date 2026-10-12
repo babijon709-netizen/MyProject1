@@ -227,6 +227,18 @@ bool read_local_melee_reach(MeleeReach& out);
 bool aim_angles_for(const Vec3& world, const Vec2& screen, float sw, float sh, float& yaw_deg, float& pitch_deg);
 bool farm_cam_source_ok(const Vec3& p);
 
+// ---- Слой ввода для памяти-джойстика (farm_joy.cpp) -----------------------
+// Статики GameControllerBase: вход в статики движка (локальный игрок,
+// PlayerInputHandler, ScreenControlsManager). 0 — класс/статика не нашлись.
+uint64_t game_controller_statics();
+// Локальный PlayerManager (проверенный, как во всём ядре). 0 — нет.
+uint64_t local_player_checked();
+// PlayerEventHandler (Vsh) локального игрока с проверкой владельца. 0 — нет.
+uint64_t local_event_handler_checked();
+// Компонент нативного GameObject с заданным именем класса (сверка обратной
+// ссылки на GameObject + имени класса). 0 — не найден.
+uint64_t gameobject_component_by_class(uint64_t native_gameobject, const char* class_name);
+
 // ---- Подсистема маркеров (game_markers.cpp) --------------------------------
 // Сброс кэшей маркеров при esp_reset()/сбросе мира.
 void reset_marker_caches();

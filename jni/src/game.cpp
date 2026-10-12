@@ -937,6 +937,23 @@ uint64_t get_class_static_fields(uint64_t klass) {
     return rd_ptr(klass + IL2CPP_CLASS_STATIC_FIELDS);
 }
 
+// static_fields GameControllerBase — единственный вход в статики движка
+// (локальный игрок, хендлер ввода, ScreenControlsManager). Резолвим класс и
+// здесь, а не только по дороге чтения реестра игроков и в esp_mem_frame_begin:
+// памяти-джойстику автофарма (farm/joy, см. farm_joy.cpp) статики нужны
+// независимо от того, запрашивал ли кадр ESP. Повторные вызовы бесплатны —
+// результат кэшируется теми же полями, что и у кадра.
+uint64_t game_controller_statics() {
+    if (!g_game_controller_class && g_il2cpp_base && GAME_CONTROLLER_TYPEINFO_RVA != 0) {
+        const uint64_t candidate = rd_ptr(g_il2cpp_base + GAME_CONTROLLER_TYPEINFO_RVA);
+        if (class_identity(candidate, "GameControllerBase", "Oxide") != 0)
+            g_game_controller_class = candidate;
+    }
+    if (!g_game_controller_static_fields_cached && g_game_controller_class)
+        g_game_controller_static_fields_cached = get_class_static_fields(g_game_controller_class);
+    return g_game_controller_static_fields_cached;
+}
+
 static int resolve_player_lists(uint64_t out[2]) {
     out[0] = out[1] = 0;
     if (!g_player_manager_class && PLAYER_MANAGER_TYPEINFO_RVA != 0) {
@@ -1046,6 +1063,13 @@ static uint64_t resolve_local_player() {
 static uint64_t resolve_native_transform(uint64_t transform) {
     if (!transform) return 0;
     return rd_ptr(transform + MANAGED_CACHED_PTR);
+}
+
+// Локальный PlayerManager «наружу» (для модулей, которым он нужен целиком,
+// например памяти-джойстику автофарма): та же проверенная цепочка, что и
+// внутри game.cpp, включая сверку класса объекта с PlayerManager.
+uint64_t local_player_checked() {
+    return resolve_local_player();
 }
 
 bool vec3_is_finite(const Vec3& value) {
@@ -1227,6 +1251,31 @@ static uint64_t transform_from_gameobject(uint64_t gameobject) {
         if (!fallback) fallback = component;
     }
     return fallback;
+}
+
+// Компонент GameObject по имени класса (нативный GameObject, тот же обход
+// массива пар, что у transform_from_gameobject и mouse_look_from_camera).
+// Зачем отдельная функция: UI-стик движения живёт компонентом на GameObject,
+// который держит ScreenControlsReferenceHolder, — добраться до него можно
+// только так. Проверки те же, что у поиска MouseLook по камере: слот не
+// пустой, компонент ссылается назад на свой GameObject (+0x20), и имя класса
+// совпало. Именно имя, а не «похоже на указатель»: в логе 19.09 поиск по
+// структуре находил на камере ЧУЖОЙ компонент (см. комментарий у
+// mouse_look_from_camera).
+uint64_t gameobject_component_by_class(uint64_t native_gameobject, const char* class_name) {
+    if (!native_gameobject || !class_name) return 0;
+    const uint64_t components = rd_ptr(native_gameobject + GAMEOBJECT_COMPONENT_ARRAY);
+    if (components < 0x10000) return 0;
+    const int32_t count = rd<int32_t>(native_gameobject + GAMEOBJECT_COMPONENT_COUNT);
+    if (count <= 0 || count > 64) return 0;
+    for (int i = 0; i < count; ++i) {
+        const uint64_t component =
+            rd_ptr(components + (uint64_t)i * GAMEOBJECT_COMPONENT_STRIDE + COMPONENT_PAIR_PTR);
+        if (component < 0x10000 || component == native_gameobject) continue;
+        if (rd_ptr(component + COMPONENT_GAMEOBJECT) != native_gameobject) continue; // чужой слот
+        if (object_class_name_is(component, class_name, false)) return component;
+    }
+    return 0;
 }
 
 // Transform камеры. Camera наследует Component, поэтому её GameObject лежит
@@ -3434,6 +3483,15 @@ static bool resolve_look_direction(uint64_t& out) {
     if (look < 0x10000) return false;
     out = look + SYNC_VALUE_OFFSET;
     return true;
+}
+
+// PlayerEventHandler локального игрока «наружу» (память-джойстик автофарма
+// пишет в его канал MovementInput рядом с LookDirection). Владелец сверен по
+// обратной ссылке handler.manager (+0xD0) == PlayerManager, как и везде, где
+// мы пишем в этот объект.
+uint64_t local_event_handler_checked() {
+    uint64_t handler = 0;
+    return resolve_event_handler(handler) ? handler : uint64_t{0};
 }
 
 bool esp_mem_aim_last_shot(float& time_sec) {

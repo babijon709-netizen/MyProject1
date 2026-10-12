@@ -1,0 +1,475 @@
+#include "farm_joy.h"
+
+#include "game_internal.h"
+#include <cmath>
+#include <cstring>
+
+using namespace go_active;   // смещения читаются как в game_markers/game_farm
+
+// Реализация. Подробности «почему так» — в farm_joy.h; здесь коротко о
+// раскладке, на которую опираемся (дамп 11949):
+//   Joystick Pack (неймспейс пустой): handleRange 0x54, deadZone 0x58,
+//     axisOptions 0x5C, snapX/Y 0x60/0x61, background 0x68, handle 0x70,
+//     baseJoystick 0x78, baseRect 0x80, canvas 0x88, cam 0x90,
+//     input Vector2 0x98, путь контроля Input System 0xB0. Компонент лежит на
+//     GameObject'ах FixedJoystick (0x78) и FloatingJoystick (0x90) держателя
+//     ScreenControlsReferenceHolder;
+//   Oxide.PlayerInputHandler: <qNU> PlayerManager backref 0x30, PlayerInput
+//     qNa 0x40 (первые 8 байт — MovementInput), Nullable<Vector2> qNf 0x6C и
+//     qNP 0x78 (пять публичных сеттеров glO/uov/glb/nh/lE сходятся в эти два
+//     поля; в дампе есть NetworkWriter/ReadBlittableNullable<Vector2>, то есть
+//     это и есть ввод, уходящий на сервер);
+//   PlayerEventHandler (Vsh): manager backref 0xD0, MovementInput
+//     Vsf<Vector2> 0x128, LookDirection Vsf<Vector3> 0x140; значение внутри
+//     обёртки Vsf — по +0x20 (SYNC_VALUE_OFFSET, тот же слот, куда пишет
+//     esp_mem_aim_write_fire_dir для оси выстрела).
+//
+// Nullable<T> в il2cpp раскладывается по порядку полей метадаты (в дампе:
+// hasValue, затем value), то есть hasValue по +0, значение по +4 (для Vector2
+// итого 0xC байт — сходится с шагом полей 0x6C -> 0x78). Из дампа это не
+// доказать, поэтому для обоих nullable-полей есть по два кандидата: обычная
+// раскладка и обратная (значение по +0, hasValue по +8). При неверной
+// раскладке байт флага попадает в мантиссу float, то есть игра прочитает
+// почти нулевой вектор — худший случай безопасен, а проверка по сближению
+// такой кандидат всё равно отбракует.
+
+namespace farmjoy {
+namespace {
+
+constexpr float kStickMax  = 1.00f;   // предел магнитуды стика
+constexpr float kTrialTime = 0.45f;   // сколько ведём кандидата «на пробу», с
+constexpr float kTrialGood = 0.12f;   // сближение, достаточное для подтверждения, м
+constexpr float kTrialBack = 0.35f;   // на столько ушли от цели — кандидат не тот, м
+constexpr float kCleanDist = 2.00f;   // ближе — подвод к точке удара, а не ходьба
+constexpr float kResolveT  = 1.00f;   // как часто перечитываем цепочку целиком, с
+constexpr float kAckAlpha  = 0.25f;   // сглаживание скорости сближения (диагностика)
+
+enum {
+    WHY_OK = 0,
+    WHY_NO_STATICS,      // нет статиков GameControllerBase
+    WHY_NO_HANDLER,      // нет PlayerInputHandler (статика <qSt>)
+    WHY_HANDLER_OWNER,   // хендлер ввода принадлежит другому игроку
+    WHY_NO_PLAYER,       // нет локального игрока
+    WHY_NO_EVENT,        // нет PlayerEventHandler у локального игрока
+    WHY_NO_CHANNEL,      // не сошлась раскладка канала движения (Vsf)
+    WHY_WRITE,           // запись не прошла (память отвалилась)
+};
+
+// Раскладка Nullable<Vector2>: основной вариант (hasValue по +0, значение по
+// +4) и обратный (значение по +0, hasValue по +8) — см. комментарий выше.
+enum { NUL_NONE = -1, NUL_HV0 = 0, NUL_V0 = 1 };
+
+// Проверенная цель записи. Перед КАЖДОЙ записью сверяем, что объект-владелец
+// не освобождён и не переиспользован (по указателю класса) и что его обратная
+// ссылка на месте: компонент — на свой GameObject, хендлер — на локального
+// игрока (PlayerManager), Vsh — на локального игрока.
+struct Target {
+    bool     ok = false;
+    int      why = WHY_OK;
+    int      nul = NUL_NONE;   // NUL_NONE — обычный Vector2, иначе раскладка Nullable
+    uint64_t addr = 0;         // куда писать (для Nullable — база)
+    uint64_t addr2 = 0;        // второй стик (Fixed и Floating вместе), 0 — нет
+    uint64_t owner = 0;        // объект-владелец
+    uint64_t klass = 0;        // его класс на момент резолва
+    uint64_t back_off = 0;     // смещение обратной ссылки
+    uint64_t back_eq = 0;      // 0 — «ссылка непустая», иначе — равна этому
+    unsigned sticks = 0;       // биты найденных стиков (1 — Fixed, 2 — Floating)
+};
+
+bool vec_ok(const float v[2]) {
+    return std::isfinite(v[0]) && std::isfinite(v[1]) &&
+           fabsf(v[0]) <= 1.5f && fabsf(v[1]) <= 1.5f;
+}
+
+bool alive(const Target& t) {
+    if (!t.ok || t.owner < 0x10000 || t.klass < 0x10000) return false;
+    if (rd_ptr(t.owner) != t.klass) return false;   // освобождён/переиспользован
+    if (!t.back_off) return true;
+    const uint64_t link = rd_ptr(t.owner + t.back_off);
+    return t.back_eq ? (link == t.back_eq) : (link >= 0x10000);
+}
+
+// --- запись ---------------------------------------------------------------
+
+bool write_target(const Target& t, float x, float y) {
+    if (!t.ok || !t.addr) return false;
+    if (t.nul == NUL_NONE) {
+        const float v[2] = {x, y};
+        bool written = wr_buf(t.addr, v, sizeof(v));
+        if (t.addr2) written |= wr_buf(t.addr2, v, sizeof(v));
+        return written;
+    }
+    // Nullable<Vector2>: 12 байт — флаг и два float по раскладке.
+    unsigned char buf[0xC] = {};
+    const float v[2] = {x, y};
+    if (t.nul == NUL_HV0) {
+        buf[0] = 1;                        // hasValue
+        memcpy(buf + 4, v, sizeof(v));     // value
+    } else {
+        memcpy(buf, v, sizeof(v));         // value
+        buf[8] = 1;                        // hasValue
+    }
+    return wr_buf(t.addr, buf, sizeof(buf));
+}
+
+// Обнулить цель: у Nullable вместе с флагом — состояние «стик отпущен».
+void zero_target(const Target& t) {
+    if (!alive(t)) return;
+    write_target(t, 0.0f, 0.0f);
+}
+
+// --- резолв ---------------------------------------------------------------
+
+// Компонент-стик на GameObject: сперва точные имена классов ассета (они
+// уникальны), затем базовый "Joystick". Имя сверяет gameobject_component_by_class;
+// базовый требует ещё проверки раскладки: у игрового Oxide.InputSystem.Joystick
+// с тем же именем поля лежат по 0x20..0x48, и 0x98 там — чужая память.
+uint64_t stick_component_of(uint64_t native_go) {
+    static const char* kExact[] = {"FixedJoystick", "FloatingJoystick",
+                                   "DynamicJoystick", "VariableJoystick"};
+    for (const char* name : kExact) {
+        const uint64_t component = gameobject_component_by_class(native_go, name);
+        if (component) return component;
+    }
+    const uint64_t component = gameobject_component_by_class(native_go, "Joystick");
+    if (!component) return 0;
+    const float handle_range = rd<float>(component + JOYSTICK_HANDLE_RANGE);
+    const float dead_zone    = rd<float>(component + JOYSTICK_DEAD_ZONE);
+    if (!std::isfinite(handle_range) || !(handle_range > 0.01f && handle_range <= 2.0f)) return 0;
+    if (!std::isfinite(dead_zone) || !(dead_zone >= 0.0f && dead_zone < 1.0f)) return 0;
+    if (rd_ptr(component + JOYSTICK_BACKGROUND) < 0x10000) return 0;
+    if (rd_ptr(component + JOYSTICK_HANDLE) < 0x10000) return 0;
+    float value[2] = {};
+    if (!rd_buf(component + JOYSTICK_INPUT_VALUE, value, sizeof(value)) || !vec_ok(value)) return 0;
+    return component;
+}
+
+// Статики GameControllerBase — общий вход для всех цепочек ниже.
+uint64_t statics_or_why(int& why) {
+    const uint64_t statics = game_controller_statics();
+    if (!statics) why = WHY_NO_STATICS;
+    return statics;
+}
+
+// UI-стик: статики -> ScreenControlsManager -> ScreenControlsReferenceHolder
+// -> GameObject'ы FixedJoystick/FloatingJoystick -> компонент стика.
+Target resolve_ui_stick() {
+    Target t;
+    int why = WHY_OK;
+    const uint64_t statics = statics_or_why(why);
+    if (!statics) { t.why = why; return t; }
+
+    uint64_t holder = 0;
+    const uint64_t manager = rd_ptr(statics + GAME_CONTROLLER_SCREEN_CONTROLS_FIELD);
+    if (manager && object_class_name_is(manager, "ScreenControlsManager", true))
+        holder = rd_ptr(manager + SCREEN_CONTROLS_HOLDER_FIELD);
+    if (!holder || !object_class_name_is(holder, "ScreenControlsReferenceHolder", true)) {
+        // Запасной путь: тот же holder держит сам хендлер ввода (+0x28).
+        const uint64_t handler = rd_ptr(statics + GAME_CONTROLLER_INPUT_HANDLER_FIELD);
+        if (handler && object_class_name_is(handler, "PlayerInputHandler", true))
+            holder = rd_ptr(handler + SCREEN_CONTROLS_HOLDER_FIELD);
+    }
+    if (!holder || !object_class_name_is(holder, "ScreenControlsReferenceHolder", true)) {
+        t.why = WHY_NO_CHANNEL;
+        return t;
+    }
+
+    const uint64_t fields[2] = {SCREEN_CONTROLS_HOLDER_FIXED, SCREEN_CONTROLS_HOLDER_FLOATING};
+    for (int i = 0; i < 2; ++i) {
+        const uint64_t managed = rd_ptr(holder + fields[i]);
+        if (managed < 0x10000) continue;
+        const uint64_t go = managed_object_native(managed);
+        if (go < 0x10000) continue;
+        const uint64_t component = stick_component_of(go);
+        if (!component) continue;
+        t.sticks |= (1u << i);
+        if (!t.addr) {
+            t.addr = component + JOYSTICK_INPUT_VALUE;
+            t.owner = component;
+            t.klass = rd_ptr(component);
+            t.back_off = COMPONENT_GAMEOBJECT;   // компонент знает свой GameObject
+            t.back_eq = 0;                       // 0 — «ссылка непустая»
+        } else if (!t.addr2) {
+            t.addr2 = component + JOYSTICK_INPUT_VALUE;
+        }
+    }
+    if (!t.addr) { t.why = WHY_NO_CHANNEL; return t; }
+    t.ok = true;
+    return t;
+}
+
+// Хендлер ввода: общая проверка для трёх кандидатов (оба Nullable и PlayerInput).
+bool resolve_handler(uint64_t& handler, uint64_t& klass, uint64_t& owner, int& why) {
+    handler = klass = owner = 0;
+    const uint64_t statics = statics_or_why(why);
+    if (!statics) return false;
+    const uint64_t found = rd_ptr(statics + GAME_CONTROLLER_INPUT_HANDLER_FIELD);
+    if (!found || !object_class_name_is(found, "PlayerInputHandler", true)) {
+        why = WHY_NO_HANDLER;
+        return false;
+    }
+    const uint64_t player = local_player_checked();
+    const uint64_t backref = rd_ptr(found + PLAYER_INPUT_HANDLER_OWNER_BACKREF);
+    if (backref && player && backref != player) { why = WHY_HANDLER_OWNER; return false; }
+    handler = found;
+    klass = rd_ptr(found);
+    owner = backref;
+    return true;
+}
+
+Target resolve_handler_field(int candidate) {
+    Target t;
+    int why = WHY_OK;
+    uint64_t handler = 0, klass = 0, owner = 0;
+    if (!resolve_handler(handler, klass, owner, why)) { t.why = why; return t; }
+    const bool swapped = (candidate == C_OVR_A_S || candidate == C_OVR_B_S);
+    const bool second  = (candidate == C_OVR_B || candidate == C_OVR_B_S);
+    t.ok = true;
+    t.owner = handler;
+    t.klass = klass;
+    if (owner) { t.back_off = PLAYER_INPUT_HANDLER_OWNER_BACKREF; t.back_eq = owner; }
+    if (candidate == C_INPUT) {
+        t.addr = handler + PLAYER_INPUT_MOVEMENT_INPUT;
+    } else {
+        t.addr = handler + (second ? PLAYER_INPUT_HANDLER_OVERRIDE_B
+                                   : PLAYER_INPUT_HANDLER_OVERRIDE_A);
+        t.nul = swapped ? NUL_V0 : NUL_HV0;
+    }
+    return t;
+}
+
+// Канал движения в PlayerEventHandler (Vsh) локального игрока.
+Target resolve_channel() {
+    Target t;
+    const uint64_t player = local_player_checked();
+    if (!player) { t.why = WHY_NO_PLAYER; return t; }
+    const uint64_t handler = local_event_handler_checked();   // с проверкой владельца
+    if (!handler) { t.why = WHY_NO_EVENT; return t; }
+    const uint64_t channel = rd_ptr(handler + EVENT_HANDLER_MOVEMENT_INPUT);
+    if (channel < 0x10000) { t.why = WHY_NO_CHANNEL; return t; }
+    float value[2] = {};
+    if (!rd_buf(channel + SYNC_VALUE_OFFSET, value, sizeof(value)) || !vec_ok(value)) {
+        t.why = WHY_NO_CHANNEL;
+        return t;
+    }
+    // Раскладку сверяем по соседнему LookDirection: он у нас уже читается как
+    // нормированная ось выстрела (esp_mem_aim_read_fire_dir), значит по нему
+    // видно, что это тот самый объект и те самые смещения.
+    const uint64_t look = rd_ptr(handler + EVENT_HANDLER_LOOK_DIRECTION);
+    if (look < 0x10000) { t.why = WHY_NO_CHANNEL; return t; }
+    const Vec3 dir = rd_v3(look + SYNC_VALUE_OFFSET);
+    const float len = sqrtf(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    if (!std::isfinite(len) || !(len > 0.5f && len < 2.0f)) { t.why = WHY_NO_CHANNEL; return t; }
+    t.ok = true;
+    t.addr = channel + SYNC_VALUE_OFFSET;
+    t.owner = handler;
+    t.klass = rd_ptr(handler);
+    t.back_off = EVENT_HANDLER_MANAGER_BACKREF;
+    t.back_eq = player;
+    return t;
+}
+
+Target resolve(int candidate) {
+    switch (candidate) {
+        case C_UI_STICK: return resolve_ui_stick();
+        case C_OVR_A:
+        case C_OVR_B:
+        case C_INPUT:
+        case C_OVR_A_S:
+        case C_OVR_B_S:  return resolve_handler_field(candidate);
+        case C_CHANNEL:  return resolve_channel();
+        default: {
+            Target t;
+            t.why = WHY_NO_CHANNEL;
+            return t;
+        }
+    }
+}
+
+// --- состояние ------------------------------------------------------------
+
+int      s_cur = C_UI_STICK;      // кандидат, который ведём сейчас
+bool     s_confirmed = false;     // он подтверждён фактическим сближением
+bool     s_rejected[C_COUNT] = {}; // ведёт не туда (поехали назад) — не повторяем
+int      s_fails[C_COUNT] = {};   // просто не подтвердился
+int      s_trials = 0;            // завершённых проб
+Target   s_targets[C_COUNT];
+float    s_age = kResolveT;       // возраст резолва, с
+float    s_dt = 1.0f / 60.0f;
+bool     s_armed = false;         // стик ведём
+bool     s_strong = false;        // в этом окне велели ненулевую магнитуду
+bool     s_touched[C_COUNT] = {}; // в этот кандидат уже писали (есть что обнулять)
+float    s_x = 0.0f, s_y = 0.0f;  // последний записанный вектор
+float    s_trial = 0.0f;          // время текущей пробы
+float    s_d0 = 0.0f;             // дистанция в начале пробы
+float    s_dmin = 0.0f;           // минимум дистанции за пробу
+float    s_prev_dist = 0.0f;      // дистанция в прошлом кадре (для скорости)
+bool     s_prev_ok = false;
+float    s_ack = 0.0f;            // измеренная скорость сближения, м/с
+int      s_writes = 0;            // удачных записей за сессию
+int      s_why = WHY_OK;
+unsigned s_sticks = 0;            // какие стики найдены (диагностика)
+
+void revalidate(int candidate) { s_targets[candidate] = resolve(candidate); }
+
+} // namespace
+
+void tick(float dt) {
+    if (!std::isfinite(dt) || dt <= 0.0f) dt = 1.0f / 60.0f;
+    if (dt > 0.25f) dt = 0.25f;
+    s_dt = dt;
+    s_age += dt;
+
+    if (s_age >= kResolveT || !alive(s_targets[s_cur])) {
+        s_age = 0.0f;
+        for (int c = 0; c < C_COUNT; ++c) revalidate(c);
+        s_sticks = s_targets[C_UI_STICK].sticks;
+    }
+}
+
+bool command(float x, float y) {
+    if (!std::isfinite(x) || !std::isfinite(y)) { release(); return false; }
+    const float len = sqrtf(x * x + y * y);
+    if (len > kStickMax && len > 0.0f) {
+        const float k = kStickMax / len;
+        x *= k;
+        y *= k;
+    }
+    if (!std::isfinite(x) || !std::isfinite(y)) { release(); return false; }
+    s_x = x;
+    s_y = y;
+    s_armed = true;
+    s_strong = (len >= 0.5f);
+
+    if (!alive(s_targets[s_cur])) revalidate(s_cur);
+    if (!alive(s_targets[s_cur])) {
+        s_why = s_targets[s_cur].why;
+        return false;
+    }
+    if (!write_target(s_targets[s_cur], x, y)) {
+        s_why = WHY_WRITE;
+        return false;
+    }
+    s_why = WHY_OK;
+    s_touched[s_cur] = true;
+    ++s_writes;
+    return true;
+}
+
+void release() {
+    s_armed = false;
+    s_strong = false;
+    s_x = 0.0f;
+    s_y = 0.0f;
+    for (int c = 0; c < C_COUNT; ++c) {
+        if (!s_touched[c]) continue;
+        zero_target(s_targets[c]);
+        s_touched[c] = false;
+    }
+    s_trial = 0.0f;
+    s_d0 = 0.0f;
+    s_dmin = 0.0f;
+}
+
+void observe(float walk_dist, bool clean) {
+    const bool usable = clean && std::isfinite(walk_dist) && walk_dist > 0.0f;
+    if (!usable) {
+        s_prev_ok = false;
+        s_trial = 0.0f;
+        return;
+    }
+    if (s_prev_ok && s_dt > 0.0f) {
+        const float rate = (s_prev_dist - walk_dist) / s_dt;   // >0 — сближаемся
+        if (std::isfinite(rate) && rate > -30.0f && rate < 30.0f)
+            s_ack += (rate - s_ack) * kAckAlpha;
+    }
+    s_prev_dist = walk_dist;
+    s_prev_ok = true;
+
+    // Проба идёт только когда бот реально идёт вперёд к цели: на подводе,
+    // в манёвре обхода и у самой точки сближение меряется иначе.
+    if (!s_armed || !s_strong || s_confirmed || walk_dist <= kCleanDist) {
+        s_trial = 0.0f;
+        s_dmin = walk_dist;
+        return;
+    }
+    if (s_trial <= 0.0f) {
+        s_d0 = walk_dist;
+        s_dmin = walk_dist;
+    }
+    s_trial += s_dt;
+    if (walk_dist < s_dmin) s_dmin = walk_dist;
+    if (s_trial < kTrialTime) return;
+
+    const float gain = s_d0 - s_dmin;     // сколько прошли к цели за пробу
+    const float back = walk_dist - s_d0;  // насколько ушли от неё к концу пробы
+    s_trial = 0.0f;
+    ++s_trials;
+    if (gain >= kTrialGood) {
+        s_confirmed = true;               // кандидат везёт: закрепляем до конца сессии
+        return;
+    }
+    if (back >= kTrialBack) {
+        // Поехали назад — это не ввод движения вовсе (или знак перевёрнут):
+        // такой кандидат больше не пробуем, иначе бот будет уходить от цели.
+        s_rejected[s_cur] = true;
+    }
+    ++s_fails[s_cur];
+    if (s_touched[s_cur]) {
+        zero_target(s_targets[s_cur]);    // обнуляем, чтобы не осталось «нажатого» стика
+        s_touched[s_cur] = false;
+    }
+    for (int i = 1; i <= C_COUNT; ++i) {
+        const int c = (s_cur + i) % C_COUNT;
+        if (!s_rejected[c] && alive(s_targets[c])) { s_cur = c; break; }
+    }
+    s_d0 = walk_dist;
+    s_dmin = walk_dist;
+    s_ack = 0.0f;
+    s_prev_ok = false;
+}
+
+Status status() {
+    Status out;
+    out.candidate = s_cur;
+    out.confirmed = s_confirmed;
+    out.armed = s_armed;
+    out.x = s_x;
+    out.y = s_y;
+    out.closing_mps = s_ack;
+    out.writes = s_writes;
+    out.trials = s_trials;
+    for (int c = 0; c < C_COUNT; ++c) out.fails[c] = s_fails[c];
+    out.why = s_why != WHY_OK ? s_why : s_targets[s_cur].why;
+    out.sticks = s_sticks;
+    return out;
+}
+
+const char* candidate_name(int candidate) {
+    switch (candidate) {
+        case C_UI_STICK: return "стик UI";
+        case C_OVR_A:    return "слот A";
+        case C_OVR_B:    return "слот B";
+        case C_CHANNEL:  return "канал";
+        case C_INPUT:    return "ввод игрока";
+        case C_OVR_A_S:  return "слот A*";
+        case C_OVR_B_S:  return "слот B*";
+        default:         return "?";
+    }
+}
+
+const char* why_text(int why) {
+    switch (why) {
+        case WHY_OK:            return "ок";
+        case WHY_NO_STATICS:    return "нет статиков";
+        case WHY_NO_HANDLER:    return "нет хендлера";
+        case WHY_HANDLER_OWNER: return "чужой игрок";
+        case WHY_NO_PLAYER:     return "нет игрока";
+        case WHY_NO_EVENT:      return "нет обработчика";
+        case WHY_NO_CHANNEL:    return "нет стика";
+        case WHY_WRITE:         return "нет записи";
+        default:                return "?";
+    }
+}
+
+} // namespace farmjoy
