@@ -1,3 +1,4 @@
+#include "benz_log.h"
 #include "game.h"
 #include "game_internal.h"
 #include "game_offsets_active.h"   // оффсеты (go_active)
@@ -712,6 +713,24 @@ static float g_farm_cam_off = -1.f;
 
 float esp_farm_cam_off() { return g_farm_cam_off; }
 
+// ==== Память точки крестика на узел ==========================================
+// У маркера крестика есть жизнь (~15 с): когда он сгорает, следующий удар
+// спавнит НОВЫЙ X в точке, куда попал луч. Прицел без памяти в этот кадр —
+// корпус узла, то есть новый X рождался в случайном месте, и крестик
+// «переспавнивался» по стволу каждые 15 секунд. Храним последнюю живую точку
+// крестика с позицией узла: маркера нет — продолжаем бить в старую точку, и
+// новый X появляется ровно там же (обновление на месте), все удары ложатся
+// в одну и ту же точку. Позиция узла в условии — защита от респавна: тот же
+// NetworkIdentity, но узел встанет в 3 м (проверено по логу 23.10) — точка
+// чужая, память не берём.
+static unsigned long long s_lastSpotNode = 0;
+static Vec3 s_lastSpot = {};
+static Vec3 s_lastSpotNodePos = {};
+static bool s_lastSpotFront = false;
+static bool s_lastSpotValid = false;
+static unsigned long long s_spotLogNode = 0;
+static bool s_spotLogPrev = false;
+
 static void camOffFrom(const Vec3& p) {
     if (!g_frame_local_valid) { g_farm_cam_off = -1.f; return; }
     const float dx = p.x - g_frame_local_pos.x;
@@ -1005,10 +1024,45 @@ bool esp_farm_get_target(FarmTarget& out) {
     // Крестик есть — бьём в НЕГО, любой стороной к нам: пин Magic-Farm пишет
     // точку попадания в GKo игры, и проверка серии (дистанция точка удара ->
     // маркер руды / отрезок MTQ..MTu дерева, радиус 0.15 м) проходит с нулевой
-    // ошибкой. Крестика нет — корпус узла: первый удар создаст X. Куда при
-    // этом СМОТРИТ камера, не важно: она всегда ведёт центр узла (look ниже).
-    Vec3 aim = has_spot ? spot : best->pos;
-    if (!has_spot) aim.y += (best->kind == 0) ? 1.15F : 0.15F;
+    // ошибкой. Крестика нет, но у узла есть запомненная точка — бьём в НЕЁ:
+    // маркер сгорел, следующий удар родит новый X ровно в этой точке, и
+    // крестик обновляется на месте, а не перескакивает по стволу. Точки нет
+    // вовсе — корпус узла: первый удар создаст X. Куда при этом СМОТРИТ
+    // камера, не важно: она всегда ведёт центр узла (look ниже).
+    const bool spotMemoryValid = s_lastSpotValid &&
+        s_lastSpotNode == best->identity &&
+        (best->pos.x - s_lastSpotNodePos.x) * (best->pos.x - s_lastSpotNodePos.x) +
+        (best->pos.z - s_lastSpotNodePos.z) * (best->pos.z - s_lastSpotNodePos.z) < 0.25F;
+    // (Пере)появление крестика — лог ПЕРЕД обновлением памяти: дрифт новой
+    // точки от старой ~0 — крестик обновился на месте; большой — удар не лёг
+    // в запомненную точку.
+    if (s_spotLogNode != best->identity) {
+        s_spotLogNode = best->identity;
+        s_spotLogPrev = has_spot;
+    } else if (has_spot && !s_spotLogPrev) {
+        if (spotMemoryValid) {
+            const float ddx = spot.x - s_lastSpot.x, ddy = spot.y - s_lastSpot.y, ddz = spot.z - s_lastSpot.z;
+            benz_log("FARM X: id=%llu обновлён, дрейф %.2f м от старой точки",
+                     best->identity, (double)sqrtf(ddx * ddx + ddy * ddy + ddz * ddz));
+        } else {
+            benz_log("FARM X: id=%llu появился (первый удар)", best->identity);
+        }
+    }
+    s_spotLogPrev = has_spot;
+    Vec3 aim;
+    if (has_spot) {
+        aim = spot;
+        s_lastSpotNode = best->identity;
+        s_lastSpot = spot;
+        s_lastSpotNodePos = best->pos;
+        s_lastSpotFront = spot_front;
+        s_lastSpotValid = true;
+    } else if (spotMemoryValid) {
+        aim = s_lastSpot;
+    } else {
+        aim = best->pos;
+        aim.y += (best->kind == 0) ? 1.15F : 0.15F;
+    }
 
     // Полнокруговые углы от оси камеры (или выстрела): в отличие от
     // aim_angles_for() узел может быть и за спиной, поэтому проекция на
@@ -1072,19 +1126,26 @@ bool esp_farm_get_target(FarmTarget& out) {
     // с обратной стороны НЕ обходим кругом: удар и так уйдёт в него пином,
     // так что встаём перед самим узлом с нашей стороны. Без крестика — так же.
     Vec3 goal = best->pos;
-    if (at_spot && spot_front) {
-        float ox = spot.x - best->pos.x, oz = spot.z - best->pos.z;
-        float ol = sqrtf(ox * ox + oz * oz);
-        if (ol < 0.05F) {   // X почти над пивотом — заходим со стороны игрока
-            ox = g_frame_local_pos.x - best->pos.x;
-            oz = g_frame_local_pos.z - best->pos.z;
-            ol = sqrtf(ox * ox + oz * oz);
-        }
-        if (ol > 0.05F) {
-            const float standoff = (best->kind == 0) ? 0.45F : 0.95F;
-            goal.x = spot.x + (ox / ol) * standoff;
-            goal.z = spot.z + (oz / ol) * standoff;
-            goal.y = spot.y;
+    {
+        // Подход к той же точке, что и удар: живому крестику или запомненному
+        // (пока маркер сгорел — удары и точка подхода не расходятся).
+        const bool useSpot = has_spot ? (at_spot && spot_front)
+                                      : (spotMemoryValid && s_lastSpotFront);
+        const Vec3& gspot = has_spot ? spot : s_lastSpot;
+        if (useSpot) {
+            float ox = gspot.x - best->pos.x, oz = gspot.z - best->pos.z;
+            float ol = sqrtf(ox * ox + oz * oz);
+            if (ol < 0.05F) {   // X почти над пивотом — заходим со стороны игрока
+                ox = g_frame_local_pos.x - best->pos.x;
+                oz = g_frame_local_pos.z - best->pos.z;
+                ol = sqrtf(ox * ox + oz * oz);
+            }
+            if (ol > 0.05F) {
+                const float standoff = (best->kind == 0) ? 0.45F : 0.95F;
+                goal.x = gspot.x + (ox / ol) * standoff;
+                goal.z = gspot.z + (oz / ol) * standoff;
+                goal.y = gspot.y;
+            }
         }
     }
     float walk_yaw = 0.0F, walk_dist = best_dist;
