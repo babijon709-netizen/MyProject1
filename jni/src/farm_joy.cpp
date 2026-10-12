@@ -52,6 +52,7 @@ enum {
     WHY_NO_EVENT,        // нет PlayerEventHandler у локального игрока
     WHY_NO_CHANNEL,      // не сошлась раскладка канала движения (Vsf)
     WHY_WRITE,           // запись не прошла (память отвалилась)
+    WHY_NO_SPRINT,       // не сошлась цепочка кнопки бега (LD/InputAction)
 };
 
 // Раскладка Nullable<Vector2>: основной вариант (hasValue по +0, значение по
@@ -293,6 +294,63 @@ Target resolve(int candidate) {
     }
 }
 
+// --- бег -------------------------------------------------------------------
+// Персонаж бежит, только когда игра считает кнопку бега нажатой: оценщик
+// спринта хендлера (glv, RVA 0x67E3574, зовётся из glI на 0x67E47D4) каждый
+// кадр переписывает PlayerInput.Sprint (хендлер+0x59) как «стойка стика &&
+// кнопка_бега», где кнопка — InputAction (LD+0x48). Отклонение стика бег НЕ
+// включает: оно лишь масштабирует скорость (и при |x| >= 0.9 или y <= -0.1
+// игра бег ещё и запрещает). Поэтому состояние кнопки ведём в памяти: пишем
+// фазу акции в TriggerState (InputActionPhase.Started), дальше игра сама
+// ставит PlayerInput.Sprint, а контроллер персонажа (KCC, RVA 0x7B95830)
+// зеркалит его в PlayerEventHandler.Run (Vsh+0x280). Если фазу игра не
+// подхватила за kSprintMissFrames — пишем и сам байт PlayerInput.Sprint, тот
+// же, что пишет оценщик; это страховка от сброса/переезда акции, включается
+// не более одного раза за ходьбу.
+constexpr int   kSprintMissFrames = 30;     // ~0.5 с
+constexpr float kSprintGateX      = 0.9f;   // порог glv: |x| >= 0.9 — бег запрещён
+constexpr float kSprintGateY      = -0.1f;  // порог glv: y <= -0.1 — бег запрещён
+
+// Цепочка кнопки бега: хендлер -> LD -> InputAction -> TriggerState. Раскладка
+// Input System не наша, поэтому перед КАЖДОЙ записью сверяем имена классов,
+// диапазон индекса, ненулевые указатели и фазу в пределах enum (см. sprint_alive).
+struct SprintTarget {
+    bool     ok = false;
+    int      why = WHY_NO_SPRINT;
+    uint64_t handler = 0;
+    uint64_t klass = 0;
+    uint64_t ld = 0;         // обёртка нового Input System у хендлера
+    uint64_t action = 0;     // InputAction кнопки бега (то, что читает glv)
+    uint64_t phase = 0;      // байт фазы в TriggerState — куда пишем
+};
+
+bool resolve_sprint(SprintTarget& t) {
+    t = SprintTarget();
+    uint64_t handler = 0, klass = 0, owner = 0;
+    int why = WHY_OK;
+    if (!resolve_handler(handler, klass, owner, why)) { t.why = why; return false; }
+    const uint64_t ld = rd_ptr(handler + PLAYER_INPUT_HANDLER_INPUT_ACTIONS);
+    if (ld < 0x10000 || !object_class_name_is(ld, "LD", false)) return false;
+    const uint64_t action = rd_ptr(ld + LD_SPRINT_ACTION);
+    if (action < 0x10000 || !object_class_name_is(action, "InputAction", false)) return false;
+    const int index = (int)rd<std::int32_t>(action + INPUT_ACTION_INDEX);
+    if (index < 0 || index > 0x4000) return false;
+    const uint64_t holder = rd_ptr(action + INPUT_ACTION_STATE_HOLDER);
+    const uint64_t state = holder >= 0x10000 ? rd_ptr(holder + INPUT_ACTION_STATE_HOLDER_STATE) : 0;
+    const uint64_t states = state >= 0x10000 ? rd_ptr(state + INPUT_ACTION_STATE_STATES) : 0;
+    if (states < 0x10000) return false;
+    const uint64_t phase = states + (uint64_t)index * INPUT_ACTION_STATE_STRIDE;
+    if (rd<unsigned char>(phase) > 4) return false;   // фаза вне InputActionPhase
+    t.ok = true;
+    t.why = WHY_OK;
+    t.handler = handler;
+    t.klass = klass;
+    t.ld = ld;
+    t.action = action;
+    t.phase = phase;
+    return true;
+}
+
 // --- состояние ------------------------------------------------------------
 
 Target   s_targets[C_COUNT];
@@ -313,6 +371,48 @@ void revalidate(int candidate) {
     s_trial.set_available(candidate, alive(s_targets[candidate]));
 }
 
+// Состояние кнопки бега. base_* — что было в памяти до нашей первой записи,
+// чтобы отпускание вернуло игру в исходное состояние, а не в «ноль».
+SprintTarget  s_sprint_chain;
+unsigned char s_sprint_base_phase = 0;
+unsigned char s_sprint_base_sprint = 0;
+bool          s_sprint_base_known = false;
+bool          s_sprint_on = false;       // бег ведём мы (есть что возвращать)
+bool          s_sprint_direct = false;   // запасной путь: ведём сам байт Sprint
+int           s_sprint_miss = 0;
+int           s_sprint_why = WHY_OK;
+
+bool sprint_alive() {
+    const SprintTarget& t = s_sprint_chain;
+    if (!t.ok || !t.phase) return false;
+    if (rd_ptr(t.handler) != t.klass) return false;   // хендлер освобождён/переиспользован
+    const uint64_t ld = rd_ptr(t.handler + PLAYER_INPUT_HANDLER_INPUT_ACTIONS);
+    if (ld != t.ld || ld < 0x10000) return false;
+    if (rd_ptr(ld + LD_SPRINT_ACTION) != t.action) return false;
+    const uint64_t holder = rd_ptr(t.action + INPUT_ACTION_STATE_HOLDER);
+    const uint64_t state = holder >= 0x10000 ? rd_ptr(holder + INPUT_ACTION_STATE_HOLDER_STATE) : 0;
+    const uint64_t states = state >= 0x10000 ? rd_ptr(state + INPUT_ACTION_STATE_STATES) : 0;
+    const int index = (int)rd<std::int32_t>(t.action + INPUT_ACTION_INDEX);
+    if (states < 0x10000 || index < 0 || index > 0x4000) return false;
+    if (states + (uint64_t)index * INPUT_ACTION_STATE_STRIDE != t.phase) return false;
+    return rd<unsigned char>(t.phase) <= 4;
+}
+
+// Раз в кадр: подхватила ли игра нашу фазу. Признак — PlayerInput.Sprint,
+// который оценщик спринта переписывает сам. Ноль там законен, когда стойка
+// стика бег запрещает (|x| >= 0.9 или y <= -0.1 — пороги из glv), поэтому
+// «промахом» считаем только кадры с разрешающей стойкой.
+void sprint_check() {
+    if (!s_sprint_on || s_sprint_direct) { s_sprint_miss = 0; return; }
+    if (!(fabsf(s_x) < kSprintGateX && s_y > kSprintGateY)) { s_sprint_miss = 0; return; }
+    if (!sprint_alive()) { s_sprint_miss = 0; return; }
+    const uint64_t press = s_sprint_chain.handler + PLAYER_INPUT_SPRINT;
+    if (rd<unsigned char>(press) != 0) { s_sprint_miss = 0; return; }
+    if (++s_sprint_miss < kSprintMissFrames) return;
+    s_sprint_miss = 0;
+    s_sprint_direct = true;   // фазу игра не подхватывает — ведём сам байт бега
+}
+
 } // namespace
 
 void tick(float dt) {
@@ -327,6 +427,8 @@ void tick(float dt) {
         for (int c = 0; c < C_COUNT; ++c) revalidate(c);
         s_sticks = s_targets[C_UI_STICK].sticks;
     }
+
+    sprint_check();   // бег: подхватила ли игра нашу фазу кнопки (см. ниже)
 }
 
 // Слоты ввода (Nullable<Vector2> хендлера) могут оказаться и «взглядом»:
@@ -385,12 +487,40 @@ bool attack(bool on) {
     return true;
 }
 
+bool sprint(bool on) {
+    if (!on && !s_sprint_on) return true;          // возвращать нечего
+    if (!sprint_alive()) {
+        if (!resolve_sprint(s_sprint_chain)) { s_sprint_why = s_sprint_chain.why; return false; }
+        s_sprint_base_known = false;               // объект мог смениться
+    }
+    const uint64_t phase_addr = s_sprint_chain.phase;
+    const uint64_t press_addr = s_sprint_chain.handler + PLAYER_INPUT_SPRINT;
+    if (!s_sprint_base_known) {
+        s_sprint_base_phase  = rd<unsigned char>(phase_addr);
+        s_sprint_base_sprint = rd<unsigned char>(press_addr);
+        s_sprint_base_known  = true;
+    }
+    const unsigned char phase = on ? INPUT_ACTION_PHASE_STARTED : s_sprint_base_phase;
+    if (!wr_buf(phase_addr, &phase, sizeof(phase))) { s_sprint_why = WHY_WRITE; return false; }
+    if (s_sprint_direct) {
+        const unsigned char press = on ? 1u : s_sprint_base_sprint;
+        if (!wr_buf(press_addr, &press, sizeof(press))) { s_sprint_why = WHY_WRITE; return false; }
+        if (!on) s_sprint_direct = false;
+    }
+    s_sprint_on = on;
+    if (!on) s_sprint_miss = 0;
+    s_sprint_why = WHY_OK;
+    return true;
+}
+
 void release() {
     s_trial.release();
     s_x = 0.0f;
     s_y = 0.0f;
     // Зажатие атаки не оставляем игре: пока байт 1, персонаж машет сам.
     if (s_attack_value) attack(false);
+    // И кнопку бега возвращаем в то состояние, что было до нас.
+    if (s_sprint_on) sprint(false);
     for (int c = 0; c < C_COUNT; ++c) {
         if (!s_touched[c]) continue;
         zero_target(s_targets[c]);
@@ -438,6 +568,8 @@ Status status() {
     out.sticks = s_sticks;
     out.attacking = s_attack_value != 0;
     out.attack_why = s_attack_why;
+    out.sprinting = s_sprint_on;
+    out.sprint_why = s_sprint_why;
     return out;
 }
 
@@ -464,6 +596,7 @@ const char* why_text(int why) {
         case WHY_NO_EVENT:      return "нет обработчика";
         case WHY_NO_CHANNEL:    return "нет стика";
         case WHY_WRITE:         return "нет записи";
+        case WHY_NO_SPRINT:     return "нет кнопки бега";
         default:                return "?";
     }
 }

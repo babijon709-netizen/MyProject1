@@ -247,6 +247,39 @@ inline constexpr std::uint64_t NULLABLE_HAS_VALUE = 0x0;
 inline constexpr std::uint64_t NULLABLE_VALUE     = 0x4;
 inline constexpr std::uint64_t NULLABLE_STRIDE    = 0x0C; // размер Nullable<Vector2>
 
+// БЕГ. Персонаж бежит только тогда, когда игра считает кнопку бега нажатой.
+// Оценщик спринта PlayerInputHandler.glv (RVA 0x67E3574; зовётся из glI на
+// 0x67E47D4) в КАЖДОМ кадре переписывает PlayerInput.Sprint (хендлер+0x59)
+// как «стойка стика && кнопка_бега»:
+//   w22 = !(|MovementInput.x| >= 0.9 || MovementInput.y <= -0.1)  (порог из glv)
+//   Sprint = w22 && InputAction(LD+0x48).inProgress   — во ВСЕХ трёх SprintMode
+// (0 Button / 1 Hybrid / 2 Swipe), то есть одной оттянутой ручки стика для бега
+// мало: нужен inProgress у акции. Кнопку на экране жмёт SprintJoystickHandler
+// (: OnScreenControl) — бот тачем не играет, поэтому ведём фазу акции в памяти:
+//   PlayerInputHandler+0x98  <qNJ> LD (обёртка нового Input System)
+//   LD+0x48                  InputAction кнопки бега (то, что читает glv)
+//   InputAction+0xC0         int m_ActionIndexInState
+//   InputAction+0xC8         InputActionMap -> +0x60 InputActionState
+//   InputActionState+0x60    TriggerState* m_ActionStates (шаг 0x44)
+//   TriggerState+0x00        InputActionPhase phase (byte: 2 = Started, 1 = Waiting)
+// Читает её InputAction.IsInProgress (0xC74CF84) / get_inProgress (0xC74BF3C)
+// как (phase & 0xFE) == 2, а TriggerState берётся по
+// &actionStates[action->0xC0] (InputActionState.FetchActionState 0xC767658).
+// Цепочку и раскладку Input System (пакет Unity, ассембли не обфусцирован)
+// сверяем на месте: имена классов LD/InputAction, диапазон индекса, ненулевые
+// указатели и фаза в пределах enum — не сошлось, не пишем.
+inline constexpr std::uint64_t PLAYER_INPUT_HANDLER_INPUT_ACTIONS = 0x98; // <qNJ> LD
+inline constexpr std::uint64_t PLAYER_INPUT_SPRINT                 = 0x59; // PlayerInput.Sprint (bool)
+inline constexpr std::uint64_t LD_SPRINT_ACTION                    = 0x48; // InputAction кнопки бега
+inline constexpr std::uint64_t INPUT_ACTION_INDEX                  = 0xC0; // int, индекс в InputActionState
+inline constexpr std::uint64_t INPUT_ACTION_STATE_HOLDER           = 0xC8; // +0x60 -> InputActionState
+inline constexpr std::uint64_t INPUT_ACTION_STATE_HOLDER_STATE     = 0x60;
+inline constexpr std::uint64_t INPUT_ACTION_STATE_STATES           = 0x60; // TriggerState* (шаг ниже)
+inline constexpr std::uint64_t INPUT_ACTION_STATE_STRIDE           = 0x44; // sizeof(TriggerState)
+inline constexpr std::uint64_t INPUT_ACTION_PHASE_OFFSET           = 0x00;
+inline constexpr std::uint8_t  INPUT_ACTION_PHASE_WAITING          = 1;    // InputActionPhase.Waiting
+inline constexpr std::uint8_t  INPUT_ACTION_PHASE_STARTED          = 2;    // InputActionPhase.Started
+
 // Oxide.PlayerManager instance fields (dump.cs)
 inline constexpr std::uint64_t PLAYER_TRANSFORM = 0x68; // worldCameraRoot
 // PlayerManager.lastSavedPosition. Совпадает в release 11949 и beta 11943;
