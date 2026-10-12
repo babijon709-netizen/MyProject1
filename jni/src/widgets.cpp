@@ -781,42 +781,10 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         // Автофарм: всё управление ботом в одном окне.
         // (secId 4 занят палитрой цветов — там скролл выключен.)
         FgSHdr(XS("Автофарм"));
-        FgCardBg(rH * 2);
-        FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, false);
-        // Джойстик движения ведётся ПАМЯТЬЮ игры (farm_joy.cpp): синтетического
-        // тача по зоне стика больше нет, калибровать нечего. Вместо калибровки —
-        // состояние: какой слой ввода игра реально слушает («стик UI», «слот A/B»
-        // в двух раскладках Nullable, «канал» движения, «ввод игрока») и как
-        // быстро бот сближается с целью, м/с. Точка у значения — кандидат
-        // подтверждён фактическим сближением (именно он ведёт ходьбу), «×N» —
-        // сколько его проб не подтвердилось; прочерк с причиной — писать пока
-        // некуда (farmjoy::why_text).
-        {
-            const farmjoy::Status js = farmjoy::status();
-            const float cy2 = curY + rH * 0.5f;
-            fg->AddText(fn, fs * 1.15f,
-                {cX + inset + padX, cy2 - fs * 1.15f * 0.5f},
-                C::UA(C::Txt(), alpha), XS("Джойстик"));
-            char jv[64];
-            const int fails = js.fails[js.candidate];
-            if (js.writes > 0 && fails > 0)
-                snprintf(jv, sizeof(jv), "%s ×%d · %.1f %s",
-                         farmjoy::candidate_name(js.candidate), fails,
-                         fabsf(js.closing_mps), XS("м/с"));
-            else if (js.writes > 0)
-                snprintf(jv, sizeof(jv), "%s · %.1f %s",
-                         farmjoy::candidate_name(js.candidate),
-                         fabsf(js.closing_mps), XS("м/с"));
-            else
-                snprintf(jv, sizeof(jv), "— %s", farmjoy::why_text(js.why));
-            const auto jsz = fn->CalcTextSizeA(fs * 1.0f, FLT_MAX, 0, jv);
-            const float jx = cX + cW - inset - padX - jsz.x;
-            fg->AddText(fn, fs * 1.0f, {jx, cy2 - jsz.y * 0.5f},
-                        C::UA(js.confirmed ? C::Acc() : C::Dim(), alpha), jv);
-            if (js.confirmed)
-                fg->AddCircleFilled({jx - 16.f, cy2}, 5.f, C::UA(C::Acc(), alpha), 16);
-            curY += rH;
-        }
+        FgCardBg(rH);
+        // Карточка из одной строки: last=true — под тумблером не остаётся
+        // разделителя, который раньше отделял строку «Джойстик».
+        FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, true);
 
         FgSHdr(XS("Что добывать"));
         FgCardBg(rH * 4);
