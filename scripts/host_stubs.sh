@@ -31,7 +31,11 @@ typedef khronos_uint32_t EGLenum;
 typedef khronos_int32_t EGLAttrib;
 typedef void* EGLDisplay; typedef void* EGLSurface; typedef void* EGLConfig;
 typedef void* EGLContext; typedef void* EGLImageKHR;
-typedef intptr_t EGLNativeDisplayType; typedef intptr_t EGLNativeWindowType;
+typedef void* EGLNativeDisplayType; typedef void* EGLNativeWindowType;
+#define EGL_TRUE 1
+#define EGL_FALSE 0
+#define EGL_BUFFER_SIZE 0x3020
+#define EGL_NATIVE_VISUAL_ID 0x302E
 #define EGL_DEFAULT_DISPLAY ((EGLNativeDisplayType)0)
 #define EGL_NO_DISPLAY ((EGLDisplay)0)
 #define EGL_NO_SURFACE ((EGLSurface)0)
@@ -234,7 +238,7 @@ void glBindTexture(GLenum, GLuint);
 void glBindVertexArray(GLuint);
 void glBlendEquation(GLenum);
 void glBlendEquationSeparate(GLenum, GLenum);
-void glBlendFunc(GLenum, GLenum, GLenum, GLenum);
+void glBlendFunc(GLenum, GLenum);
 void glBlendFuncSeparate(GLenum, GLenum, GLenum, GLenum);
 void glBufferData(GLenum, GLsizeiptr, const void*, GLenum);
 void glBufferSubData(GLenum, GLintptr, GLsizeiptr, const void*);

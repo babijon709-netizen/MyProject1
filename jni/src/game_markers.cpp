@@ -95,6 +95,12 @@ constexpr double kMarkerScanBudgetSec = 0.006;   // 6 мс на порцию п�
 // generous bounded cache and always finish walking the registry.
 constexpr size_t kMarkerEntityLimit = 2048;
 constexpr int32_t kMarkerRegistryLimit = 8192;
+// Потолок продвижения устаревшего отсчёта позиции на отрисовке (секунды):
+// движущиеся метки перечитываются раз в 1/6/15 кадров, и между отсчётами их
+// ведёт оценка скорости. Дальше четверти секунды не продвигаем — это уже не
+// «догнать объект между отсчётами», а рисовать его там, где он, возможно, и не
+// был (объект могла унести физика).
+constexpr float kMarkerPositionLeadMax = 0.25F;
 static int32_t g_marker_scan_cursor = -1;    // -1: цикл не начат
 static int32_t g_marker_scan_total  = 0;
 static uint64_t g_marker_scan_identity_class = 0;
@@ -1574,8 +1580,14 @@ static void marker_track_position(MarkerEntity& entity) {
             entity.position_valid = true;
             entity.position_last_ok = mono_seconds();
             entity.position_fail_frames = 0;
-            if (entity.kind == ESP_MARKER_BOT) {
+            // Скорость нужна ВСЕМ движущимся меткам, а не только ботам: по ней
+            // отрисовка продвигает устаревший отсчёт между редкими чтениями
+            // (см. kMarkerPositionLeadMax). У ботов она вдобавок идёт в аим.
+            if (entity.kind == ESP_MARKER_BOT || entity.kind == ESP_MARKER_ANIMAL ||
+                entity.kind == ESP_MARKER_VEHICLE) {
                 botlead::update(entity.lead, entity.position, entity.position_last_ok);
+            }
+            if (entity.kind == ESP_MARKER_BOT) {
                 marker_track_bot_head(entity, entity.position_last_ok);
             }
         } else if (entity.position_valid &&
@@ -1817,9 +1829,31 @@ std::vector<EspMarker> esp_get_markers() {
             continue;
         }
 
-        float dx = entity.position.x - g_frame_local_pos.x;
-        float dy = entity.position.y - g_frame_local_pos.y;
-        float dz = entity.position.z - g_frame_local_pos.z;
+        // Движущиеся метки перечитывают позицию раз в 1/6/15 кадров
+        // (marker_track_position), а рисуются каждый кадр. Пока объект идёт, его
+        // метка висит на прошлом месте и отстаёт от модели — и это видно ровно
+        // как «метка плывёт рядом с объектом». Между отсчётами продвигаем её
+        // своей же оценкой скорости: то же, что аим уже делает для ботов
+        // (kBotPosLeadMax), только на отрисовке. Продвижение ограничено сверху,
+        // и, если оценка старше своего окна, точка остаётся как есть.
+        Vec3 tracked_position = entity.position;
+        if (entity.kind == ESP_MARKER_ANIMAL || entity.kind == ESP_MARKER_BOT ||
+            entity.kind == ESP_MARKER_VEHICLE) {
+            const double now = mono_seconds();
+            const double age = now - entity.position_last_ok;
+            if (age > 0.0 && botlead::fresh(entity.lead, now)) {
+                const float lead = (float)std::min(age, (double)kMarkerPositionLeadMax);
+                tracked_position.x += entity.lead.vel.x * lead;
+                tracked_position.y += entity.lead.vel.y * lead;
+                tracked_position.z += entity.lead.vel.z * lead;
+                if (!botlead::finite_position(tracked_position))
+                    tracked_position = entity.position;
+            }
+        }
+
+        float dx = tracked_position.x - g_frame_local_pos.x;
+        float dy = tracked_position.y - g_frame_local_pos.y;
+        float dz = tracked_position.z - g_frame_local_pos.z;
         float distance = sqrtf(dx * dx + dy * dy + dz * dz);
         if (!std::isfinite(distance) || distance > max_distance) {
             marker_watch_observe(entity, false, "DISTANCE", distance, 0.0F, 0.0F);
@@ -1827,7 +1861,7 @@ std::vector<EspMarker> esp_get_markers() {
         }
 
         Vec2 screen{};
-        Vec3 anchor = entity.position;
+        Vec3 anchor = tracked_position;
         // above the model: animals are tall, crates sit low on the ground
         // Пилюля бота висит на высоте шеи — в той точке, куда целится аим.
         anchor.y += (entity.kind == ESP_MARKER_ANIMAL)  ? 1.2F
@@ -1871,6 +1905,14 @@ std::vector<EspMarker> esp_get_markers() {
         marker.x = screen.x;
         marker.y = screen.y;
         marker.distance = distance;
+        // Мировой якорь — ровно та точка, что ушла в эту проекцию (вместе с
+        // подъёмом по типу объекта). Битый кадр перепроецирует её текущей
+        // матрицей вида (esp_marker_reproject) вместо повтора экранных
+        // координат: повтор приклеил бы метку к экрану, пока камера едет.
+        marker.world_valid = true;
+        marker.world[0] = anchor.x;
+        marker.world[1] = anchor.y;
+        marker.world[2] = anchor.z;
         marker.kind = entity.kind;
         marker.has_color = entity.has_color;
         marker.rainbow = entity.rainbow;

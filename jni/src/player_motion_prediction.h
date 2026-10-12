@@ -9,6 +9,11 @@ namespace playermotion {
 constexpr double kPredictionDelaySeconds = 0.008;
 constexpr double kPredictionMaxSeconds = 0.100;
 constexpr float kPredictionMaxDistance = 1.20F;
+// Потолок упреждения для РИСУЕМОЙ позиции (бокс на экране). Прицелу нужен весь
+// запас — он догоняет цель и сам его учитывает, — а боксу упреждение в метр
+// только вредит: он едет впереди игрока, а на панораме это выглядит как
+// «визуал не держится на объекте». 0.35 м — примерно полшага тела.
+constexpr float kDrawnPredictionMaxDistance = 0.35F;
 
 // Recent direction changes matter more than a long average when predicting strafes.
 inline Vec3 blend_velocity(const Vec3& previous, const Vec3& measured) {
@@ -55,7 +60,8 @@ inline Vec3 blend_velocity(const Vec3& previous, const Vec3& measured) {
 }
 
 inline Vec3 predict(const Vec3& sample, const Vec3& velocity,
-                    double sample_time, double now) {
+                    double sample_time, double now,
+                    float max_distance = kPredictionMaxDistance) {
     double age = now - sample_time - kPredictionDelaySeconds;
     if (!(age > 0.0) || !std::isfinite(age)) return sample;
     age = std::min(age, kPredictionMaxSeconds);
@@ -66,10 +72,10 @@ inline Vec3 predict(const Vec3& sample, const Vec3& velocity,
         velocity.z * static_cast<float>(age)
     };
     const float distance2 = step.x * step.x + step.y * step.y + step.z * step.z;
-    const float max2 = kPredictionMaxDistance * kPredictionMaxDistance;
+    const float max2 = max_distance * max_distance;
     if (!std::isfinite(distance2)) return sample;
     if (distance2 > max2) {
-        const float scale = kPredictionMaxDistance / std::sqrt(distance2);
+        const float scale = max_distance / std::sqrt(distance2);
         step.x *= scale;
         step.y *= scale;
         step.z *= scale;

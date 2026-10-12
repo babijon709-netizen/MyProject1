@@ -37,19 +37,21 @@ int main() {
     ore.id = 2; ore.kind = ESP_MARKER_ORE;
     std::vector<espboxhold::Entry<EspMarker>> hold;
     std::vector<EspMarker> out;
-    espboxhold::update(hold, std::vector<EspMarker>{bot, ore}, false, 0.0, 0.35, out);
+    // Кадр с матрицей вида: удержанная метка перепроецируется мировым якорем.
+    auto frame_ok = [](EspMarker&) { return true; };
+    espboxhold::update(hold, std::vector<EspMarker>{bot, ore}, false, 0.0, 0.35, frame_ok, out);
     remote = 1;
     assert(life.refresh(read));
     espboxhold::erase_if(hold, [&](const EspMarker& marker) {
         return marker.id == bot.id && life.dead;
     });
-    espboxhold::update(hold, std::vector<EspMarker>{}, true, 0.01, 0.35, out);
+    espboxhold::update(hold, std::vector<EspMarker>{}, true, 0.01, 0.35, frame_ok, out);
     assert(out.size() == 1 && out[0].id == ore.id);
-    espboxhold::update(hold, std::vector<EspMarker>{}, true, 0.4, 0.35, out);
+    espboxhold::update(hold, std::vector<EspMarker>{}, true, 0.4, 0.35, frame_ok, out);
     assert(out.empty());
     remote = 0;
     assert(!life.refresh(read));
-    espboxhold::update(hold, std::vector<EspMarker>{bot}, false, 0.5, 0.35, out);
+    espboxhold::update(hold, std::vector<EspMarker>{bot}, false, 0.5, 0.35, frame_ok, out);
     assert(out.size() == 1 && out[0].id == bot.id);
     std::puts("bot life tests passed");
 }

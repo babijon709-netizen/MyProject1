@@ -203,6 +203,7 @@ inline constexpr std::uint64_t HITBOX_CENTER = game_offsets::HITBOX_CENTER;
 inline constexpr std::uint64_t HITBOX_AREA = game_offsets::HITBOX_AREA;
 inline constexpr std::uint64_t KCC_LOOK_HEIGHT_OFFSET = game_offsets::KCC_LOOK_HEIGHT_OFFSET;
 inline constexpr std::uint64_t KCC_MOVE = game_offsets::KCC_MOVE;
+inline constexpr std::int32_t KCC_MOVE_STATE_DEAD = game_offsets::KCC_MOVE_STATE_DEAD;
 inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION = game_offsets::KCC_CHARACTER_ANIMATION;
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_BACKREF = game_offsets::CHAR_ANIM_PLAYER_BACKREF;
 inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL = game_offsets::CHAR_ANIM_RAGDOLL;

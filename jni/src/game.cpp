@@ -2717,14 +2717,16 @@ static bool read_entity_pose(uint64_t source, Vec3& position, Vec4& rotation) {
 // в поле позиции вектор ВИДА (x_любой, 0.0, 0.0) — в логе x принимал 0.1,
 // 0.8, 3.1, 4.8, 9.5, 11.8, а y и z всегда ровный ноль. Такая точка проходит
 // world-space-гейт и рисует бокс под картой (нырок y 10.4 -> 0.0 за кадр).
-// Когда хотя бы ДВЕ координаты почти ровные нули — это не живая позиция
-// (настоящий игрок не стоит одновременно на нулевом меридиане и в нуле высоты).
+// Ловим ПОДПИСЬ этого мусора, а не «две почти нулевые оси из трёх». Пара
+// ровных нулей у y и z — всегда недоделанный объект и почти никогда живая
+// позиция; а вот x у мусора произвольный (0.1 ... 11.8), поэтому требовать
+// нуля по трём осям нельзя — подпись (x любой, y0, z0) тогда проходит. Порог
+// по y/z узкий (2 см), потому что широкие 0.25 м выкидывали живого игрока на
+// спавне в центре карты: там x и z тоже стоят в нуле, и трек не подтверждался
+// НИКОГДА. Дополнительно гейт применяется только к первой точке трека
+// (см. вызовы): подтверждённая позиция нулём быть не перестаёт.
 static bool position_near_world_origin(const Vec3& v) {
-    int zeros = 0;
-    if (fabsf(v.x) < 0.25F) ++zeros;
-    if (fabsf(v.y) < 0.25F) ++zeros;
-    if (fabsf(v.z) < 0.25F) ++zeros;
-    return zeros >= 2;
+    return fabsf(v.y) < 0.02F && fabsf(v.z) < 0.02F;
 }
 
 // A world position we would believe from a single sample: inside the map
@@ -3730,11 +3732,32 @@ static double   s_cam_arr_at = -1e9;
 // перестройке иерархии, поэтому при расхождении они перечитываются по тем же
 // фиксированным release-смещениям. Во фрикаме сверку отключаем: там камера
 // намеренно не совпадает с положением, которое только что оставила игра.
-static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref, bool verify) {
+//
+// Сверяем И ПОВОРОТ, не только позицию. Позиция сходится и у чужого трансформа
+// (риг камеры, соседний узел её GameObject, полузаписанный, но нормализуемый
+// кватернион): у такого источника позиция честная, а поворот сдвинут на
+// градусы — и все визуалы висят рядом с объектом, «дыша» на панораме, потому
+// что угловая ошибка на экране растёт с расстоянием и меняется вместе с
+// направлением взгляда. Кэш +0x70 — это ровно то, чем игра рисует кадр, поэтому
+// оси позы обязаны лежать в его базисе; разошлись — веры позе нет.
+//
+// Про порог. 0.999 (~2.6°) вместо 0.995 (~5.7°): пять градусов на панораме —
+// это заметный сдвиг визуалов у всего, что дальше 20-30 м, и он проходит
+// проверку «на глаз» незамеченным только на близких целях. Расхождение больше
+// 2.6° между позой и кадровой матрицей — это уже разные кадры, а не шум.
+enum class PoseCheckResult {
+    Ok,
+    Unavailable,        // позу не прочитали (или она не нормализуется)
+    PositionMismatch,   // позиция ушла больше чем на 2 м от эталона
+    RotationMismatch,   // поворот разошёлся с эталоном больше чем на 0.999
+};
+
+static PoseCheckResult camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref,
+                                          const Vec3& ref_forward, bool verify) {
     if (!s_cam_arr_valid) {
         Vec3 cp{};
         float err = -1.f;
-        if (!resolve_camera_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, cp, err)) return false;
+        if (!resolve_camera_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, cp, err)) return PoseCheckResult::Unavailable;
         s_cam_arr_valid = true;
         s_cam_arr_at = memio::now_seconds();
     }
@@ -3742,22 +3765,35 @@ static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref,
     Vec4 r{};
     if (!read_transform_hierarchy_arrays(s_cam_arr_m, s_cam_arr_n, s_cam_arr_idx, p, &r)) {
         s_cam_arr_valid = false;
-        return false;
+        return PoseCheckResult::Unavailable;
     }
-    if (!vec3_is_finite(p)) { s_cam_arr_valid = false; return false; }
-    if (verify) {
+    if (!vec3_is_finite(p)) { s_cam_arr_valid = false; return PoseCheckResult::Unavailable; }
+    position = p;
+    rotation = r;
+    if (!verify) return PoseCheckResult::Ok;
+    {
         const float dx = p.x - ref.x, dy = p.y - ref.y, dz = p.z - ref.z;
         const float d2 = dx * dx + dy * dy + dz * dz;
         // Два метра: камера успевает сдвинуться между двумя чтениями, а
         // подмена массивов даёт десятки метров.
         if (d2 > 2.0F * 2.0F) {
             s_cam_arr_valid = false;
-            return false;
+            return PoseCheckResult::PositionMismatch;
+        }
+        // Кватернион нормируем ДО проверки — иначе знак/длина не влияют на
+        // направление, а вот на dot влияют.
+        Vec4 q = r;
+        if (!normalize_quaternion(q)) { s_cam_arr_valid = false; return PoseCheckResult::Unavailable; }
+        const Vec3 pose_forward = rotate_vector(q, {0.0F, 0.0F, 1.0F});
+        if (!vec3_is_finite(pose_forward)) { s_cam_arr_valid = false; return PoseCheckResult::Unavailable; }
+        const float dot = pose_forward.x * ref_forward.x + pose_forward.y * ref_forward.y +
+                          pose_forward.z * ref_forward.z;
+        if (!(dot > 0.999F)) {
+            s_cam_arr_valid = false;
+            return PoseCheckResult::RotationMismatch;
         }
     }
-    position = p;
-    rotation = r;
-    return true;
+    return PoseCheckResult::Ok;
 }
 
 // Кадровый барьер матрицы вида. Все визуалы (боксы, маркеры, скелеты, линии)
@@ -3771,10 +3807,17 @@ static bool camera_pose_checked(Vec3& position, Vec4& rotation, const Vec3& ref,
 //   1. worldToCamera у Unity — чистый поворот + перенос, без масштаба: строки
 //      поворота обязаны быть ортонормальными. Смесь двух кадров, прочитанная
 //      на половине записи, таким свойством не обладает.
-//   2. Камера не прыгает на 30+ м и не разворачивается на 60+ градусов за кадр.
-//      Настоящий телепорт/респаун держится в памяти — серия из 4 одинаковых
-//      скачков подтвердит его и пропустит, а одиночный мусор отбрасывается, и
+//  2. Камера не прыгает на 30+ м и не разворачивается на 60+ градусов за кадр.
+//      Настоящий телепорт/респаун держится в памяти — повтор скачка на следующем
+//      кадре подтвердит его и пропустит, а одиночный мусор отбрасывается, и
 //      кадр дорисовывается прошлой принятой матрицей.
+//
+// Подтверждение — РОВНО один пропущенный кадр. Раньше скачок отклонялся до трёх
+// кадров подряд, и быстрый доворот в прицеле (или настоящий респаун) отдавал
+// экрану три кадра прежней камеры: мир под визуалами уже уехал, а они стоят —
+// это то же «плавают при движении камеры», только с другой стороны. Мусорный
+// кадр всё равно отсекается: полузаписанная матрица не проходит view_basis_sane
+// выше, а одиночный скачок — этой проверкой.
 struct FrameViewGuard {
     Mat4 view{};
     Vec3 pos{};
@@ -3815,15 +3858,16 @@ static bool frame_view_accepted(const Mat4& view) {
     const bool pos_jump = dx * dx + dy * dy + dz * dz > 30.0F * 30.0F;
     const float dot = fwd.x * s_fv_guard.fwd.x + fwd.y * s_fv_guard.fwd.y + fwd.z * s_fv_guard.fwd.z;
     const bool rot_jump = dot < 0.5F;  // ~60° за кадр
-    if (pos_jump && s_fv_guard.pos_streak < 3) { ++s_fv_guard.pos_streak; return false; }
+    if (pos_jump && s_fv_guard.pos_streak < 1) { ++s_fv_guard.pos_streak; return false; }
     if (pos_jump) s_fv_guard.pos_streak = 0;
-    if (rot_jump && s_fv_guard.rot_streak < 3) { ++s_fv_guard.rot_streak; return false; }
+    if (rot_jump && s_fv_guard.rot_streak < 1) { ++s_fv_guard.rot_streak; return false; }
     if (rot_jump) s_fv_guard.rot_streak = 0;
     s_fv_guard.view = view; s_fv_guard.pos = pos; s_fv_guard.fwd = fwd;
     return true;
 }
 
-static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection, Mat4& view) {
+static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect, Mat4& projection,
+                                        Mat4& view, float force_aspect = 0.0F) {
     if (!native_cam) return false;
 
     static Mat4 s_last_view{};
@@ -3834,16 +3878,40 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     // Живая поза берётся только если она с этим эталоном согласна.
     const Mat4 cached_view = rd_m4(native_cam + CAMERA_VIEW_MATRIX);
     Vec3 ref_pos{};
-    const bool have_ref = matrix_is_finite(cached_view) && camera_position_from_view(cached_view, ref_pos) &&
-                          vec3_is_finite(ref_pos);
+    Vec3 ref_right{}, ref_up{}, ref_forward{};
+    // Оси эталона нужны сверке ПОВОРОТА позы (см. camera_pose_checked): по одной
+    // позиции чужой трансформ проходит проверку, а его поворот сдвинут — и все
+    // визуалы висят рядом с объектом, «дыша» на панораме.
+    const bool have_ref = matrix_is_finite(cached_view) &&
+                          camera_position_from_view(cached_view, ref_pos) &&
+                          vec3_is_finite(ref_pos) &&
+                          camera_basis_from_view(cached_view, ref_right, ref_up, ref_forward);
 
+    // Откуда брать вид. Байты свежести кеша ставит САМА игра, когда +0x70
+    // разошёлся с трансформом камеры, и снимает, пересчитав его; мы их же
+    // используем во фрикаме, чтобы заставить игру пересчитать вид.
+    //   кеш свежий   — +0x70 и есть кадровая матрица: берём её, а живой позой
+    //                  только контролируем (см. 0.999 в camera_pose_checked).
+    //                  Расхождение при свежем кеше — это либо полузапись кеша,
+    //                  либо чужая колонка позы: кадру верим всё равно, но
+    //                  массивы позы перечитываем (self-heal адресов);
+    //   кеш несвежий — эталон отстал от трансформа, и сверять с ним позу
+    //                  нельзя (расхождение и есть ошибка кадра): берём позу;
+    //   байты не читаются — как раньше: поза, если сходится с кешем.
+    // Во фрикаме +0x70 пишем мы сами, там «свежесть» наша собственная: не лезем.
+    uint8_t view_dirty = 0, proj_dirty = 0;
+    const bool dirty_known = rd_exact(native_cam + CAMERA_VIEW_DIRTY, view_dirty) &&
+                             rd_exact(native_cam + CAMERA_PROJ_DIRTY, proj_dirty);
+    const bool cache_stale = dirty_known && (view_dirty != 0 || proj_dirty != 0);
+    const bool cache_fresh = dirty_known && !cache_stale && !g_freecam_on;
     bool have_live_view = false;
     uint64_t native_transform = camera_transform_of(native_cam);
     if (native_transform && have_ref) {
         Vec3 cam_pos{};
         Vec4 cam_rot{};
-        bool pose_ok = camera_pose_checked(cam_pos, cam_rot, ref_pos, !g_freecam_on);
-        bool fin_ok = pose_ok && vec3_is_finite(cam_pos);
+        const PoseCheckResult check =
+            camera_pose_checked(cam_pos, cam_rot, ref_pos, ref_forward, !cache_stale && !g_freecam_on);
+        bool fin_ok = vec3_is_finite(cam_pos);
         bool quat_ok = fin_ok && normalize_quaternion(cam_rot);
         // Teleport rejection: a read that lands mid-update inside the game
         // can return a garbage-but-finite pose. One such frame throws every
@@ -3859,14 +3927,33 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
             float jy = cam_pos.y - s_last_cam_pos.y;
             float jz = cam_pos.z - s_last_cam_pos.z;
             float j2 = jx * jx + jy * jy + jz * jz;
-            if (j2 > 30.0F * 30.0F && s_pose_jump_streak < 4) {
+            // Один кадр подтверждения, не четыре: настоящий телепорт камеры
+            // (респаун, смерть, смена вида) подтверждается следующим кадром, а
+            // четыре кадра прежнего вида — это уже видимая пауза визуалов
+            // посреди движения.
+            if (j2 > 30.0F * 30.0F && s_pose_jump_streak < 1) {
                 ++s_pose_jump_streak;
                 quat_ok = false; // fall through to the cached view below
             } else {
                 s_pose_jump_streak = 0;
             }
         }
-        if (quat_ok) {
+        // Позу берём по состоянию байтов свежести:
+        //   кеш несвежий — эталон отстал от трансформа: поза первична (сверку с
+        //                  эталоном выше отключили — расхождение и есть ошибка);
+        //   кеш свежий  — +0x70 и есть кадровая матрица кадра: оставляем её, но
+        //                  только пока поза с ней согласна. Расхождение при
+        //                  «свежем» кеше — доказательство, что свежесть соврала
+        //                  (полузапись кеша или чужая колонка позы): берём позу;
+        //   байты не читаются — как раньше: поза, если сошлась, иначе кеш.
+        bool pose_usable = false;
+        if (cache_stale || g_freecam_on)
+            pose_usable = quat_ok;
+        else if (cache_fresh)
+            pose_usable = quat_ok && check != PoseCheckResult::Ok;
+        else
+            pose_usable = quat_ok && check == PoseCheckResult::Ok;
+        if (pose_usable) {
             view = mat_world_to_camera(cam_pos, cam_rot);
             have_live_view = matrix_is_finite(view);
             if (have_live_view) {
@@ -3917,21 +4004,53 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     float aspect = rd<float>(native_cam + CAMERA_ASPECT);
     float z_near = rd<float>(native_cam + CAMERA_NEAR_CLIP);
     float z_far = rd<float>(native_cam + CAMERA_FAR_CLIP);
+    // Запрошенный растяг перебивает и поле камеры, и его клампинг: проекция
+    // этого кадра обязана быть посчитана ровно тем значением, которое кадр
+    // кладёт в камеру (иначе ESP и картинка игры расходятся на кадр на каждом
+    // изменении слайдера, и вся сцена прыгает по X).
+    const bool aspect_forced = force_aspect > 0.1F && force_aspect < 10.0F;
+    if (aspect_forced) aspect = force_aspect;
     if (!(aspect > 0.1F && aspect < 10.0F))
         aspect = (screen_aspect > 0.1F && screen_aspect < 10.0F) ? screen_aspect : (9.0F / 16.0F);
     if (!(z_near > 0.001F && z_near < 100.0F)) z_near = 0.1F;
     if (!(z_far > z_near && z_far < 100000.0F)) z_far = 1000.0F;
-    // Aspect и дистанции клипа болтаются в тех же float-полях — и попадают в
-    // тот же полузаписанный кадр разом с видом. Реальный повод для смены
-    // aspect — поворот экрана, держится серией; одиночный скачок растягивает
-    // все визуалы по горизонтали на кадр («телепорт на миллисекунды»).
+    // Aspect, FOV и дистанции клипа лежат в тех же float-полях и попадают в тот
+    // же полузаписанный кадр разом с видом. Раньше любой скачок больше порога
+    // отбрасывался и кадр рисовался прошлым значением ДО ТРЁХ кадров подряд:
+    // на настоящем зуме (FOV уходит больше чем на 25° за кадр) это три кадра
+    // чужого масштаба, и все визуалы уезжают от объектов, пока прицел едет.
+    // Теперь у значений два класса: правдоподобный шаг ОГРАНИЧИВАЕТСЯ (зум
+    // доходит за пару кадров, вместо паузы и щелчка), а физически невозможный
+    // отбрасывается на ОДИН кадр — дальше принимается, потому что два кадра
+    // подряд одинакового «невозможного» значения — это уже не помеха чтению.
     static float s_fv_aspect = 0.0F;
     static int   s_fv_aspect_streak = 0;
-    if (0.001F <= s_fv_aspect && fabsf(aspect - s_fv_aspect) > 0.3F && s_fv_aspect_streak < 3) {
-        ++s_fv_aspect_streak;
-        aspect = s_fv_aspect;
-    } else {
+    if (aspect_forced) {
+        // Запрошенный растяг — это наше собственное значение, а не отсчёт игры:
+        // подтверждать его серией нечего.
         s_fv_aspect_streak = 0;
+        s_fv_aspect = aspect;
+    } else if (s_fv_aspect > 0.001F) {
+        // Шаг ограничиваем МНОЖИТЕЛЕМ (0.65..1.35 за кадр), а не абсолютной
+        // дельтой: 0.3 «в лоб» — это +30% на широком экране и +60% на узком, и
+        // вся сцена прыгала по X сильнее, чем при живом повороте устройства.
+        // Множитель одинаково ограничивает и 9:16, и 21:9.
+        const float ratio = aspect / s_fv_aspect;
+        if ((ratio > 2.5F || ratio < 0.4F) && s_fv_aspect_streak < 1) {
+            // Полукадр смены ориентации/чужое значение: один кадр прошлого
+            // аспекта, дальше принимаем — два одинаковых «невозможных» чтения
+            // подряд это уже настоящее значение.
+            ++s_fv_aspect_streak;
+            aspect = s_fv_aspect;
+        } else {
+            s_fv_aspect_streak = 0;
+            const float lower = s_fv_aspect * 0.65F;
+            const float upper = s_fv_aspect * 1.35F;
+            if (aspect < lower) aspect = lower;
+            else if (aspect > upper) aspect = upper;
+            s_fv_aspect = aspect;
+        }
+    } else {
         s_fv_aspect = aspect;
     }
     static float s_fv_zn = 0.0F, s_fv_zf = 0.0F;
@@ -3939,7 +4058,7 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     if (s_fv_zn > 0.0F && s_fv_zf > 0.0F) {
         const bool clip_jump = z_near > s_fv_zn * 4.0F || z_near < s_fv_zn * 0.25F ||
                                z_far  > s_fv_zf * 4.0F || z_far  < s_fv_zf * 0.25F;
-        if (clip_jump && s_fv_clip_streak < 3) {
+        if (clip_jump && s_fv_clip_streak < 1) {
             ++s_fv_clip_streak;
             z_near = s_fv_zn; z_far = s_fv_zf;
         } else {
@@ -3949,17 +4068,29 @@ static bool read_native_camera_matrices(uint64_t native_cam, float screen_aspect
     } else {
         s_fv_zn = z_near; s_fv_zf = z_far;
     }
-    // FOV входит в ту же формулу кадра. Реальная смена (прицеливание, настройка)
-    // идёт серией; одиночный скачок — кривой отсчёт, кадр дорисовываем прошлым
-    // FOV (иначе вся сцена на миллисекунду меняет масштаб).
+    // FOV: тот же множительный шаг 0.65..1.35 за кадр. Градусный шаг (+25°)
+    // ведёт себя противоположно на разных краях: на 20° прицела это мгновенный
+    // скачок масштаба вдвое, а на 90° обзора — незаметное движение. 0.65..1.35
+    // покрывает любой настоящий зум (он идёт 3-4 кадра) и не пускает в кадр
+    // чужой масштаб. Невозможный множитель (полузаписанный float) отдаёт один
+    // кадр прошлого значения; кадр с нечитаемым FOV рисуем прошлым.
     static float s_fv_fov = 0.0F;
     static int   s_fv_fov_streak = 0;
     if (std::isfinite(fov) && fov > 1.0F && fov < 179.0F) {
-        if (s_fv_fov > 0.0F && fabsf(fov - s_fv_fov) > 25.0F && s_fv_fov_streak < 3) {
-            ++s_fv_fov_streak;
-            fov = s_fv_fov;
+        if (s_fv_fov > 0.0F) {
+            const float ratio = fov / s_fv_fov;
+            if ((ratio > 2.5F || ratio < 0.4F) && s_fv_fov_streak < 1) {
+                ++s_fv_fov_streak;
+                fov = s_fv_fov;
+            } else {
+                s_fv_fov_streak = 0;
+                const float lower = s_fv_fov * 0.65F;
+                const float upper = s_fv_fov * 1.35F;
+                if (fov < lower) fov = lower;
+                else if (fov > upper) fov = upper;
+                s_fv_fov = fov;
+            }
         } else {
-            s_fv_fov_streak = 0;
             s_fv_fov = fov;
         }
     } else if (s_fv_fov > 0.0F) {
@@ -6617,6 +6748,14 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
     return true;
 }
 
+// Возраст мировой кости (в кадрах), при котором она ещё годится.
+//   * kSkeletonDrawMaxAge — на экран: переиспользованная точка отстаёт от тела,
+//     и две-три кости «уезжают» вперёд/назад (видно на панораме и в беге);
+//   * kSkeletonAimMaxAge — в прицел: там нужна мировая ТОЧКА и упреждение, и
+//     короткий перебой чтения лучше пропущенного кадра аима.
+constexpr uint8_t kSkeletonDrawMaxAge = 2;
+constexpr uint8_t kSkeletonAimMaxAge  = 9;
+
 static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, float sw, float sh, EspBox& box) {
     box.has_skeleton = false;
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) box.bone_valid[bone] = false;
@@ -6734,6 +6873,12 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     int projected = 0;
     int bones_world = 0;      // костей с мировой позицией, прочитанных сейчас
     int remote_fallbacks = 0;
+    // Мировые кости этого кадра — отдельно для аима и для рисования. Возраст
+    // годности у них разный: аиму важна ТОЧКА (и он сам держит упреждение), а
+    // на экране переиспользованная кость отстаёт от тела, и скелет «плывёт»
+    // относительно бокса. Отсюда два порога: 9 — аим, 2 — рисование.
+    bool aim_bone_ok[ESP_BONE_COUNT] = {};
+    Vec3 aim_bone_world[ESP_BONE_COUNT] = {};
     for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
         Vec3 world{};
         bool have_world = false;
@@ -6769,6 +6914,17 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
             have_world = true;
         }
         if (!have_world) continue;
+        const uint8_t age = skeleton.bone_world_age[bone];
+        if (age >= 1 && age <= kSkeletonAimMaxAge) {
+            aim_bone_ok[bone] = true;
+            aim_bone_world[bone] = world;
+        }
+        // Рисуется только свежая кость (возраст <= 2). Переиспользованная точка
+        // (её держат до 8 кадров, пока чтение срывается) на экране отстаёт от
+        // тела: рука уезжает вперёд, нога назад — на панораме это и читается
+        // как «скелет плавает рядом с игроком». Аиму старость не мешает: он
+        // ведёт по точке и упреждение держит сам (см. kSkeletonAimMaxAge).
+        if (age < 1 || age > kSkeletonDrawMaxAge) continue;
         Vec2 screen{};
         if (!w2s(view_projection, world, sw, sh, screen, false)) continue;
         if (fabsf(screen.x) > sw * 4.0F || fabsf(screen.y) > sh * 4.0F) continue;
@@ -6786,10 +6942,12 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
     //   [1] neck  : between the Neck and Head joints.
     //   [2] chest : upper spine.
     {
+        // Для аима кость годна и тогда, когда она уже не рисуется (возраст до
+        // kSkeletonAimMaxAge): точка живёт на экране своей жизнью, а прицелу
+        // нужна мировая позиция.
         auto bone_world_ok = [&](int bone, Vec3& out) -> bool {
-            if (!box.bone_valid[bone]) return false;
-            if (skeleton.bone_world_age[bone] < 1 || skeleton.bone_world_age[bone] > 9) return false;
-            out = skeleton.bone_world[bone];
+            if (!aim_bone_ok[bone]) return false;
+            out = aim_bone_world[bone];
             return vec3_is_finite(out);
         };
         Vec3 target[3]{};
@@ -7618,15 +7776,17 @@ unsigned long long esp_mem_read_fails_total() { return g_mem.read_fails_total();
 // KCC.Move.Position: the simulated character position (capsule bottom) the
 // game itself moves the character with. Independent of the discovered
 // PlayerManager position field, and validated by the KCC back-reference.
-static bool player_kcc_position(const PlayerAux& aux, Vec3& out) {
+static bool player_kcc_position(const PlayerAux& aux, Vec3& out, bool gate_origin = true) {
     if (!aux.kcc) return false;
     Vec3 p = rd_v3(aux.kcc + KCC_MOVE + 0x0C);
     if (!vec3_is_finite(p)) return false;
     float magnitude = fabsf(p.x) + fabsf(p.y) + fabsf(p.z);
     if (magnitude < 0.01F || magnitude > 100000.0F) return false;
     // Тот же пуловой мусор, что и в поле позиции: свежий CharacterController
-    // отдаёт (x, 0, 0), и бокс молча уезжает под карту.
-    if (position_near_world_origin(p)) return false;
+    // отдаёт (x, 0, 0), и бокс молча уезжает под карту. Гейт — только на
+    // первой точке трека (см. have_confirmed в esp_get_boxes): у карты, где
+    // игрок реально стоит в нуле, подтверждённая точка нулём не перестаёт.
+    if (gate_origin && position_near_world_origin(p)) return false;
     out = p;
     return true;
 }
@@ -7968,9 +8128,34 @@ static uint64_t resolve_native_camera_pointer(bool allow_last_confirmed) {
     return allow_last_confirmed ? g_native_camera : 0;
 }
 
-static bool read_camera_frame(float aspect, uint64_t& native, Mat4& projection, Mat4& view) {
+// Растяг «Aspect Ratio» (меню «Визуалы → Ещё настройки»): значение, которое
+// кадр обязан положить в камеру игры, чтобы её картинка и наши визуалы были
+// посчитаны по одному aspect. 0 — не трогать камеру, своё значение она даст
+// сама. Слайдер вернулся в 1.00 — один раз восстанавливаем ровный sw/sh.
+static float stretched_camera_aspect(float sw, float sh) {
+    if (!(sh > 1.0F)) return 0.0F;
+    // Восстановление ровного aspect делается РОВНО один раз (флаг, а не
+    // сравнение с прошлым значением): функция зовётся и из конвейера боксов, и
+    // из camera-only кадра, и по одному только «прошлому» значению второй вызов
+    // в том же кадре счёл бы, что восстанавливать больше нечего.
+    static bool s_restore_pending = false;
+    const float stretch = g_screen_stretch_x;
+    const float base = sw / sh;
+    if (stretch > 1.005F) {
+        s_restore_pending = true;
+        return base / stretch;
+    }
+    if (s_restore_pending) {
+        s_restore_pending = false;
+        return base;
+    }
+    return 0.0F;
+}
+
+static bool read_camera_frame(float aspect, uint64_t& native, Mat4& projection, Mat4& view,
+                              float force_aspect = 0.0F) {
     native = resolve_native_camera_pointer(true);
-    if (native && read_native_camera_matrices(native, aspect, projection, view)) {
+    if (native && read_native_camera_matrices(native, aspect, projection, view, force_aspect)) {
         xray_apply(native);
         always_day_tick();
         return true;
@@ -7983,7 +8168,7 @@ static bool read_camera_frame(float aspect, uint64_t& native, Mat4& projection, 
     g_camera_manager_cached = 0;
     const uint64_t refreshed = resolve_native_camera_pointer(false);
     if (refreshed && refreshed != native &&
-        read_native_camera_matrices(refreshed, aspect, projection, view)) {
+        read_native_camera_matrices(refreshed, aspect, projection, view, force_aspect)) {
         native = refreshed;
         xray_apply(native);
         always_day_tick();
@@ -8001,7 +8186,12 @@ bool publish_camera_only_frame(float sw, float sh) {
     if (!(sw >= 100.0F) || !(sh >= 100.0F)) { sw = 1080.0F; sh = 2400.0F; }
     Mat4 solo_proj{}, solo_view{};
     uint64_t cam_native = 0;
-    if (!read_camera_frame(sw / sh, cam_native, solo_proj, solo_view)) return false;
+    // Растяг экрана действует и на camera-only кадре: иначе маркеры на кадре без
+    // игроков живут в другом aspect, чем картинка игры.
+    const float stretched = stretched_camera_aspect(sw, sh);
+    if (!read_camera_frame(sw / sh, cam_native, solo_proj, solo_view, stretched)) return false;
+    if (stretched > 0.0F && cam_native)
+        wr_buf(cam_native + CAMERA_ASPECT, &stretched, sizeof(stretched));
     Vec3 cam_pos{};
     if (!camera_position_from_view(solo_view, cam_pos)) return false;
     g_frame_vp = mat_mul(solo_proj, solo_view);
@@ -8640,6 +8830,244 @@ static void note_direct_position_health(const std::vector<uint64_t>& players,
 }
 
 
+// Пол высоты проекции тела, px (см. отсев 'H' ниже). Отрисовка и так растит
+// бокс до своего минимума (esp_draw: kMinBoxSide), но конвейер обязан не терять
+// игрока раньше неё.
+constexpr float kMinProjectedHeight = 3.0F;
+
+// ---- Кадр ESP: состояние публикации, перепроецирование, тик игры ------------
+//
+// Удержанная запись (битый кадр, см. esp_box_hold.h) не может повторять прошлые
+// ЭКРАННЫЕ координаты: они посчитаны прошлой матрицей вида и, как только камера
+// поехала, разъезжаются с миром — ровно жалоба «визуалы плавают по экрану, а не
+// держатся на объектах». Поэтому бокс несёт мировой якорь (см. EspBox) и такой
+// кадр считает экран заново ТЕКУЩЕЙ матрицей. Матрицы нет — записи нет: пустой
+// кадр хуже одного, зато он честный.
+
+bool esp_frame_projection_valid() { return g_frame_vp_valid; }
+
+bool esp_frame_camera_position(float out[3]) {
+    if (!out) return false;
+    if (g_frame_cam_basis_valid) {
+        out[0] = g_frame_cam_pos.x; out[1] = g_frame_cam_pos.y; out[2] = g_frame_cam_pos.z;
+        return true;
+    }
+    if (g_frame_local_valid) {
+        out[0] = g_frame_local_pos.x; out[1] = g_frame_local_pos.y; out[2] = g_frame_local_pos.z;
+        return true;
+    }
+    return false;
+}
+
+// Кромка кадра — тот же запас, что у отсева 'O' в конвейере и у маркеров.
+static float frame_edge_margin(float sw, float sh) {
+    const float long_side = sw > sh ? sw : sh;
+    return long_side * 0.25F;
+}
+
+bool esp_box_reproject(EspBox& box) {
+    if (!box.anchor_valid) return false;
+    if (!g_frame_vp_valid) return false;
+    const float sw = g_frame_sw, sh = g_frame_sh;
+    if (!(sw > 1.0F) || !(sh > 1.0F)) return false;
+    if (!std::isfinite(box.anchor_bottom_y) || !std::isfinite(box.anchor_top_y)) return false;
+
+    // Ноги и верх тела — та же геометрия, которой пользовался здоровый кадр
+    // (низ тела уже с поправкой выбранного пути позиции), и тот же разбор
+    // передней плоскости: точку за ней конвейер подтягивает к отрезку, иначе
+    // игрок в упор не спроецировался бы вовсе. Подтянутую точку прижимаем к
+    // кромке — она улетает на тысячи пикселей (screen ~ 1/near).
+    Vec3 bottom{box.anchor_feet[0], box.anchor_bottom_y, box.anchor_feet[2]};
+    Vec3 top{box.anchor_feet[0], box.anchor_top_y, box.anchor_feet[2]};
+    const bodyclip::Segment seg = bodyclip::clip_segment(
+        bottom, top, bodyclip::plane_from_vp(g_frame_vp), bodyclip::kNearDepth);
+    if (!seg.visible) return false;
+    Vec2 sf{}, st{};
+    if (!w2s(g_frame_vp, bottom, sw, sh, sf, false)) return false;
+    if (!w2s(g_frame_vp, top, sw, sh, st, false)) return false;
+    if (!std::isfinite(sf.x) || !std::isfinite(sf.y) ||
+        !std::isfinite(st.x) || !std::isfinite(st.y)) return false;
+    const float screen_margin = frame_edge_margin(sw, sh);
+    if (seg.moved_bottom) sf = bodyclip::clamp_to_margin(sf, sw, sh, screen_margin);
+    if (seg.moved_top) st = bodyclip::clamp_to_margin(st, sw, sh, screen_margin);
+
+    float height = fabsf(st.y - sf.y);
+    if (!std::isfinite(height)) return false;
+    if (height < kMinProjectedHeight) height = kMinProjectedHeight;
+    const float cx = (sf.x + st.x) * 0.5F;
+    const float cy = (sf.y + st.y) * 0.5F;
+    const float half_h = height * 0.5F;
+    const float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
+    const float edge = frame_edge_margin(sw, sh);
+    if (cx + half_w < -edge || cx - half_w > sw + edge ||
+        cy + half_h < -edge || cy - half_h > sh + edge) return false;
+    box.x1 = cx - half_w; box.y1 = cy - half_h;
+    box.x2 = cx + half_w; box.y2 = cy + half_h;
+
+    // 3D-короб (chams) — из того же якоря: полуширина и полуглубина тела
+    // постоянны, меняются только ноги и границы по высоте.
+    constexpr float box_half_width = 0.35F, box_half_depth = 0.35F;
+    const Vec3 world_corners[8] = {
+        {box.anchor_feet[0] - box_half_width, box.anchor_bottom_y, box.anchor_feet[2] - box_half_depth},
+        {box.anchor_feet[0] + box_half_width, box.anchor_bottom_y, box.anchor_feet[2] - box_half_depth},
+        {box.anchor_feet[0] + box_half_width, box.anchor_bottom_y, box.anchor_feet[2] + box_half_depth},
+        {box.anchor_feet[0] - box_half_width, box.anchor_bottom_y, box.anchor_feet[2] + box_half_depth},
+        {box.anchor_feet[0] - box_half_width, box.anchor_top_y, box.anchor_feet[2] - box_half_depth},
+        {box.anchor_feet[0] + box_half_width, box.anchor_top_y, box.anchor_feet[2] - box_half_depth},
+        {box.anchor_feet[0] + box_half_width, box.anchor_top_y, box.anchor_feet[2] + box_half_depth},
+        {box.anchor_feet[0] - box_half_width, box.anchor_top_y, box.anchor_feet[2] + box_half_depth}
+    };
+    for (int corner = 0; corner < 8; ++corner) {
+        Vec2 sc{};
+        const bool projected = w2s(g_frame_vp, world_corners[corner], sw, sh, sc, false);
+        box.corner_visible[corner] = projected &&
+                                     sc.x >= 0.0F && sc.x <= sw && sc.y >= 0.0F && sc.y <= sh;
+        box.corners[corner][0] = projected ? sc.x : -1.0F;
+        box.corners[corner][1] = projected ? sc.y : -1.0F;
+    }
+
+    // Кости скелета — мировые точки из якоря (там уже только свежие).
+    for (int bone = 0; bone < ESP_BONE_COUNT; ++bone) {
+        const bool anchored = box.has_skeleton && (box.anchor_bone_ok & (1u << bone)) != 0;
+        Vec2 sb{};
+        const bool ok = anchored && w2s(g_frame_vp, Vec3{box.anchor_bone[bone][0],
+                                                          box.anchor_bone[bone][1],
+                                                          box.anchor_bone[bone][2]},
+                                        sw, sh, sb, false);
+        box.bone_valid[bone] = ok;
+        if (ok) { box.bones[bone][0] = sb.x; box.bones[bone][1] = sb.y; }
+    }
+
+    // Точки аима НЕ трогаем. Они привязаны к кадру съёма: там было упреждение
+    // по цели, баллистика и подъём на дальность (set_aim_point), и повторить их
+    // из мирового якоря нечем. Свежая, но чужая точка в прицеле хуже одного
+    // кадра без неё: аим и так держит цель своим окном захвата.
+    float cam[3];
+    if (esp_frame_camera_position(cam)) {
+        const float dx = box.anchor_feet[0] - cam[0];
+        const float dy = box.anchor_feet[1] - cam[1];
+        const float dz = box.anchor_feet[2] - cam[2];
+        const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (std::isfinite(d)) box.distance = d;
+    }
+    return true;
+}
+
+bool esp_marker_reproject(EspMarker& marker) {
+    if (!marker.world_valid) return false;
+    if (!g_frame_vp_valid) return false;
+    const float sw = g_frame_sw, sh = g_frame_sh;
+    if (!(sw > 1.0F) || !(sh > 1.0F)) return false;
+    const Vec3 world{marker.world[0], marker.world[1], marker.world[2]};
+    Vec2 screen{};
+    if (!w2s(g_frame_vp, world, sw, sh, screen, false)) return false;
+    if (!std::isfinite(screen.x) || !std::isfinite(screen.y)) return false;
+    const float edge = frame_edge_margin(sw, sh);
+    if (screen.x < -edge || screen.x > sw + edge ||
+        screen.y < -edge || screen.y > sh + edge) return false;
+    marker.x = screen.x;
+    marker.y = screen.y;
+    // Дистанция — до ТЕКУЩЕЙ камеры: удержанная метка обязана показывать
+    // расстояние до объекта сейчас, а не то, что было на битом кадре.
+    float cam[3];
+    if (esp_frame_camera_position(cam)) {
+        const float dx = world.x - cam[0], dy = world.y - cam[1], dz = world.z - cam[2];
+        const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (std::isfinite(d)) marker.distance = d;
+    }
+    return true;
+}
+
+// ---- Тик кадра игры --------------------------------------------------------
+// Move.Tick (KCC.Move + 0x34) — счётчик кадров движения локального игрока, его
+// пишет сама игра в конструкторе Move(position, yRotation, deltaTime, tick).
+// Ровно он и нужен: оверлей, который пересчитывает камеру и позиции своим
+// таймером, идёт с игрой вразнобой (двое часов с разной частотой дают биения), и
+// камера, снятая в начале нашего кадра, каждый раз попадает в другую точку её
+// кадра. Позиции от этого «дышат» на панораме, хотя каждая по отдельности
+// верна. Привязка к тику игры убирает именно биения, оставляя постоянный
+// (незаметный) сдвиг.
+static uint32_t s_game_tick_last = 0;
+static bool     s_game_tick_valid = false;
+static double   s_game_tick_at = 0.0;
+static float    s_game_frame_hz = 0.0F;
+static int      s_game_tick_steady = 0;
+
+static bool read_local_move_clock(uint32_t& tick, float& delta) {
+    tick = 0;
+    delta = 0.0F;
+    if (!g_local_player) return false;
+    const PlayerAux& aux = player_aux(g_local_player);
+    if (!aux.kcc) return false;
+    uint32_t value = 0;
+    if (!rd_exact(aux.kcc + KCC_MOVE + 0x34, value)) return false;
+    tick = value;
+    float dt = 0.0F;
+    if (rd_exact(aux.kcc + KCC_MOVE + 0x30, dt) && std::isfinite(dt) &&
+        dt > 0.0005F && dt < 0.5F) delta = dt;
+    return true;
+}
+
+// Тик прочитан: обновляем оценку частоты кадров игры по переходам тика.
+// Медиану не держим — темп меняется (троттлинг, 90/120 Гц), и сглаживание по
+// переходам идёт за ним без ступенек.
+static void game_tick_observe(uint32_t tick, double now) {
+    if (!s_game_tick_valid) {
+        s_game_tick_valid = true;
+        s_game_tick_last = tick;
+        s_game_tick_at = now;
+        s_game_tick_steady = 0;
+        return;
+    }
+    if (tick == s_game_tick_last) return;
+    const double period = now - s_game_tick_at;
+    if (period > 0.0005 && period < 0.5) {
+        const float hz = (float)(1.0 / period);
+        s_game_frame_hz = (s_game_frame_hz > 1.0F) ? (s_game_frame_hz * 0.75F + hz * 0.25F) : hz;
+        if (++s_game_tick_steady > 240) s_game_tick_steady = 240;
+    } else {
+        s_game_tick_steady = 0;
+    }
+    s_game_tick_last = tick;
+    s_game_tick_at = now;
+}
+
+bool esp_game_tick_now(uint32_t& tick) {
+    float delta = 0.0F;
+    if (!read_local_move_clock(tick, delta)) {
+        s_game_tick_valid = false;
+        s_game_tick_steady = 0;
+        return false;
+    }
+    game_tick_observe(tick, mono_seconds());
+    return true;
+}
+
+int esp_game_frame_tick() {
+    uint32_t tick = 0;
+    float delta = 0.0F;
+    if (!read_local_move_clock(tick, delta)) {
+        s_game_tick_valid = false;
+        s_game_tick_steady = 0;
+        return ESP_GAME_FRAME_UNKNOWN;
+    }
+    if (!s_game_tick_valid) {
+        game_tick_observe(tick, mono_seconds());
+        return ESP_GAME_FRAME_ADVANCED;
+    }
+    if (tick == s_game_tick_last) return ESP_GAME_FRAME_SAME;
+    game_tick_observe(tick, mono_seconds());
+    return ESP_GAME_FRAME_ADVANCED;
+}
+
+float esp_game_frame_hz() {
+    // Пока переходов тика мало, оценке верить нельзя (пауза в меню, загрузка
+    // карты, смерть локального игрока): вызывающий берёт свой запасной темп.
+    if (s_game_tick_steady < 8) return 0.0F;
+    if (!(s_game_frame_hz >= 24.0F && s_game_frame_hz <= 240.0F)) return 0.0F;
+    return s_game_frame_hz;
+}
+
 std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_bot_count = 0;
     g_box_frame_transient = true;
@@ -8781,11 +9209,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // the managed-camera chain (early=3). Read through stable cached
         // anchors and fall back to the last confirmed native camera when one
         // pointer read fails; the matrix read still validates that fallback.
-        if (!read_camera_frame(sw / sh, native_cam, projection, view))
-            return transient_return(5);
-        // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
-        g_matrix_configuration_validated = true;
-        g_camera_matrix_physical_match = true;
         // Растяг экрана (Aspect Ratio, меню «Визуалы → Ещё настройки»):
         // горизонтальный масштаб проекции — это cot(fov/2) / aspect, поэтому
         // aspect ДЕЛИМ на коэффициент: горизонтальный FOV растёт, края
@@ -8793,25 +9216,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // прицелы овальные — норма для фичи). Через умножение эффект был
         // обратный — картинка сплющивалась (наблюдение с устройства 04.10).
         // Пишем КАЖДЫЙ кадр тем же g_mem, что и аим: движок может возвращать
-        // aspect на место при смене вида; наш же w2s берёт матрицу из того
-        // поля, так что проекция ESP растягивается вместе с игрой. Базу
-        // берём из геометрии экрана (sw/sh), а не из памяти — там уже может
-        // лежать наша же запись. При возврате слайдера в 1.00 аспект один
-        // раз восстанавливается в ровный sw/sh.
-        {
-            const float stretch = g_screen_stretch_x;
-            static float s_stretch_last = 1.0F;
-            if (sh > 1.0F) {
-                const float base = sw / sh;
-                if (stretch > 1.005F) {
-                    const float want = base / stretch;
-                    wr_buf(native_cam + CAMERA_ASPECT, &want, sizeof(want));
-                } else if (s_stretch_last > 1.005F) {
-                    wr_buf(native_cam + CAMERA_ASPECT, &base, sizeof(base));
-                }
-            }
-            s_stretch_last = stretch;
-        }
+        // aspect на место при смене вида. Базу берём из геометрии экрана
+        // (sw/sh), а не из памяти — там уже может лежать наша же запись. При
+        // возврате слайдера в 1.00 аспект один раз восстанавливается в ровный
+        // sw/sh.
+        //
+        // Значение передаём в чтение кадра: проекция ЭТОГО кадра обязана быть
+        // посчитана ровно тем aspect, который мы кладём в камеру. Раньше запись
+        // шла уже после сборки проекции, и на каждом шаге слайдера картинка игры
+        // и визуалы оказывались в разных aspect — вся сцена прыгала по X.
+        const float stretched = stretched_camera_aspect(sw, sh);
+        if (!read_camera_frame(sw / sh, native_cam, projection, view, stretched))
+            return transient_return(5);
+        // freecam_tick() — в начале кадра (см. выше): ему нельзя за ранние выходы.
+        g_matrix_configuration_validated = true;
+        g_camera_matrix_physical_match = true;
+        if (stretched > 0.0F && native_cam)
+            wr_buf(native_cam + CAMERA_ASPECT, &stretched, sizeof(stretched));
         // Unity worldToClip = projection * worldToCamera (same order as native 0xe2b90c).
         vp = mat_mul(projection, view);
     }
@@ -8854,10 +9275,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // (x, 0.0, 0.0): world-space-гейт его пропускает, и бокс уходит под
         // карту. В логе 16:05 — pos=(10.9 0.0 0.0), reason=bottom, «ПРОПАЛ»,
         // возврат через 155 кадров (2.6 c). Сентинель position_near_world_origin
-        // был написан ровно под это, но подключён только в player_saved_position,
-        // а конвейер боксов принимал такую точку как живую.
-        bool read_ok = direct_read_ok && position_looks_like_world_space(candidate) &&
-                       !position_near_world_origin(candidate);
+        // написан ровно под это, но включается ТОЛЬКО пока у трека нет ни одной
+        // подтверждённой позиции: у карты, где игрок реально стоит у нуля
+        // (спавн/стройка в центре), подтверждённая точка нулём быть не
+        // перестаёт, и гейт по ней стёр бы живого игрока с ESP навсегда.
+        auto tracked = g_player_track.find(player);
+        const bool have_confirmed = tracked != g_player_track.end() && tracked->second.has_last;
+        const bool origin_gate = position_near_world_origin(candidate) && !have_confirmed;
+        bool read_ok = direct_read_ok && position_looks_like_world_space(candidate) && !origin_gate;
         if (read_ok) {
             read_flags |= PositionDirectValid;
             source = 'D';
@@ -8869,7 +9294,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (!read_ok) {
             const PlayerAux& aux = player_aux(player);
             read_flags |= PositionKccTried;
-            read_ok = player_kcc_position(aux, candidate);
+            read_ok = player_kcc_position(aux, candidate, !have_confirmed);
             if (read_ok) {
                 read_flags |= PositionKccOk;
                 source = 'K';
@@ -8881,7 +9306,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     read_flags |= PositionModelReadOk;
                     candidate.y += g_use_direct_player_position ? -0.90F : 0.90F;
                     read_ok = position_looks_like_world_space(candidate) &&
-                              !position_near_world_origin(candidate);
+                              !(position_near_world_origin(candidate) && !have_confirmed);
                     if (read_ok) {
                         read_flags |= PositionModelValid;
                         source = 'M';
@@ -8890,7 +9315,6 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        auto tracked = g_player_track.find(player);
         if (!read_ok) {
             // A read failure never removes a visible player. Keep the last
             // accepted world position until the confirmed list retires him.
@@ -8910,11 +9334,17 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             // а оверлей рисуется 60 Гц. Между тиками продвигаем только обычный
             // direct-сэмпл по измеренной скорости. KCC/model и транспорт уже
             // дают живой Transform, поэтому повторная экстраполяция им навредит.
+            //
+            // Потолок упреждения для РИСУЕМОЙ точки — kDrawnPredictionMaxDistance
+            // (полшага), а не метр с лишним: полный запас нужен прицелу, который
+            // сам его учитывает, а бокс от него уезжает вперёд игрока, и на
+            // панораме это читается как «визуал не держится на объекте».
             if (source == 'D' && player != g_local_player &&
                 !player_is_mounted(player) && !player_mount_engaged(player) &&
                 track.have_vel_ref) {
                 candidate = playermotion::predict(candidate, track.vel,
-                                                  track.vel_ref_t, mono_seconds());
+                                                  track.vel_ref_t, mono_seconds(),
+                                                  playermotion::kDrawnPredictionMaxDistance);
             }
         }
 
@@ -9040,6 +9470,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             update_aim_ballistics(local_player);
     }
 
+    // Когда этот игрок в последний раз был виден в кадре: кромка гасит бокс с
+    // гистерезисом (см. отсев 'O' ниже), а карта чистится по размеру, как
+    // s_lying_since.
+    static std::unordered_map<uint64_t, double> s_box_seen_at;
+
     // Draw every remote PlayerManager returned by the player registry.
     // No UID, name, mount-point or movement heuristic is allowed to hide one.
     for (size_t i = 0; i < s_transforms.size(); ++i) {
@@ -9164,7 +9599,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (body_seg.moved_top) sh2 = bodyclip::clamp_to_margin(sh2, sw, sh, screen_margin);
 
         float height = fabsf(sh2.y - sf.y);
-        if (!std::isfinite(height) || height <= 0.001F) { mark_skip('H'); continue; }
+        if (!std::isfinite(height)) { mark_skip('H'); continue; }
+        // Ноль пикселей высоты — это не «игрока нет», а «обе точки легли в одну
+        // строку»: строго вдоль линии взгляда и на большой дистанции высота
+        // схлопывается, и бокс мигал вместо того, чтобы стать минимальным
+        // прямоугольником. Отрисовка и так растит его до kMinBoxSide — тот же
+        // пол ставим в конвейере, чтобы кадр не терял игрока целиком.
+        if (height < kMinProjectedHeight) height = kMinProjectedHeight;
         float cx = (sf.x + sh2.x) * 0.5F;
         float cy = (sf.y + sh2.y) * 0.5F;
         float half_w = height * PLAYER_BOX_WIDTH_RATIO * 0.5F;
@@ -9178,8 +9619,21 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // Test the box edges, not only its centre. At 5-10 m a player can
         // cover much of the viewport while the centre is already past the old
         // margin, which made close ESP vanish despite still intersecting it.
-        if (cx + half_w < -screen_margin || cx - half_w > sw + screen_margin ||
-            cy + half_h < -screen_margin || cy - half_h > sh + screen_margin) {
+        //
+        // Кромка — с гистерезисом, ровно как у маркеров (game_markers.cpp):
+        // пока бокс виден, гасим его только когда он ушёл ещё на четверть малой
+        // стороны. Без этого объект на границе зажигался и гас на каждом кадре
+        // панорамы: камера за кадр сдвигала проекцию на пару пикселей, а бокс
+        // стоял точно на пороге.
+        const float edge_enter = std::max(sw, sh) * 0.25F;
+        const float edge_hold = edge_enter + std::min(sw, sh) * 0.25F;
+        const double edge_now = mono_seconds();
+        auto box_seen = s_box_seen_at.find(s_transforms[i]);
+        const bool box_was_visible = box_seen != s_box_seen_at.end() &&
+                                     (edge_now - box_seen->second) <= 0.35;
+        const float edge = box_was_visible ? edge_hold : edge_enter;
+        if (cx + half_w < -edge || cx - half_w > sw + edge ||
+            cy + half_h < -edge || cy - half_h > sh + edge) {
             mark_skip('O');
             continue;
         }
@@ -9462,7 +9916,19 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // и поза его не трогает; труп по высоте — 0.3-0.5 м, порог 0.60;
         // горизонталь трупа — от метра, у сидящего 0.51-0.61 м; и гистерезис
         // 0.35 с, чтобы шум скелета на один-два кадра не гасил бокс.
-        if (!crouched && !box.dead && box.skel_bones >= 11 &&
+        // Поза движения — собственный ответ игры: MoveState.DEAD (7) в
+        // KCC.Move.State. Это состояние самой игры, а не догадка по углам
+        // скелета, поэтому оно дешевле и надёжнее любого порога; лежачей позы
+        // (prone) в этой сборке нет вовсе — Move.Pose знает только Stand и
+        // Crouch (dump 11949, enum Pose TypeDefIndex 4285).
+        {
+            const PlayerAux& aux = player_aux(s_transforms[i]);
+            if (aux.kcc) {
+                const int32_t move_state = rd<int32_t>(aux.kcc + KCC_MOVE + 0x00);
+                if (move_state == KCC_MOVE_STATE_DEAD) box.dead = true;
+            }
+        }
+        if (!crouched && !box.dead && box.death_flag < 0 && box.skel_bones >= 11 &&
             box.skel_up >= 0.f && box.skel_flat >= 0.f) {
             const bool lying = box.skel_up < 0.60f ||
                                (box.skel_flat > 1.0f && box.skel_flat > box.skel_up * 1.5f);
@@ -9504,7 +9970,32 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             continue;
         }
+        // ---- Мировой якорь -------------------------------------------------
+        // Ровно та геометрия, что ушла в экран этого кадра. Битый кадр
+        // перепроецирует её текущей матрицей вида (esp_box_reproject) вместо
+        // того, чтобы заморозить экранные координаты: замороженный бокс
+        // разъезжается с миром, как только камера поехала.
+        box.anchor_valid = !transform_camera_mode;
+        box.anchor_feet[0] = feet.x; box.anchor_feet[1] = feet.y; box.anchor_feet[2] = feet.z;
+        box.anchor_bottom_y = body_bottom.y;
+        box.anchor_top_y = body_top.y;
+        if (box.anchor_valid && box.has_skeleton) {
+            auto skel_it = g_skeletons.find(s_transforms[i]);
+            if (skel_it != g_skeletons.end()) {
+                for (int b = 0; b < ESP_BONE_COUNT; ++b) {
+                    if (!box.bone_valid[b]) continue;
+                    const Vec3 w = skel_it->second.bone_world[b];
+                    if (!vec3_is_finite(w)) continue;
+                    box.anchor_bone[b][0] = w.x;
+                    box.anchor_bone[b][1] = w.y;
+                    box.anchor_bone[b][2] = w.z;
+                    box.anchor_bone_ok |= (1u << b);
+                }
+            }
+        }
         result.push_back(box);
+        s_box_seen_at[s_transforms[i]] = mono_seconds();
+        if (s_box_seen_at.size() > 256) s_box_seen_at.clear();
         auto live_track = g_player_track.find(s_transforms[i]);
         if (live_track != g_player_track.end()) {
             live_track->second.corpse = false;

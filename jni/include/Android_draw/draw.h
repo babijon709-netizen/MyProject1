@@ -42,9 +42,12 @@ void drawBegin();
 void drawEnd();
 void shutdown();
 float overlay_fps();
-// Темп оверлея и диагностика (см. kOverlayPaceHz в draw.cpp): сколько последний
-// кадр проспал до своего темпа, пик панели и сам темп — для шапки лога.
+// Темп оверлея и диагностика (см. kOverlayFallbackPaceHz в draw.cpp): из
+// последнего кадра — сколько он проспал до своего темпа, сколько из этого
+// пришлось на ожидание начала кадра игры (0 = фаза не поймана, шли по таймеру),
+// пик панели и сам темп — для шапки лога.
 double overlay_pace_sleep_ms();
+double overlay_pace_tick_ms();
 float overlay_peak_hz();
 float overlay_pace_hz();
 

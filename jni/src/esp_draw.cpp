@@ -34,13 +34,38 @@ float AimFovRadiusPx(float sw, float sh) {
 // One short hold window for every ESP visual, including world-marker labels.
 constexpr double kEspHoldSeconds = 0.30;
 
+// Монотонное время в секундах — одно на кадр (и для холда, и для замеров).
+static double mono_now() {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
     static std::vector<espboxhold::Entry<EspBox>> s_hold;
     static std::vector<EspBox> s_out;
     static int s_frame = -1;
-    int frame = ImGui::GetFrameCount();
-    if (frame != s_frame) {
+    static int s_sw = 0, s_sh = 0;
+    const int frame = ImGui::GetFrameCount();
+    const int want_w = (int)sw, want_h = (int)sh;
+    // Ключ кэша — кадр И размеры экрана. Зовут его три разных места: ESP
+    // (геометрия оверлея), аим (native_window_screen_*) и пилюля ХУДа
+    // (VisibleScreen). Раньше ключом был только номер кадра, поэтому размеры
+    // задавал ПЕРВЫЙ вызвавший, а остальные получали чужую проекцию — боксы
+    // уезжали мимо модели. Сходится размер — отдаём готовое; разошёлся —
+    // пересчитываем кадр под него (редкий случай, обычно все три зовут с одной
+    // и той же landscape-парой).
+    if (frame != s_frame || want_w != s_sw || want_h != s_sh) {
+        const bool new_frame = frame != s_frame;
         s_frame = frame;
+        s_sw = want_w; s_sh = want_h;
+        if (!new_frame) {
+            espboxhold::update(s_hold, esp_get_boxes(want_w, want_h),
+                               esp_box_frame_transient(), mono_now(),
+                               kEspHoldSeconds,
+                               [](EspBox& box) { return esp_box_reproject(box); }, s_out);
+            return s_out;
+        }
         esp_set_skeleton_enabled(g_state.esp_skeleton);
         // Кости нужны аиму в обоих режимах: и касание, и память считают ошибку
         // по точке на шее, взятой из костей. Раньше запрос включался только от
@@ -69,14 +94,16 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         esp_set_aim_lead(leadUser > leadAuto ? leadUser : leadAuto);
         esp_set_screen_stretch(g_state.screen_stretch_x);
         esp_set_xray(g_state.xray_on ? g_state.xray_range : 0.f);
-        std::vector<EspBox> next = esp_get_boxes((int)sw, (int)sh);
-        timespec ts{};
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+        std::vector<EspBox> next = esp_get_boxes(want_w, want_h);
+        const double now = mono_now();
         const bool transient = esp_box_frame_transient();
         const size_t raw_count = next.size();
 
-        espboxhold::update(s_hold, next, transient, now, kEspHoldSeconds, s_out);
+        // Продление — только по мировому якорю: esp_box_reproject считает
+        // экран заново текущей матрицей вида. Кадра без матрицы нет — записи
+        // нет: приклеенный к экрану бокс хуже одной пропавшей.
+        espboxhold::update(s_hold, next, transient, now, kEspHoldSeconds,
+                           [](EspBox& box) { return esp_box_reproject(box); }, s_out);
 
         static double diag_at = -1e9;
         static int diag_frames = 0, diag_transient = 0;
@@ -110,17 +137,18 @@ static const std::vector<EspMarker>& FrameMarkers() {
     cached_frame = frame;
 
     std::vector<EspMarker> next = esp_get_markers();
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    const double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    const double now = mono_now();
     espboxhold::erase_if(hold, [](const EspMarker& marker) {
         return marker.kind == ESP_MARKER_BOT && esp_marker_confirmed_dead(marker.id);
     });
     next.erase(std::remove_if(next.begin(), next.end(), [](const EspMarker& marker) {
         return marker.kind == ESP_MARKER_BOT && esp_marker_confirmed_dead(marker.id);
     }), next.end());
+    // Метка тоже продлевается мировым якорем и перепроецируется текущей
+    // камерой: повтор прошлых экранных координат приклеил бы её к экрану.
     espboxhold::update(hold, next, esp_marker_frame_transient(),
-                       now, kEspHoldSeconds, out);
+                       now, kEspHoldSeconds,
+                       [](EspMarker& marker) { return esp_marker_reproject(marker); }, out);
     return out;
 }
 
@@ -143,7 +171,10 @@ void DrawEspOverlay() {
         }
     }
 
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes) return;
+    // Список обязан совпадать с тем, что ниже рисуется: шкафы (esp_cupboards)
+    // в нём отсутствовали, и с одним включённым тумблером «Шкафы» функция
+    // выходила здесь — тумблер не делал ничего, пока не включишь ещё и горшки.
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes && !g_state.esp_cupboards) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -419,7 +450,7 @@ void DrawEspOverlay() {
     // One pill with the resource / animal / bot / vehicle name at the object's
     // position; the scan itself is done by the game layer and reuses this
     // frame's camera.
-    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup || g_state.esp_bots || g_state.esp_vehicles || g_state.esp_scrap || g_state.esp_turrets || g_state.esp_backpacks || g_state.esp_sleepers || g_state.esp_house_boxes) {
+    if (g_state.esp_ore || g_state.esp_animal || g_state.esp_loot || g_state.esp_pickup || g_state.esp_bots || g_state.esp_vehicles || g_state.esp_scrap || g_state.esp_turrets || g_state.esp_backpacks || g_state.esp_sleepers || g_state.esp_house_boxes || g_state.esp_cupboards) {
         // Smaller than the player labels (there are many more of them), with the
         // distance on a second line underneath.
         constexpr float kMarkerScale = 0.78f;

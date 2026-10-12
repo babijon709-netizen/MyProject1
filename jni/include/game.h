@@ -73,6 +73,22 @@ struct EspBox {
     // данные для аима (точка = шея по росту от земли). Оверлей такие боксы
     // не рисует (ботов рисуют маркеры), аим берёт на общих основаниях.
     bool  is_bot = false;
+
+    // ---- Мировой якорь для перепроецирования -------------------------------
+    // Кадр, у которого не перечитался список игроков (или сорвалось чтение
+    // позиции), повторить ПРОШЛЫЕ экранные координаты не может: они посчитаны
+    // прошлой матрицей вида и при любом движении камеры разъезжаются с миром —
+    // это и есть жалоба «визуалы плавают по экрану, а не держатся на объектах».
+    // Поэтому бокс несёт свою мировую геометрию (ноги, границы тела, мировые
+    // кости), и такой кадр считает экран заново текущей матрицей
+    // (esp_box_reproject). Матрицы вида у кадра нет — запись не рисуется вовсе:
+    // замороженный на экране бокс хуже одной пропавшей.
+    bool  anchor_valid = false;
+    float anchor_feet[3] = {};      // позиция ног — то, от чего меряется дистанция
+    float anchor_bottom_y = 0.0F;   // низ тела (уже с поправкой выбранного пути позиции)
+    float anchor_top_y = 0.0F;      // верх тела (ноги + рост, присед учтён)
+    float anchor_bone[ESP_BONE_COUNT][3] = {};
+    unsigned anchor_bone_ok = 0;    // битовая маска ESP_BONE_COUNT: бит i — кость i валидна
 };
 
 // World markers: ore nodes, animals, bots and vehicles, drawn as a small
@@ -92,6 +108,11 @@ struct EspMarker {
     bool  rainbow = false;
     unsigned char color_rgb[3] = {255, 255, 255};
     char  name[40] = {};        // localized label (UTF-8), may carry a stack size
+    // Мировой якорь — ровно та точка, что ушла в экранную проекцию (уже с
+    // подъёмом по типу объекта). Нужен перепроецированию на битом кадре: метка
+    // тоже не должна прилипать к экрану, пока камера едет.
+    bool  world_valid = false;
+    float world[3] = {};
 };
 
 // Почему привязка к игре не удалась — для диагностики (лог, skel-отчёт).
@@ -164,6 +185,34 @@ std::vector<EspMarker> esp_get_markers();
 bool esp_marker_frame_transient();
 // Authoritative death bypasses transient-frame marker retention.
 bool esp_marker_confirmed_dead(uint64_t id);
+
+// ---- Кадр ESP: состояние публикации и перепроецирование -------------------
+// Матрица вида и камера последнего опубликованного кадра. false — кадр
+// битый/пустой: рисовать по нему нечего (см. esp_box_reproject).
+bool  esp_frame_projection_valid();
+bool  esp_frame_camera_position(float out[3]);
+// Перепроецировать мировую геометрию бокса/метки текущим опубликованным кадром.
+// false — матрицы нет или запись ушла за кромку: кадр её не рисует.
+bool  esp_box_reproject(EspBox& box);
+bool  esp_marker_reproject(EspMarker& marker);
+// Кадр ИГРЫ (HyperHug...Player.Move: DeltaTime +0x30, Tick +0x34 у локального
+// KCC). Оверлей, который пересчитывает камеру и позиции, пока игра не начала
+// новый кадр, читает ту же самую камеру и тот же самый мир — то есть рисует
+// кадр, которого на экране нет. Отсюда и привязка пересчёта к тику игры.
+enum EspGameFrame {
+    ESP_GAME_FRAME_SAME      = 0,   // игра нового кадра не начинала
+    ESP_GAME_FRAME_ADVANCED  = 1,   // новый кадр игры с прошлого вызова
+    ESP_GAME_FRAME_UNKNOWN   = 2,   // тик не читается — работать по своему кадру
+};
+int   esp_game_frame_tick();
+// Сырое значение тика кадра игры (Move.Tick локального игрока). false — тик не
+// читается. Для вызывающих, которые сами держат предыдущее значение (темп
+// оверлея): так состояние не зависит от того, кто ещё в кадре звал
+// esp_game_frame_tick().
+bool  esp_game_tick_now(uint32_t& tick);
+// Частота кадров игры по переходам тика (сглаженная). 0 — данных нет (тик не
+// читается или переходов мало): вызывающий берёт свой запасной темп.
+float esp_game_frame_hz();
 // Resolve bones (for aim points) even when skeleton ESP drawing is off.
 void        esp_set_aim_bones_enabled(bool enabled);
 // Temporarily classify verified remote body HitBoxes as Head through the live

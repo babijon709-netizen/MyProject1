@@ -1,6 +1,7 @@
 #include "Android_draw/draw.h"
 #include "ImGui/Font/Font.h"
 #include "overlay_geometry.h"
+#include "game.h"                // esp_game_tick_now / esp_game_frame_hz (темп кадра)
 #include <dirent.h>
 #include <sys/system_properties.h>
 #include <time.h>
@@ -37,15 +38,23 @@ ImGuiWindow *g_window  = nullptr;
 // телефоне добивал остаток: в логе первые 90 с шли ровно, потом кадр вырос до
 // 40-100 мс.
 //
-// Поэтому: темп жёстко 60 Гц (совпадает с частотой кадров игры), и режим
-// высокой герцовки у дисплея больше не выпрашивается — игре он не нужен, а
-// композитор из-за него работает вдвое чаще. g_peak_hz остаётся только для
-// диагностики (пишется в шапку лога).
-static constexpr float kOverlayPaceHz = 60.f;
+// Поэтому: темп больше не выпрашивает высокую герцовку панели и не берётся из
+// константы, а снимается с самой игры (esp_game_frame_hz по тику кадра игры) —
+// игре он не нужен, а композитор из-за него не работает вдвое чаще. Запасной
+// темп — 60 Гц, он же работает, пока тик игры не читается.
+// g_peak_hz остаётся только для диагностики (пишется в шапку лога).
+//
+// Частота игры не константа: 90/120 на панелях с высокой герцовкой, до 45 и ниже
+// при троттлинге. Пока оверлей идёт своими 60 Гц, два таймера с близкими
+// частотами дают биения — фаза медленно едет, камера снимается каждый раз в
+// другой точке кадра игры, и визуалы «дышат» на панораме. Поэтому у игры берётся
+// не только темп, но и фаза: см. OverlayWaitForGameTick.
+static constexpr float kOverlayFallbackPaceHz = 60.f;
 static float g_peak_hz = 60.f;
 static float g_overlay_fps = 60.f;
 static double g_prev_swap = 0.0;
 static double g_pace_sleep_ms = 0.0;  // сколько последний кадр проспал до своего темпа
+static double g_pace_tick_ms = 0.0;   // из них — ожидание начала кадра игры
 static int g_refresh_tick = 0;
 
 static float SnapHz(float h) {
@@ -116,6 +125,15 @@ static float DetectPeakRefresh() {
     return SnapHz(best);
 }
 
+// Tempo, по которому идёт оверлей прямо сейчас: частота кадра игры (тик
+// Move.Tick), а пока тик не читается — запасные 60 Гц. Единая точка, чтобы
+// подсказка композитору (ApplyOverlayRefresh) и лог не расходились с тем, чем
+// реально paced цикл в drawEnd.
+static float OverlayPaceHz() {
+    const float hz = esp_game_frame_hz();
+    return (hz >= 24.0F && hz <= 240.0F) ? hz : kOverlayFallbackPaceHz;
+}
+
 static void ApplyOverlayRefresh(ANativeWindow* w, float hz) {
     if (!w) return;
     using SetFR2 = int32_t(*)(ANativeWindow*, float, int8_t, int8_t);
@@ -147,14 +165,23 @@ double overlay_pace_sleep_ms() {
     return g_pace_sleep_ms;
 }
 
+// Сколько из этого сна ушло на ожидание перехода тика игры (см.
+// OverlayWaitForGameTick): ненулевое значение = фаза кадра поймана, нулевое =
+// кадр шёл по таймеру (тик недоступен или мы уже опаздывали).
+double overlay_pace_tick_ms() {
+    return g_pace_tick_ms;
+}
+
 // Пиковая герцовка панели (диагностика): в шапку лога пишется вместе с темпом
 // оверлея, чтобы 60 у оверлея не путали с ФПС игры.
 float overlay_peak_hz() {
     return g_peak_hz;
 }
 
+// Tempo, по которому реально идёт оверлей: частота кадра игры (или запасные
+// 60 Гц, пока тик игры не читается) — см. drawEnd.
 float overlay_pace_hz() {
-    return kOverlayPaceHz;
+    return OverlayPaceHz();
 }
 
 bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log) {
@@ -206,7 +233,7 @@ bool init_egl(uint32_t _screen_x, uint32_t _screen_y, bool log) {
 
     eglSwapInterval(display, 0);
     g_peak_hz = DetectPeakRefresh();          // только для шапки лога/диагностики
-    ApplyOverlayRefresh(::native_window, kOverlayPaceHz);
+    ApplyOverlayRefresh(::native_window, OverlayPaceHz());
 
     return true;
 }
@@ -246,7 +273,7 @@ void drawBegin() {
     screen_config();
 
     if ((++g_refresh_tick % 180) == 0)
-        ApplyOverlayRefresh(::native_window, kOverlayPaceHz);
+        ApplyOverlayRefresh(::native_window, OverlayPaceHz());
 
     if (::orientation != displayInfo.orientation) {
         ::orientation = displayInfo.orientation;
@@ -270,6 +297,74 @@ void drawBegin() {
     ImGui::NewFrame();
 }
 
+static double MonotonicSeconds() {
+    struct timespec t{};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1000000000.0;
+}
+
+// Ожидание НАЧАЛА следующего кадра игры (тик Move.Tick локального игрока).
+//
+// Сон по своему таймеру держит средний темп, но не фазу: пока наш кадр и кадр
+// игры идут каждый своим таймером, точка съёма камеры медленно едет по кадру
+// игры (биения), и визуалы «дышат» на панораме. Ожидание перехода тика ставит
+// следующий съём памяти игры сразу за началом её кадра: фаза фиксируется, а
+// остаётся постоянный (незаметный) сдвиг меньше кадра.
+//
+// Ожидание ограничено 60% периода: если тик не пришёл (мы уже опоздали или он
+// замолчал — смерть, рагдолл, пауза в меню), кадр дорисовывается таймерным
+// сном, и цикл идёт с обычной частотой, а не «ждёт сигнал, которого не будет».
+// Тик, замолчавший на четыре промаха подряд, на секунду отключает привязку.
+static bool OverlayWaitForGameTick(double start, double target, double& waited) {
+    static uint32_t s_tick = 0;
+    static bool     s_tick_valid = false;
+    static int      s_misses = 0;
+    static double   s_off_until = 0.0;
+    waited = 0.0;
+    if (start < s_off_until) return false;
+    uint32_t tick = 0;
+    if (!esp_game_tick_now(tick)) {
+        s_tick_valid = false;
+        return false;
+    }
+    if (!s_tick_valid) {
+        s_tick_valid = true;
+        s_tick = tick;
+        return false;   // первый кадр: сравнивать не с чем
+    }
+    if (tick != s_tick) {
+        // Игра уже начала новый кадр с прошлого раза — ждать нечего.
+        s_tick = tick;
+        return false;
+    }
+    const double limit = start + target * 0.6;
+    for (;;) {
+        struct timespec req{};
+        req.tv_nsec = 200000;   // 0.2 мс: тик приходит раз в кадр игры
+        clock_nanosleep(CLOCK_MONOTONIC, 0, &req, nullptr);
+        const double at = MonotonicSeconds();
+        uint32_t again = 0;
+        if (!esp_game_tick_now(again)) {
+            s_tick_valid = false;
+            s_misses = 0;
+            return false;
+        }
+        if (again != s_tick) {
+            s_tick = again;
+            waited = at - start;
+            s_misses = 0;
+            return true;
+        }
+        if (at >= limit) break;
+    }
+    waited = MonotonicSeconds() - start;
+    if (++s_misses >= 4) {
+        s_misses = 0;
+        s_off_until = MonotonicSeconds() + 1.0;
+    }
+    return false;
+}
+
 void drawEnd() {
     ImGui::Render();
     glEnable(GL_BLEND);
@@ -281,14 +376,23 @@ void drawEnd() {
     struct timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     double now = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
-    // Темп — фиксированные 60 Гц (см. kOverlayPaceHz): раньше здесь стоял пик
-    // панели (120), и оверлей крутился вдвое чаще игры. Сон учитывается
-    // отдельно и уходит в лог: по нему видно, кадр упирается в работу (сон ~0)
-    // или в темп (сон ~8 мс при 60 Гц).
-    const double pace = (double)kOverlayPaceHz;
+    // Темп — кадр игры (см. комментарий к kOverlayFallbackPaceHz): esp_game_frame_hz
+    // считает его по переходу тика Move.Tick, а пока тик не читается — 60 Гц.
+    float pace_hz = esp_game_frame_hz();
+    if (!(pace_hz >= 24.0F && pace_hz <= 240.0F)) pace_hz = kOverlayFallbackPaceHz;
+    const double target = 1.0 / (double)pace_hz;
+
+    // Сначала — привязка к фазе игры: ждём перехода тика (ограниченно, см.
+    // OverlayWaitForGameTick). Если тик пришёл, наш следующий съём памяти игры
+    // идёт сразу за началом её кадра, и фаза зафиксирована. Не пришёл — работаем
+    // по таймеру ниже, как раньше: ожидание ограничено частью периода, поэтому
+    // кадр от него не растягивается.
+    double tick_wait = 0.0;
+    const bool tick_aligned = OverlayWaitForGameTick(now, target, tick_wait);
+    now += tick_wait;
+
     double slept = 0.0;
-    if (g_prev_swap > 0.0) {
-        double target = 1.0 / pace;
+    if (!tick_aligned && g_prev_swap > 0.0) {
         double elapsed = now - g_prev_swap;
         if (elapsed > 0.0 && elapsed < target - 0.00035) {
             double sl = target - elapsed;
@@ -302,6 +406,7 @@ void drawEnd() {
             now = after;
         }
     }
+    g_pace_tick_ms = tick_wait * 1000.0;
     g_pace_sleep_ms = slept * 1000.0;
     if (g_prev_swap > 0.0) {
         float d = (float)(now - g_prev_swap);

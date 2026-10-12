@@ -4,6 +4,10 @@
 //   * убитый/вышедший игрок исчезает в первый же ЗДОРОВЫЙ кадр;
 //   * сбойный кадр не гасит живого игрока;
 //   * сбойный кадр никогда не оставляет бокс навсегда.
+// И то, на что была жалоба по «плавающим» визуалам: продление идёт только через
+// перепроецирование МИРОВОГО якоря текущим кадром. Если кадра (матрицы вида) нет
+// или перепроецирование не удалось, запись не рисуется вовсе — приклеенный к
+// экрану бокс разъезжается с миром, как только камера поехала.
 #include "esp_box_hold.h"
 
 #include <cstdio>
@@ -42,7 +46,25 @@ float distance_of(const std::vector<EspBox>& boxes, unsigned long long id, float
 }
 
 using Entry = espboxhold::Entry<EspBox>;
-using espboxhold::update;
+
+// Здоровый кадр игры (матрица вида есть): каждая удержанная запись
+// перепроецируется своим мировым якорем — в тестах холда это «остаётся видна».
+template <typename Value>
+inline bool FrameOk(Value&) { return true; }
+
+// Без кадра (матрицы вида нет) перепроецирование невозможно: запись уходит.
+template <typename Value>
+inline bool FrameMissing(Value&) { return false; }
+
+// Тот же вызов, что и в оверлее, но с «кадр в порядке»: так проверяется политика
+// удержания (состав, окно, отсутствие дублей) без привязки к матрицам.
+template <typename Value>
+void update(std::vector<espboxhold::Entry<Value>>& hold,
+            const std::vector<Value>& fresh,
+            bool transient, double now, double hold_seconds,
+            std::vector<Value>& out) {
+    espboxhold::update(hold, fresh, transient, now, hold_seconds, FrameOk<Value>, out);
+}
 
 EspMarker make_marker(unsigned long long id, float x) {
     EspMarker marker{};
@@ -166,7 +188,7 @@ int main() {
         CHECK(find_marker(out, 1) && find_marker(out, 1)->x == 15.0F,
               "transient marker frame refreshes a readable id");
         CHECK(find_marker(out, 2) && find_marker(out, 2)->x == 20.0F,
-              "held marker keeps its last screen position");
+              "held marker with a live camera frame is kept");
 
         update(hold, {}, true, 1.29, kHold, out);
         CHECK(out.size() == 2, "marker hold remains inside the time window");
@@ -179,6 +201,41 @@ int main() {
         update(hold, {make_marker(3, 30.0F)}, false, 2.0, kHold, out);
         update(hold, {}, false, 2.016, kHold, out);
         CHECK(out.empty(), "healthy empty marker frame clears immediately");
+    }
+
+    // 11) Кадра нет (не прочиталась матрица вида): удержанная запись не рисуется.
+    //     Иначе она осталась бы висеть в прошлых ЭКРАННЫХ координатах, пока
+    //     камера едет, — это и есть «визуалы плавают по экрану».
+    {
+        std::vector<Entry> hold; std::vector<EspBox> out;
+        espboxhold::update(hold, roster({0x1000, 0x2000}), false, 1.0, kHold,
+                           FrameOk<EspBox>, out);
+        CHECK(out.size() == 2, "healthy frame with camera");
+        espboxhold::update(hold, {}, true, 1.05, kHold, FrameMissing<EspBox>, out);
+        CHECK(out.empty(), "no camera frame: held boxes are not drawn");
+        // Кадр вернулся — состав берётся из конвейера заново, без пустых
+        // экранных координат из прошлого.
+        espboxhold::update(hold, roster({0x1000, 0x2000}), false, 1.10, kHold,
+                           FrameOk<EspBox>, out);
+        CHECK(out.size() == 2, "healthy frame restores the roster after a dropped tick");
+    }
+
+    // 12) Перепроецирование зовётся для удержанных записей и только для них:
+    //     этим кадр и пересчитывает экран из мирового якоря.
+    {
+        std::vector<Entry> hold; std::vector<EspBox> out;
+        espboxhold::update(hold, roster({0x1000}), false, 1.0, kHold, FrameOk<EspBox>, out);
+        int calls = 0;
+        unsigned long long last_id = 0;
+        // Игрок пропал из сбойного среза: запись удержана и перепроецируется.
+        espboxhold::update(hold, {}, true, 1.05, kHold,
+                           [&](EspBox& box) { ++calls; last_id = box.id; return true; }, out);
+        CHECK(calls == 1, "reproject called for the held entry");
+        CHECK(last_id == 0x1000, "reproject sees the held entry");
+        calls = 0;
+        espboxhold::update(hold, roster({0x1000}), true, 1.10, kHold,
+                           [&](EspBox&) { ++calls; return true; }, out);
+        CHECK(calls == 0, "freshly updated entries are not reprojected again");
     }
 
     if (failures) { printf("%d FAILURES\n", failures); return 1; }

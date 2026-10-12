@@ -437,6 +437,11 @@ inline constexpr std::uint64_t KCC_LOOK_HEIGHT_OFFSET     = 0x90; // float, eye 
 //   +0x04 Pose (0 Stand, 1 Crouch)   +0x08 bool Aim  +0x0C Vector3 Position
 //   +0x18 Vector3 RealVelocity
 inline constexpr std::uint64_t KCC_MOVE                   = 0x13C;  // было 0x154; luY (был ZYW): State +0x0, Pose +0x4, Aim +0x8, Position +0xC, RealVelocity +0x18
+// MoveState значения (dump 11949, enum MoveState TypeDefIndex 4284): 0 IDLE,
+// 1 WALKING, 2 RUNNING, 3 CROUCHING, 4 AIRBORNE, 5 CLIMBING, 6 SWIMMING,
+// 7 DEAD, 8 SEATED. Поза (Move.Pose, TypeDefIndex 4285) знает только
+// Stand 0 и Crouch 1 — лежачей позы в этой сборке НЕТ.
+inline constexpr std::int32_t KCC_MOVE_STATE_DEAD          = 7;
 inline constexpr std::uint64_t KCC_CHARACTER_ANIMATION     = 0xE0;  // было 0xF0; lua CharacterAnimation (был ZMl)
 inline constexpr std::uint64_t CHAR_ANIM_PLAYER_BACKREF    = 0x78;
 inline constexpr std::uint64_t CHAR_ANIM_RAGDOLL           = 0x38;
