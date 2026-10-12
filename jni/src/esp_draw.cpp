@@ -9,6 +9,7 @@
 #include "lang.h"                // lang::visual: подпись оружия
 #include "esp_box_hold.h"        // состав боксов/маркеров на кадр
 #include "overlay_geometry.h"
+#include "vis_check_map.h"      // geo-проверка видимости по мешу карты
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -41,6 +42,77 @@ static double mono_now() {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+// ---- Проверка видимости по геометрии карты --------------------------------
+// Точки тела для луча, в мировых метрах — тех же, в которых лежит меш карты.
+// Порядок = приоритет (проверка возвращается на первой открытой точке):
+// голова, грудь, таз, ноги. Источники точки, по убыванию точности:
+//   * мировые кости кадра (EspBox.anchor_bone, game.cpp) — обычный путь;
+//   * мировые точки прицела аима (aim_world: голова/шея/грудь) — кадр без
+//     якоря (transform-камера) и боты, у которых рига-костей нет вовсе;
+//   * габариты бокса от земли (anchor_bottom_y / anchor_top_y).
+// Нет ни одного источника — точек ноль, цель не фильтруется.
+static int BoxVisPoints(const EspBox& box, float out[vis_map::kMaxPointsPerBox][3]) {
+    int n = 0;
+    auto push = [&](float x, float y, float z) {
+        if (n >= vis_map::kMaxPointsPerBox) return;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
+        out[n][0] = x; out[n][1] = y; out[n][2] = z; ++n;
+    };
+    auto bone = [&](int slot, float lift) -> bool {
+        if ((box.anchor_bone_ok & (1u << slot)) == 0) return false;
+        push(box.anchor_bone[slot][0], box.anchor_bone[slot][1] + lift, box.anchor_bone[slot][2]);
+        return true;
+    };
+
+    if (box.anchor_bone_ok != 0) {
+        if (!bone(BONE_HEAD, 0.06f))
+            bone(BONE_NECK, 0.10f);
+        if (!bone(BONE_SPINE2, 0.0f))
+            bone(BONE_SPINE1, 0.0f);
+        bone(BONE_HIPS, 0.0f);
+        if (!bone(BONE_FOOT_L, 0.05f))
+            bone(BONE_FOOT_R, 0.05f);
+        if (n != 0) return n;
+    }
+
+    if (box.aim_world_valid[0] || box.aim_world_valid[1] || box.aim_world_valid[2]) {
+        for (int i = 0; i < 3; ++i) {
+            if (!box.aim_world_valid[i]) continue;
+            push(box.aim_world[i][0], box.aim_world[i][1], box.aim_world[i][2]);
+        }
+        if (n != 0) return n;
+    }
+
+    if (!box.anchor_valid) return 0;
+    const float x = box.anchor_feet[0], z = box.anchor_feet[2];
+    const float h = box.anchor_top_y - box.anchor_bottom_y;
+    if (!(h > 0.2f)) return 0;
+    push(x, box.anchor_top_y - h * 0.12f, z);   // голова
+    push(x, box.anchor_bottom_y + h * 0.68f, z); // грудь
+    push(x, box.anchor_bottom_y + h * 0.45f, z); // таз
+    push(x, box.anchor_bottom_y + 0.10f, z);     // ноги
+    return n;
+}
+
+// Одна проверка видимости на кадр, до отрисовки и до выбора цели аимом: оба
+// читают одно поле EspBox::visible. Считаем, только если проверка где-то
+// включена — при выключенной тумблеры ведут себя ровно как раньше (поле true),
+// и меш не грузится вовсе.
+static void ApplyVisCheck(std::vector<EspBox>& out) {
+    if (!g_state.esp_vis && !g_state.aim_pos) return;
+    float eye[3] = {};
+    if (!esp_frame_camera_position(eye)) return;   // кадра нет — и проверять не от чего
+    vis_map::frame_begin();
+    vis_map::request(true);
+    float pts[vis_map::kMaxPointsPerBox][3] = {};
+    for (EspBox& box : out) {
+        box.visible = true;
+        const int n = BoxVisPoints(box, pts);
+        if (n == 0) continue;
+        box.visible = vis_map::visible(box.id, eye, pts, n);
+    }
+}
+
 const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
     static std::vector<espboxhold::Entry<EspBox>> s_hold;
     static std::vector<EspBox> s_out;
@@ -64,6 +136,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
                                esp_box_frame_transient(), mono_now(),
                                kEspHoldSeconds,
                                [](EspBox& box) { return esp_box_reproject(box); }, s_out);
+            ApplyVisCheck(s_out);
             return s_out;
         }
         esp_set_skeleton_enabled(g_state.esp_skeleton);
@@ -131,6 +204,7 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
             diag_hold_max = 0;
         }
     }
+    ApplyVisCheck(s_out);
     return s_out;
 }
 
@@ -290,6 +364,11 @@ void DrawEspOverlay() {
         // Раньше признак своего влиял только на цвет, и убрать союзников с
         // экрана было нечем (просьба 19.09).
         if (box.ally && !g_state.esp_team) continue;
+        // Проверка видимости по геометрии карты: цель за скалой/холмом/стеной
+        // статического строения не рисуется совсем. Поле видимости всегда true,
+        // когда проверка выключена или меш карты не загружен, — выключенный
+        // тумблер ведёт себя ровно как раньше.
+        if (g_state.esp_vis && !box.visible) continue;
         // Team mates / clan mates get their own colour so they read as
         // friendly at a glance (and the aimbot leaves them alone).
         const bool ally = box.ally;

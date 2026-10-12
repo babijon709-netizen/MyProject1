@@ -33,6 +33,10 @@ struct AppState {
     int   aim_priority = 0;
     bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
+    // «Видимость»: проверка по геометрии карты (vis_check_map.h) — цель за
+    // скалой/холмом/стеной статического строения не рисуется. Меш карты грузится
+    // фоном при первом включении, состояние видно в строке под тумблером.
+    bool  esp_vis = false;
     bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
     // Типы руды: какие именно камни показывать. «Руда» выше — общий
     // выключатель меток руды, эти три — отбор внутри него (камень / железо /
@@ -134,7 +138,7 @@ struct AppState {
     // шире (круги/прицелы — овалами, это нормальный вид фичи). 1.0 = выкл.
     // Сессионное: бинарный CfgBlob заморожен версией (config.cpp).
     float screen_stretch_x = 1.0f;
-    float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
+    float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0, a_esp_vis = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
     float a_esp_ore_stone = 1, a_esp_ore_iron = 1, a_esp_ore_sulfur = 1;

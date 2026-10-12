@@ -14,12 +14,14 @@
 #include "str.h"
 #include "esp_draw.h"
 #include "aim.h"
+#include "vis_check_map.h"   // карта видимости: тумблер «Видимость» + состояние меша
 #include "media/tab_icons.h"
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
 #include "stb_image/stb_image.h"
 #include <cfloat>
 #include <cmath>
+#include <cstring>
 
 static GLuint g_tabIcons[kTabCount] = {};
 
@@ -90,12 +92,17 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
 
         SHdr(XS("Аим"));
-        CardBg(Layout::RowH * 3);
+        CardBg(Layout::RowH * 4);
         const bool aimWasOn = g_state.aim_touch;
         ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
         if (aimWasOn != g_state.aim_touch)
             ;
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
+        // «Только видимых»: цель за геометрией карты не берётся. Проверку
+        // считает esp_draw.cpp по мешу карты (vis_check_map.h), поле видимости
+        // общее для ESP и аима. Меша нет — тумблер молчит (неизвестность не
+        // выкидывает цель).
+        ToggleRow("##ta7", XS("Только видимых"),  &g_state.aim_pos,    g_state.a_aim_pos,  false);
         ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true, false, &cfg::aim::fov_col);
 
         // ---- Режим: чем именно аим крутит прицел ---------------------------
@@ -307,7 +314,12 @@ float TabContent(int tab, float dt, float cW) {
 
 } else if (tab == 2) {
         cfg::esp::box          = g_state.esp_box;
+        cfg::esp::vis_check    = g_state.esp_vis;
         cfg::esp::name_esp     = g_state.esp_name;
+        // Включили проверку видимости — сразу поднимаем загрузку меша: строка
+        // состояния под тумблером должна показывать реальное положение дел, а не
+        // ждать первого кадра с боксами.
+        vis_map::request(g_state.esp_vis || g_state.aim_pos);
         cfg::esp::distance     = g_state.esp_wall;
         cfg::esp::weapon       = g_state.esp_weapon;
         cfg::esp::tracer       = g_state.esp_tracer;
@@ -396,6 +408,44 @@ float TabContent(int tab, float dt, float cW) {
             CardBg(rowH * NP);
             for (int i = 0; i < NP; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NP-1);
+        }
+
+        // ---- Видимость (по геометрии карты) --------------------------------
+        // Тумблер + строка состояния загрузки меша. Пока дерево не готово,
+        // проверка молчит (неизвестность не гасит визуалы), поэтому состояние
+        // видно сразу: VIS 482K — готово, VIS ... — грузится/строится,
+        // VIS -- — файла меша нет, VIS ERR — не разобрался.
+        SHdr(XS("Видимость"));
+        {
+            const float visRowH = Layout::RowH;
+            CardBg(visRowH * 2.f);
+            ToggleRow("##vvis", XS("Видимость"), &g_state.esp_vis, g_state.a_esp_vis, false, true);
+            auto pos = ImGui::GetCursorScreenPos();
+            const float availW = ImGui::GetContentRegionAvail().x;
+            auto* dl2 = ImGui::GetWindowDrawList();
+            auto* fn2 = ImGui::GetFont();
+            const float fs2 = ImGui::GetFontSize();
+            ImGui::InvisibleButton("##vvis_st", {availW, visRowH});
+            const char* visTxt = vis_map::status_text();
+            const float visTw = ImGui::CalcTextSize(visTxt).x;
+            // Слева — куда положить меш, справа — состояние счётчиком. Длинный
+            // путь в строку не влезает: тогда показываем только имя файла
+            // (каталог всё равно один — CfgDir).
+            const char* visPath = vis_map::mesh_path();
+            char visShort[80];
+            if (ImGui::CalcTextSize(visPath).x >
+                availW - Layout::Inset * 2.f - Layout::PadX * 2.f - visTw - 12.f) {
+                const char* slash = strrchr(visPath, '/');
+                snprintf(visShort, sizeof(visShort), "%s", slash ? slash + 1 : visPath);
+                visPath = visShort;
+            }
+            dl2->AddText(fn2, fs2 * 0.88f,
+                         {pos.x + Layout::Inset + Layout::PadX, pos.y + visRowH * 0.5f - fs2 * 0.44f},
+                         C::UA(C::Dim(), 1.f), visPath);
+            dl2->AddText(fn2, fs2 * 0.88f,
+                         {pos.x + availW - Layout::Inset - Layout::PadX - visTw,
+                          pos.y + visRowH * 0.5f - fs2 * 0.44f},
+                         C::UA(C::Acc(), 1.f), visTxt);
         }
 
         ImGui::Dummy({1.f, 12.f});

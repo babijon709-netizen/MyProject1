@@ -506,15 +506,18 @@ static void LoadCfgByName(const char* name, bool announce) {
     g_state.sl_custom_fov = {}; g_state.sl_hands_x = {};
     g_state.sl_hands_y = {}; g_state.sl_hands_z = {};
     g_state.aim_touch   = s.aim_touch;
-    // «Только видимых» убран из меню — значение из конфига игнорируется.
-    g_state.aim_pos     = false;
+    // «Только видимых» вернулся в меню вместе с настоящей проверкой видимости
+    // по мешу карты (vis_check_map.h), поэтому значение из конфига снова
+    // работает. Оба слота едут из одного источника: cfg::aim::vis_check — из
+    // блоба, g_state.aim_pos — то, что показывает тумблер вкладки аима.
+    g_state.aim_pos     = s.aim_vis_check;
     g_state.aim_special = s.aim_special;
     g_state.aim_scope_only = s.aim_scope_only;
     cfg::aim::scope_only   = s.aim_scope_only;
     g_state.aim_bone    = s.aim_bone;
     // Режим аима: старые конфиги (и любой левый байт) дают 0 — прежний тач.
     g_state.aim_mode    = (s.aim_mode <= 2) ? (int)s.aim_mode : 0;
-    cfg::aim::vis_check  = false;
+    cfg::aim::vis_check  = s.aim_vis_check;
     cfg::aim::draw_fov   = s.aim_draw_fov;
     cfg::aim::fov        = s.aim_fov;
     // Дальность автофарма переехала в бывший слот aim_lead; в старых
@@ -526,6 +529,10 @@ static void LoadCfgByName(const char* name, bool announce) {
     g_state.esp_weapon      = s.esp_weapon;
     g_state.esp_tracer      = s.esp_tracer;
     g_state.esp_skeleton    = s.esp_skeleton;
+    // «Видимость» ESP: сохранена отдельным байтом блоба (esp_vis_check), как и
+    // остальные визуалы — слот был в раскладке с самого начала.
+    g_state.esp_vis         = s.esp_vis_check;
+    cfg::esp::vis_check     = s.esp_vis_check;
     g_state.esp_ore         = s.esp_ore;
     g_state.esp_animal      = s.esp_animal;
     g_state.esp_team        = s.esp_team;
@@ -636,6 +643,7 @@ static void LoadCfgByName(const char* name, bool announce) {
         auto b01 = [](bool& b) { b = *reinterpret_cast<const unsigned char*>(&b) != 0; };
         b01(g_state.aim_touch); b01(g_state.aim_special); b01(g_state.aim_scope_only);
         b01(cfg::aim::draw_fov);
+        b01(g_state.aim_pos);   b01(cfg::esp::vis_check); b01(g_state.esp_vis);
         b01(g_state.esp_box); b01(g_state.esp_name); b01(g_state.esp_wall);
         b01(g_state.esp_chams); b01(g_state.esp_weapon); b01(g_state.esp_tracer);
         b01(g_state.esp_skeleton); b01(g_state.esp_ore); b01(g_state.esp_animal);

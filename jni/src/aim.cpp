@@ -290,6 +290,9 @@ static unsigned long s_seen_bots = 0;
 // Боты пропущены, потому что их ЕСП выключено (аим берёт ботов только
 // с включёнными маркерами).
 static unsigned long s_bot_noesp_skipped = 0;
+// Цель за геометрией карты, а включён «Только видимых» (EspBox::visible
+// считает esp_draw.cpp по мешу карты, vis_check_map.h).
+static unsigned long s_not_visible_skipped = 0;
 
 // why — причина, по которой цель НЕ выбрана (0 когда цель есть). Коды:
 //   1 боксов нет вовсе      2 все союзники      3 все мёртвые
@@ -318,13 +321,14 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         const double now = (double)clock() / CLOCKS_PER_SEC;
         const unsigned long total = s_no_skeleton + s_bones_not_projected + s_dead_skipped +
                                     s_ally_skipped + s_offscreen_skipped + s_out_of_fov +
-                                    s_bot_noesp_skipped;
+                                    s_bot_noesp_skipped + s_not_visible_skipped;
         if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
             s_at = now;
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;
             s_offscreen_skipped = 0; s_out_of_fov = 0;
+            s_not_visible_skipped = 0;
         }
     }
 
@@ -359,6 +363,13 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         // Мёртвых не берём: труп ещё несколько секунд остаётся в списке
         // игроков с корректным скелетом, и прицел уезжал на него (19.09).
         if (b.dead) { ++s_dead_skipped; continue; }
+        // «Только видимых»: цель за геометрией карты (скала, холм, стена
+        // статического строения) в цель не берётся — прицел не водится в
+        // перекрытие. Поле true и когда проверка выключена, и когда меша карты
+        // нет, — тогда фильтр молчит (vis_check_map::visible).
+        // Одиночный кадр перекрытия цель не роняет: гистерезис в
+        // vis_check_map::visible гасит её только после двух кадров подряд.
+        if (g_state.aim_pos && !b.visible) { ++s_not_visible_skipped; continue; }
         AimTarget t;
         const int usedBone = aim_control::configured_bone_slot(wantBone, b.aim_valid);
         if (usedBone >= 0) {

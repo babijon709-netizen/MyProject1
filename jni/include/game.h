@@ -6,6 +6,17 @@
 // Skeleton ESP: bone slots and the lines connecting them.
 constexpr int ESP_BONE_COUNT      = 22;
 
+// Слоты скелета. Enum живёт здесь, а не в game.cpp: кроме скелетного ESP те же
+// номера нужны проверке видимости (vis_check_map.h) — точки головы, груди и
+// таза берутся прямо из мировых костей кадра.
+enum SkeletonBone {
+    BONE_HIPS = 0, BONE_SPINE, BONE_SPINE1, BONE_SPINE2, BONE_NECK, BONE_HEAD,
+    BONE_SHOULDER_L, BONE_ARM_L, BONE_FOREARM_L, BONE_HAND_L,
+    BONE_SHOULDER_R, BONE_ARM_R, BONE_FOREARM_R, BONE_HAND_R,
+    BONE_UPLEG_L, BONE_LEG_L, BONE_FOOT_L, BONE_TOE_L,
+    BONE_UPLEG_R, BONE_LEG_R, BONE_FOOT_R, BONE_TOE_R
+};
+
 struct EspBox {
     unsigned long long id;   // stable per-player identity (PlayerManager*), for target stickiness
     float x1, y1, x2, y2;
@@ -89,6 +100,15 @@ struct EspBox {
     float anchor_top_y = 0.0F;      // верх тела (ноги + рост, присед учтён)
     float anchor_bone[ESP_BONE_COUNT][3] = {};
     unsigned anchor_bone_ok = 0;    // битовая маска ESP_BONE_COUNT: бит i — кость i валидна
+
+    // ---- Проверка видимости по геометрии карты (esp_draw.cpp -> vis_check_map.h)
+    // false — между камерой и всеми точками тела (голова / грудь / таз / ноги)
+    // есть непрозрачная геометрия меша карты. Считается один раз на кадр, в
+    // том же месте, где боксы получают мировой якорь, — поэтому одинакова для
+    // ESP и для аима.
+    // true и когда проверка выключена, и когда меша нет/он ещё грузится:
+    // неизвестность не должна гасить визуалы (правило vis_check_map::visible).
+    bool  visible = true;
 };
 
 // World markers: ore nodes, animals, bots and vehicles, drawn as a small

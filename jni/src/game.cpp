@@ -4381,13 +4381,8 @@ static std::vector<uint64_t> read_configured_player_transforms(bool* player_list
 // each frame from the shared TransformHierarchy arrays (local TRS matrices +
 // parent indices) with two bulk reads per player.
 
-enum SkeletonBone {
-    BONE_HIPS = 0, BONE_SPINE, BONE_SPINE1, BONE_SPINE2, BONE_NECK, BONE_HEAD,
-    BONE_SHOULDER_L, BONE_ARM_L, BONE_FOREARM_L, BONE_HAND_L,
-    BONE_SHOULDER_R, BONE_ARM_R, BONE_FOREARM_R, BONE_HAND_R,
-    BONE_UPLEG_L, BONE_LEG_L, BONE_FOOT_L, BONE_TOE_L,
-    BONE_UPLEG_R, BONE_LEG_R, BONE_FOOT_R, BONE_TOE_R
-};
+// Слоты скелета (enum SkeletonBone) переехали в game.h: те же номера нужны
+// проверке видимости — точки головы, груди и таза берутся из мировых костей.
 
 
 struct SkeletonBoneName { const char* name; int bone; };
