@@ -223,6 +223,9 @@ inline constexpr std::uint64_t SCREEN_CONTROLS_HOLDER_FIELD    = 0x28;
 //   <qNF> Vsh 0x38, PlayerInput qNa 0x40 (struct 0x28 байт: MovementInput
 //   Vector2 0x40, LookDirection Vector3 0x48, YRotation 0x54, Jump/Sprint/
 //   Crouch/Aim/Ready 0x58..0x5C, Tick 0x60, TooClose 0x64),
+//   bool 0x68 — «кнопка атаки зажата» (защёлка: ставится по нажатию кнопки
+//   атаки и снимается по отпусканию, см. PLAYER_INPUT_HANDLER_ATTACK_HELD),
+//   bool 0x69 — однокадровый импульс в PlayerInput.Jump (0x58),
 //   Nullable<Vector2> qNf 0x6C и qNP 0x78 (сырой ввод стика: hasValue по +0,
 //   значение по +4), Nullable<bool> 0x84, floats 0x88/0x8C/0x90,
 //   SprintJoystickHandler 0xB0.
@@ -230,6 +233,12 @@ inline constexpr std::uint64_t PLAYER_INPUT_HANDLER_OWNER_BACKREF = 0x30; // <qN
 inline constexpr std::uint64_t PLAYER_INPUT_MOVEMENT_INPUT        = 0x40; // PlayerInput.MovementInput (Vector2)
 inline constexpr std::uint64_t PLAYER_INPUT_YROTATION             = 0x54; // PlayerInput.YRotation (float)
 inline constexpr std::uint64_t PLAYER_INPUT_TICK                  = 0x60; // PlayerInput.Tick (uint)
+// Кнопка атаки зажата (bool у хендлера; защёлка, а не импульс: держится,
+// пока кнопку не отпустят). Пока там 1, хендлер ввода в КАЖДОМ кадре зовёт
+// PlayerEventHandler.AttackContinuously (Vsh+0x1F0).Try() -> FPManager
+// .OnTry_Attack(true) -> оружие.TryAttackContinuously() — ровно то, что даёт
+// зажатая кнопка атаки в UI; частоту режет кулдаун самого оружия.
+inline constexpr std::uint64_t PLAYER_INPUT_HANDLER_ATTACK_HELD   = 0x68; // bool: атака зажата
 inline constexpr std::uint64_t PLAYER_INPUT_HANDLER_OVERRIDE_A    = 0x6C; // Nullable<Vector2> qNf
 inline constexpr std::uint64_t PLAYER_INPUT_HANDLER_OVERRIDE_B    = 0x78; // Nullable<Vector2> qNP
 // Layout Nullable<T> в il2cpp: bool hasValue по +0 (в метадате поле идёт

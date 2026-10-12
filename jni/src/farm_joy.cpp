@@ -75,6 +75,14 @@ struct Target {
     unsigned sticks = 0;       // биты найденных стиков (1 — Fixed, 2 — Floating)
 };
 
+// Атака: байт «кнопка атаки зажата» у хендлера ввода. Своих проверок у него
+// не больше, чем у стика: тот же resolve_handler (класс PlayerInputHandler +
+// обратная ссылка на локального игрока), а значение — один байт, который сама
+// игра пишет тем же способом (strb по +0x68 в gKo) и читает в ветке
+// непрерывного удара (0x67E4ADC: if (0x68) Vsh.AttackContinuously.Try()).
+unsigned char s_attack_value = 0;   // что мы туда положили (0 — ещё не писали)
+int s_attack_why = WHY_OK;
+
 bool vec_ok(const float v[2]) {
     return std::isfinite(v[0]) && std::isfinite(v[1]) &&
            fabsf(v[0]) <= 1.5f && fabsf(v[1]) <= 1.5f;
@@ -360,10 +368,29 @@ bool command(float x, float y) {
     return true;
 }
 
+bool attack(bool on) {
+    uint64_t handler = 0, klass = 0, owner = 0;
+    int why = WHY_OK;
+    if (!resolve_handler(handler, klass, owner, why)) {
+        s_attack_why = why;
+        return false;                 // класть 1 было некуда — и не надо
+    }
+    const unsigned char value = on ? 1u : 0u;
+    if (!wr_buf(handler + PLAYER_INPUT_HANDLER_ATTACK_HELD, &value, sizeof(value))) {
+        s_attack_why = WHY_WRITE;
+        return false;                 // состояние не меняем: попробуем ещё
+    }
+    s_attack_why = WHY_OK;
+    s_attack_value = value;
+    return true;
+}
+
 void release() {
     s_trial.release();
     s_x = 0.0f;
     s_y = 0.0f;
+    // Зажатие атаки не оставляем игре: пока байт 1, персонаж машет сам.
+    if (s_attack_value) attack(false);
     for (int c = 0; c < C_COUNT; ++c) {
         if (!s_touched[c]) continue;
         zero_target(s_targets[c]);
@@ -409,6 +436,8 @@ Status status() {
     for (int c = 0; c < C_COUNT; ++c) out.fails[c] = s_trial.fails(c);
     out.why = s_why != WHY_OK ? s_why : s_targets[cur].why;
     out.sticks = s_sticks;
+    out.attacking = s_attack_value != 0;
+    out.attack_why = s_attack_why;
     return out;
 }
 

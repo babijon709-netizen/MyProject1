@@ -131,12 +131,13 @@ constexpr float kArriveWalk     = 0.15f; // дошли до точки подх�
 constexpr float kWalkOffHold    = 0.25f; // гистерезис отпускания джойстика, с
 
 // Ритм ударов, когда ритм орудия не прочитался из памяти. Безопасный такт
-// 600 мс: лишние тапы игра ставит В ОЧЕРЕДЬ и выстреливает их по кулдауну
-// уже в уведённую камеру — на узле, который только что закончился, это удар
-// по тому, что оказалось перед прицелом (своя постройка у места фарма).
-// Быстрый фолбэк 315 мс обгонял кулдаун большинства орудий.
-constexpr float kTapDownMs = 60.f;       // веримый быстрый тап,
-constexpr float kTapUpMs   = 540.f;      // пауза до следующего (600 мс цикл)
+// 600 мс: держим кнопку атаки в памяти ~60 мс и отпускаем. Прежний повод
+// держаться медленнее кулдауна — очередь тапов, которую игра разгребала
+// позже, уже в уведённую камеру, — с памятью пропал: преждевременный Try()
+// игра просто отбрасывает. Такт оставлен как есть, чтобы не долбить ввод
+// каждый кадр и не менять привычное поведение бота.
+constexpr float kSwingHoldMs = 60.f;     // зажатие атаки (память),
+constexpr float kSwingIdleMs = 540.f;    // пауза до следующего (600 мс цикл)
 
 constexpr float kSettleTime    = 0.25f;  // пауза при смене узла (пальцы подняты)
 constexpr float kLostHold      = 0.60f;  // цель может мигнуть на рескане реестра
@@ -185,10 +186,10 @@ void UpdateFarm(float dt) {
 static void UpdateFarmInner(float dt) {
     static bool  s_moveDown = false;  // стик движения ведём (память, не тач)
     static bool  s_camTurn = false;   // камера ведётся памятью: идёт доводка
-    static bool  s_tapDown  = false;  // палец 2: удары
+    static bool  s_swingOn  = false;  // кнопка атаки зажата памятью (удары)
     static float s_memWX = 0.f, s_memWY = 0.f; // последняя запись в накопитель
     static bool  s_memPend = false;   // запись ждёт подтверждения накопителем
-    static int   s_tapTimer = 0;      // мс до следующего переключения пальца 2
+    static int   s_swingTimer = 0;      // мс до следующего зажатия/отпускания удара
     static float s_memWait = 0.f;     // сколько ждём подтверждения записи, с
     static unsigned long long s_nodeId = 0;
     // Пин крестика (телепорт крестика в точку удара): включён / на каком
@@ -223,7 +224,7 @@ static void UpdateFarmInner(float dt) {
     auto releaseAll = [&]() {
         if (s_moveDown) { farmjoy::release(); s_moveDown = false; }
         s_camTurn = false; s_memPend = false;
-        if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }
+        if (s_swingOn)  { farmjoy::attack(false); s_swingOn = false; }
         esp_farm_cross_pin(FarmTarget{}, false);
         s_pinOn = false; s_pinNode = 0;
         s_memWait = 0.f;
@@ -297,7 +298,7 @@ static void UpdateFarmInner(float dt) {
         // ввод, а по-настоящему сбрасываемся, только если цель не вернулась.
         if (s_nodeId != 0 && s_lostTime < kLostHold) {
             s_lostTime += dt;
-            if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; } // вслепую не машем
+            if (s_swingOn) { farmjoy::attack(false); s_swingOn = false; } // вслепую не машем
             s_camTurn = false; s_memPend = false; s_memWait = 0.f;
             return; // палец движения оставляем, где был
         }
@@ -365,7 +366,7 @@ static void UpdateFarmInner(float dt) {
         else { s_candId = tgt.id; s_candFrames = 1; s_flickerTime = 0.f; }
         if (s_nodeId != 0 && s_candFrames < kNodeDebounce && s_flickerTime < kFlickerGiveUp) {
             s_flickerTime += dt;
-            if (s_tapDown)  { Touch_Up_N(2); s_tapDown = false; }   // вслепую не машем
+            if (s_swingOn)  { farmjoy::attack(false); s_swingOn = false; }   // вслепую не машем
             s_camTurn = false; s_memPend = false; s_memWait = 0.f;
             return;   // палец движения оставляем, где был
         }
@@ -754,20 +755,22 @@ static void UpdateFarmInner(float dt) {
         }
     }
 
-    // ---- палец 2: удары --------------------------------------------------------
+    // ---- удары (память, без тача) ----------------------------------------------
     if (phase == 3) {
         s_mineTime += dt;
-        // Ритм ударов — из самого орудия: FPMelee.m_TimeBetweenAttacks +
-        // pauseAfterAttack (у каждого инструмента свои, сериализованы в
-        // префабе). Тап раньше срока игра ставит в очередь, и он вылетает уже
-        // в уведённую камеру, поэтому держимся чуть медленнее кулдауна;
-        // живого значения нет — остаёмся на безопасном такте (600 мс, см.
-        // kTapDownMs/kTapUpMs: очередь тапов бьёт по чужой геометрии).
-        float tapDownMs = kTapDownMs, tapUpMs = kTapUpMs;
+        // Удар — память, а не палец: держим байт «атака зажата» у хендлера
+        // ввода (farmjoy::attack(true)), и игра в каждом кадре сама зовёт
+        // AttackContinuously.Try() -> FPManager.OnTry_Attack(true) ->
+        // оружие.TryAttackContinuously(). Бьёт оно так часто, как позволяет
+        // его же кулдаун (FPMelee.m_NextUseTime), поэтому ритм ниже — только
+        // скважность удержания: короткое зажатие и пауза. Такт взят из
+        // орудия (m_TimeBetweenAttacks + pauseAfterAttack), живого значения
+        // нет — безопасные 600 мс.
+        float holdMs = kSwingHoldMs, idleMs = kSwingIdleMs;
         if (tgt.attack_period > 0.05f && tgt.attack_period < 5.f) {
             const float periodMs = fminf(fmaxf(tgt.attack_period * 1020.f, 250.f), 2000.f);
-            tapDownMs = fminf(fmaxf(periodMs * 0.10f, 40.f), 120.f);
-            tapUpMs   = fmaxf(periodMs - tapDownMs, 60.f);
+            holdMs = fminf(fmaxf(periodMs * 0.10f, 40.f), 120.f);
+            idleMs = fmaxf(periodMs - holdMs, 60.f);
         }
         // Узел при смерти: новый замах не начинаем. Последний удар мог уже
         // убить узел — его GameObject вот-вот освободится, и пин крестика
@@ -796,17 +799,17 @@ static void UpdateFarmInner(float dt) {
              (tgt.node_health >= 0.f && tgt.node_health < s_blindHp - 0.01f));
         const bool swingByRay = tgt.ray_self || blindSwing;
         const bool swingBlocked = !swingByRay || tgt.ray_blocked;
-        s_tapTimer -= (int)roundf(dt * 1000.f);
-        if (s_tapTimer <= 0 && (!aimSettled || swingBlocked || nodeDying) && !s_tapDown) {
-            s_tapTimer = 0;              // ждём камеру/обход/узел, не теряя такт
-        } else if (s_tapTimer <= 0) {
-            if (!s_tapDown) {
-                // Кнопка огня: откалиброванная зона, иначе правая половина экрана.
-                const float fx = (g_state.farm_fire_x >= 0.f) ? sw * g_state.farm_fire_x : sw * 0.88f;
-                const float fy = (g_state.farm_fire_y >= 0.f) ? sh * g_state.farm_fire_y : sh * 0.66f;
-                Touch_Down_N(2, fx, fy);
-                s_tapDown = true;
-                s_tapTimer = (int)tapDownMs;
+        s_swingTimer -= (int)roundf(dt * 1000.f);
+        if (s_swingTimer <= 0 && (!aimSettled || swingBlocked || nodeDying) && !s_swingOn) {
+            s_swingTimer = 0;              // ждём камеру/обход/узел, не теряя такт
+        } else if (s_swingTimer <= 0) {
+            if (!s_swingOn) {
+                // Зажимаем кнопку атаки в памяти хендлера ввода — тот же путь,
+                // которым идёт зажатая кнопка атаки на экране. Экрана и зоны
+                // огня для удара больше не нужно.
+                farmjoy::attack(true);
+                s_swingOn = true;
+                s_swingTimer = (int)holdMs;
                 if (!tgt.ray_valid) {      // замах вслепую — под контроль
                     s_blindHp = tgt.node_health;
                     ++s_blindSwings;
@@ -814,16 +817,16 @@ static void UpdateFarmInner(float dt) {
                     s_blindSwings = 0;     // луч жив — слепой режим кончился
                 }
             } else {
-                Touch_Up_N(2);
-                s_tapDown = false;
-                s_tapTimer = (int)tapUpMs;
+                farmjoy::attack(false);
+                s_swingOn = false;
+                s_swingTimer = (int)idleMs;
             }
         }
     } else {
-        if (s_tapDown) { Touch_Up_N(2); s_tapDown = false; }
+        if (s_swingOn) { farmjoy::attack(false); s_swingOn = false; }
         // Пин крестика выключает блок управления пином выше (wantPin требует
         // фазу 3): из MINE вышли — клей больше не нужен, до следующего входа.
-        s_tapTimer = 0;
+        s_swingTimer = 0;
         s_blindSwings = 0;    // фаза ушла — счётчик слепых замахов обнуляем
         s_blindHp = -1.f;
     }
