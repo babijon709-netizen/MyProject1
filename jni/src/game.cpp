@@ -3553,6 +3553,7 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
 static float g_aim_lead_seconds = 0.0F;
 static Vec3 g_aim_inherited_velocity{};
 static aim_ballistics::Parameters g_aim_ballistic_params{};
+static bool g_aim_is_instant_ray = false; // FPHitscan fires a Ray, not a travelling ShaftedProjectile
 namespace { bool aim_ballistic_origin(Vec3& origin); }
 
 bool esp_silent_publish(uint64_t target, const float aim[3],
@@ -3583,7 +3584,9 @@ bool esp_silent_publish(uint64_t target, const float aim[3],
     if (!aim_ballistic_origin(origin) || !aim || !velocity ||
         !silent_aim::solve_axis(origin, Vec3{aim[0], aim[1], aim[2]},
                                 Vec3{velocity[0], velocity[1], velocity[2]},
-                                g_aim_inherited_velocity, g_aim_ballistic_params,
+                                g_aim_inherited_velocity,
+                                g_aim_is_instant_ray ? aim_ballistics::Parameters{}
+                                                     : g_aim_ballistic_params,
                                 sample_age, g_aim_lead_seconds, c)) return fail();
     // Shot axis is not the camera view axis. Both the synchronous first write
     // and the worker guard the Player -> Handler -> Look chain before writing.
@@ -6568,10 +6571,12 @@ void update_aim_ballistics(uint64_t player) {
     static uint64_t cached_weapon_class = 0;
     static double cached_at = 0.0;
     static aim_ballistics::Parameters cached_params{};
+    static bool cached_instant_ray = false;
     constexpr double kCacheSeconds = 0.35;
     const double now = mono_seconds();
 
     g_aim_ballistic_params = {};
+    g_aim_is_instant_ray = false;
     g_aim_inherited_velocity = {};
     if (valid_obj(player)) {
         auto local_track = g_player_track.find(player);
@@ -6590,12 +6595,15 @@ void update_aim_ballistics(uint64_t player) {
         cached_weapon_class = 0;
         cached_at = 0.0;
         cached_params = {};
+        cached_instant_ray = false;
     };
     auto restore_cache = [&]() {
         if (cached_params.valid && now >= cached_at && now - cached_at <= kCacheSeconds) {
             g_aim_ballistic_params = cached_params;
+            g_aim_is_instant_ray = cached_instant_ray;
         } else {
             g_aim_ballistic_params = {};
+            g_aim_is_instant_ray = false;
             cached_params = {};
             cached_at = 0.0;
         }
@@ -6695,13 +6703,18 @@ void update_aim_ballistics(uint64_t player) {
     if (projectile_offset)
         projectile_ok = aim_read_projectile(weapon, projectile_offset, false, projectile_read);
 
+    bool structural_hitscan = false;
     if (kind == Kind::None) {
         const uint64_t config_candidates[] = {
             FPHITSCAN_CONFIG, FPCROSSBOW_CONFIG, FPROCKETLAUNCHER_CONFIG
         };
         for (uint64_t offset : config_candidates) {
             if (aim_read_weapon_config(weapon, offset, true, config_read) &&
-                config_read.params.valid) { config_ok = true; break; }
+                config_read.params.valid) {
+                config_ok = true;
+                structural_hitscan = offset == FPHITSCAN_CONFIG;
+                break;
+            }
             config_read = {};
         }
         const uint64_t projectile_candidates[] = {
@@ -6716,14 +6729,21 @@ void update_aim_ballistics(uint64_t player) {
         }
     }
 
+    // FPHitscan casts a Ray along LookDirection (game_offsets.h). Its config
+    // bulletSpeed is not the Ray's hit time: distance / bulletSpeed overleads
+    // a runner by metres. If metadata names cannot be read, the confirmed
+    // config at the hitscan offset (and no projectile) identifies this path.
+    g_aim_is_instant_ray = kind == Kind::Hitscan ||
+                           (kind == Kind::None && structural_hitscan && !projectile_ok);
     aim_ballistics::Parameters current{};
     aim_merge_ballistics(config_ok ? config_read : AimBallisticRead{},
                          projectile_ok ? projectile_read : AimBallisticRead{}, current);
     if (current.valid) {
         g_aim_ballistic_params = current;
         cached_params = current;
+        cached_instant_ray = g_aim_is_instant_ray;
         cached_at = now;
-    } else {
+    } else if (!g_aim_is_instant_ray) {
         restore_cache();
     }
 }
@@ -9168,6 +9188,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_aim_velocity = {};
     g_aim_inherited_velocity = {};
     g_aim_ballistic_params = {};
+    g_aim_is_instant_ray = false;
     std::vector<EspBox> result;
     auto transient_return = [&](int tag) {
         watch_boxes(result, (size_t)-1, nullptr, tag);

@@ -94,6 +94,17 @@ int main() {
     assert(silent_aim::solve_axis({0.f, 1.5f, 0.f}, {0.f, 1.5f, 100.f},
                                   {5.f, 0.f, 0.f}, {}, {}, 0.05f, 0.f, moving));
     assert(std::fabs(moving.aim[0] - 0.25f) < 0.001f);
+    // Hitscan consumes a Ray immediately: even if its config contains a
+    // bulletSpeed, it must NOT take the projectile intercept path.
+    moving = c;
+    assert(silent_aim::solve_axis({0.f, 1.5f, 0.f}, {0.f, 1.5f, 100.f},
+                                  {5.f, 0.f, 0.f}, {3.f, 0.f, 0.f},
+                                  {}, 0.f, 0.f, moving));
+    memory = guarded_memory(moving);
+    assert(silent_aim::tick(memory, moving) == silent_aim::Result::written);
+    assert(std::fabs(memory.value[0]) < 0.001f);
+    assert(silent_aim::tick(memory, moving, 0.05f) == silent_aim::Result::written);
+    assert(memory.value[0] > 0.f && memory.value[0] < 0.002f);
     moving = c;
     assert(!silent_aim::solve_axis({0.f, 1.5f, 0.f}, {0.f, 1.5f, 300.f},
                                    {}, {}, flat, 0.f, 0.f, moving));
