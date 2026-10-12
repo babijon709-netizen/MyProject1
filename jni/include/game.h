@@ -69,6 +69,9 @@ struct EspBox {
     // retain their current angular compensation in aim_yaw/aim_pitch.
     float aim_world[3][3] = {};
     bool  aim_world_valid[3] = {};
+    float aim_velocity[3] = {}; // velocity of THIS box, never last player in frame
+    float aim_sample_age[3] = {}; // age of each chosen bone position, seconds
+    double aim_sample_at = 0.0; // monotonic timestamp for held-frame rejection
     // Бот (враждебный NPC): бокс собран не из игрока, а из маркера — только
     // данные для аима (точка = шея по росту от земли). Оверлей такие боксы
     // не рисует (ботов рисуют маркеры), аим берёт на общих основаниях.
@@ -553,7 +556,8 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z);
 
 // Publish a fully validated local-player/LookDirection snapshot to the
 // independent high-frequency silent writer. `aim` is the exact world-space bone point.
-bool esp_silent_publish(uint64_t target, const float aim[3]);
+bool esp_silent_publish(uint64_t target, const float aim[3],
+                        const float velocity[3], float sample_age);
 // Silent requests object-data No Spread while the user keeps silent mode enabled,
 // independently of whether a target is currently inside the aim FOV.
 bool esp_silent_wants_no_spread();

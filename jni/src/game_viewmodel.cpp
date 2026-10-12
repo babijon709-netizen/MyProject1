@@ -506,6 +506,9 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     using namespace go_active;
     std::lock_guard<std::recursive_mutex> guard(viewmodel_session_mutex());
     const bool want_fast_fire = g_state.fast_fire;
+    // Silent straightens the equipped weapon automatically; keep the explicit
+    // toggle independent and restore originals through the existing controller.
+    const bool want_no_ballistics = settings.no_ballistics || esp_silent_wants_no_spread();
     if (!g_mem.bound() || !g_il2cpp_base || g_pid <= 0) {
         controller.reset(false); fps_controller.reset(false); weapons.reset(false);
         rapid_fire.reset(false);
@@ -513,7 +516,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         no_recoil_ctl.reset(false);
         no_recoil_ctl.status = settings.no_recoil_button ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         no_ballistics_ctl.reset(false);
-        no_ballistics_ctl.status = settings.no_ballistics ? viewmodel::Status::Waiting : viewmodel::Status::Off;
+        no_ballistics_ctl.status = want_no_ballistics ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         const bool want_spread = settings.no_spread || esp_silent_wants_no_spread();
         weapons.spread = want_spread ? viewmodel::Status::Waiting : viewmodel::Status::Off;
         unity_base = 0; fps_last_resolve = {};
@@ -546,7 +549,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         want_no_spread || weapons.has_state() ||
         want_fast_fire || rapid_fire.has_state() ||
         settings.no_recoil_button || no_recoil_ctl.has_state() ||
-        settings.no_ballistics || no_ballistics_ctl.has_state() ||
+        want_no_ballistics || no_ballistics_ctl.has_state() ||
         g_farmActive) {
         auto local_player_ok = [&](uint64_t candidate) {
             uint64_t net=0; uint8_t local=0;
@@ -577,7 +580,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
             weapons.spread=want_no_spread||weapons.has_state()?viewmodel::Status::Failed:viewmodel::Status::Off;
             rapid_fire.tick(epoch, g_il2cpp_base, 0, want_fast_fire);
             no_recoil_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_recoil_button);
-            no_ballistics_ctl.tick(epoch, g_il2cpp_base, 0, settings.no_ballistics);
+            no_ballistics_ctl.tick(epoch, g_il2cpp_base, 0, want_no_ballistics);
             return;
         }
         local_source_failed=false;
@@ -588,7 +591,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
     const unsigned weapon_flags = (want_no_spread ? 1u : 0u) |
                                   (want_fast_fire ? 2u : 0u) |
                                   (settings.no_recoil_button ? 4u : 0u) |
-                                  (settings.no_ballistics ? 8u : 0u);
+                                  (want_no_ballistics ? 8u : 0u);
     const auto weapon_now = Clock::now();
     const bool weapon_due = weapon_flags != weapon_last_flags ||
                             player != weapon_last_player ||
@@ -600,7 +603,7 @@ void esp_viewmodel_tick(const ViewmodelSettings& settings) {
         weapons.tick(epoch, g_il2cpp_base, player, want_no_spread);
         rapid_fire.tick(epoch, g_il2cpp_base, player, want_fast_fire);
         no_recoil_ctl.tick(epoch, g_il2cpp_base, player, settings.no_recoil_button);
-        no_ballistics_ctl.tick(epoch, g_il2cpp_base, player, settings.no_ballistics);
+        no_ballistics_ctl.tick(epoch, g_il2cpp_base, player, want_no_ballistics);
     }
     {
         // Log no-spread resolution changes only.

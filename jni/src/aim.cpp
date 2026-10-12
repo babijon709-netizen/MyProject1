@@ -47,6 +47,9 @@ struct AimTarget {
     float world_dist = 0.f;
     float world[3] = {};            // точная мировая координата кости для silent-режима
     bool  world_valid = false;
+    float velocity[3] = {};
+    float sample_age = 0.f;
+    double sample_at = 0.0;
     int   bone = -1;                // слот точки прицела (0 голова, 1 шея, 2 грудь)
     float health = -1.f;            // здоровье цели (для лога и проверки смерти)
     bool  respawning = false;       // PlayerManager.respawning (для лога)
@@ -368,8 +371,11 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
             t.valid = std::isfinite(t.yaw) && std::isfinite(t.pitch) &&
                       std::isfinite(t.sx) && std::isfinite(t.sy);
             t.world_valid = b.aim_world_valid[usedBone];
+            t.sample_age = b.aim_sample_age[usedBone];
+            t.sample_at = b.aim_sample_at;
             for (int i = 0; i < 3; ++i) {
                 t.world[i] = b.aim_world[usedBone][i];
+                t.velocity[i] = b.aim_velocity[i];
                 t.world_valid = t.world_valid && std::isfinite(t.world[i]);
             }
         } else {
@@ -787,9 +793,11 @@ static void UpdateAimSilent(float dt) {
         return;
     }
 
-    // Writer принимает только точную мировую координату кости: экранная точка
-    // и поправки touch/memory-режимов не должны менять направление выстрела.
-    if (!esp_silent_publish(best.id, best.world)) {
+    // Held ESP boxes are for drawing, not for firing at a stale bone.
+    const double age = MonoNow() - best.sample_at;
+    if (best.sample_at <= 0.0 || age < 0.0 || age > 0.12 ||
+        !esp_silent_publish(best.id, best.world, best.velocity,
+                            best.sample_age + static_cast<float>(age))) {
         g_aimActive = false;
         silent_aim::clear();
     }

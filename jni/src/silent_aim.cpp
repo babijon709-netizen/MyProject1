@@ -63,8 +63,12 @@ class Writer {
             const Command command = command_;
             const uint64_t command_session = session_;
             const uint64_t command_revision = revision_;
+            const uint64_t published = published_;
             lock.unlock();
-            const Result result = tick(memory, command);
+            const uint64_t now = now_ms();
+            const Result result = fresh(published, now)
+                ? tick(memory, command, (now - published) * 0.001f)
+                : Result::invalid;
             lock.lock();
             // Do not publish status for a snapshot superseded while the transport
             // read/write was in flight; the next iteration uses the newest copy.

@@ -3,6 +3,7 @@
 #include "app_state.h"
 #include "player_esp_watchdog.h"
 #include "silent_aim.h"
+#include "silent_aim_core.h"
 #include "viewmodel.h"
 #include "game_viewmodel_internal.h"
 #include "aim_ballistics.h"
@@ -3546,10 +3547,16 @@ bool esp_mem_aim_write_fire_dir(float x, float y, float z) {
     return ok;
 }
 
-// Высокочастотный writer больше не разделяет с рендером ни g_mem, ни его
-// кэш: у него собственный fd, immutable snapshot и повторная проверка всей
-// цепочки владельцев непосредственно перед каждой 12-байтовой записью.
-bool esp_silent_publish(uint64_t target, const float aim[3]) {
+// Сайлент использует выбранный транспорт без кадрового кэша; worker получает
+// immutable snapshot и повторно проверяет цепочку владельцев перед записью.
+// Shared snapshot, refreshed by the frame reader before target selection.
+static float g_aim_lead_seconds = 0.0F;
+static Vec3 g_aim_inherited_velocity{};
+static aim_ballistics::Parameters g_aim_ballistic_params{};
+namespace { bool aim_ballistic_origin(Vec3& origin); }
+
+bool esp_silent_publish(uint64_t target, const float aim[3],
+                        const float velocity[3], float sample_age) {
     auto fail = [] { silent_aim::clear(); return false; };
     if (g_pid <= 0 || !g_mem.bound() || !g_cam_pose_valid || esp_freecam_active()) return fail();
     silent_aim::Command c;
@@ -3572,17 +3579,19 @@ bool esp_silent_publish(uint64_t target, const float aim[3]) {
     c.handler_class = ptr(c.handler);
     c.look_class = ptr(c.look);
     c.target = target;
-    c.eye[0] = g_cam_pos.x; c.eye[1] = g_cam_pos.y; c.eye[2] = g_cam_pos.z;
-    for (int i = 0; i < 3; ++i) c.aim[i] = aim[i];
-    // Do one synchronous write in the publishing frame as well. The worker is
-    // still the high-frequency owner, but it can be descheduled exactly while
-    // the game simulates a shot; this closes that first scheduling window.
-    float direct[3] = {c.aim[0]-c.eye[0],c.aim[1]-c.eye[1],c.aim[2]-c.eye[2]};
-    const float len2=direct[0]*direct[0]+direct[1]*direct[1]+direct[2]*direct[2];
-    if (len2>0.25f*0.25f && len2<4.0e12f) {
-        const float inv=1.f/std::sqrt(len2);
-        esp_mem_aim_write_fire_dir(direct[0]*inv,direct[1]*inv,direct[2]*inv);
-    }
+    Vec3 origin{};
+    if (!aim_ballistic_origin(origin) || !aim || !velocity ||
+        !silent_aim::solve_axis(origin, Vec3{aim[0], aim[1], aim[2]},
+                                Vec3{velocity[0], velocity[1], velocity[2]},
+                                g_aim_inherited_velocity, g_aim_ballistic_params,
+                                sample_age, g_aim_lead_seconds, c)) return fail();
+    // Shot axis is not the camera view axis. Both the synchronous first write
+    // and the worker guard the Player -> Handler -> Look chain before writing.
+    struct LiveMemory {
+        bool read(uint64_t addr, void* out, size_t len) { return esp_silent_read(addr, out, len); }
+        bool write(uint64_t addr, const void* in, size_t len) { return esp_silent_write(addr, in, len); }
+    } live;
+    if (silent_aim::tick(live, c) != silent_aim::Result::written) return fail();
     static uint64_t previous_player = 0;
     static float previous_shot = 0.f;
     static double hot_until = 0.0;
@@ -4423,6 +4432,7 @@ struct CachedSkeleton {
     uint64_t bone_transform[ESP_BONE_COUNT] = {};
     Vec3     bone_world[ESP_BONE_COUNT] = {};
     uint8_t  bone_world_age[ESP_BONE_COUNT] = {}; // 0 = none, 1 = fresh, grows on reuse
+    double   bone_world_at[ESP_BONE_COUNT] = {}; // monotonic last successful read
     uint64_t model_root = 0;
     int      bone_count = 0;
     bool     valid = false;
@@ -6411,13 +6421,10 @@ static float head_lift_for_range(const Vec3& world) {
 //
 // A small control-latency floor is applied by esp_draw.cpp for memory/touch;
 // the user setting may raise it. This shifts only the aim point, not the ESP
-// box. Active projectile flight time is solved separately below from the
-// weapon's speed, gravity and drag when those parameters are available.
-static float g_aim_lead_seconds = 0.0F;
+// box. Projectile flight is solved separately from weapon speed and profile;
+// silent uses the same model for the shot axis even with zero gravity/drag.
 static Vec3 g_aim_lead{};
 static Vec3 g_aim_velocity{};
-static Vec3 g_aim_inherited_velocity{};
-static aim_ballistics::Parameters g_aim_ballistic_params{};
 
 namespace {
 constexpr const char* kAimWeaponNamespace = "HyperHug.Games.Oxide.Features.Weapons";
@@ -6802,6 +6809,11 @@ static bool set_aim_point(EspBox& box, int slot, const Vec3& world_in, const Mat
     box.aim_world[slot][1] = world_in.y;
     box.aim_world[slot][2] = world_in.z;
     box.aim_world_valid[slot] = true;
+    box.aim_velocity[0] = g_aim_velocity.x;
+    box.aim_velocity[1] = g_aim_velocity.y;
+    box.aim_velocity[2] = g_aim_velocity.z;
+    box.aim_sample_at = mono_seconds();
+    box.aim_sample_age[slot] = 0.f;
     box.aim_valid[slot] = true;
     return true;
 }
@@ -6962,6 +6974,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
                 ++bones_world;
                 skeleton.bone_world[bone] = world;
                 skeleton.bone_world_age[bone] = 1;
+                skeleton.bone_world_at[bone] = mono_seconds();
             }
         }
         // Transient read glitch (game mid-update): briefly reuse the last known
@@ -7010,6 +7023,7 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
         };
         Vec3 target[3]{};
         bool have[3] = {false, false, false};
+        double sample_at[3] = {};
 
         Vec3 head{}, neck{};
         const bool have_head_bone = bone_world_ok(BONE_HEAD, head);
@@ -7033,24 +7047,36 @@ static bool fill_skeleton_box(uint64_t player, const Mat4& view_projection, floa
             // dir и range больше не нужны.
             (void)dir; (void)range;
             target[0] = head;
+            sample_at[0] = skeleton.bone_world_at[BONE_HEAD];
             have[0] = true;
         }
         if (have_neck_bone && have_head_bone) {
             target[1] = {(neck.x + head.x) * 0.5F, (neck.y + head.y) * 0.5F, (neck.z + head.z) * 0.5F};
+            sample_at[1] = std::min(skeleton.bone_world_at[BONE_HEAD],
+                                    skeleton.bone_world_at[BONE_NECK]);
             have[1] = true;
         } else if (have_neck_bone) {
-            target[1] = {neck.x, neck.y + 0.05F, neck.z}; have[1] = true;
+            target[1] = {neck.x, neck.y + 0.05F, neck.z};
+            sample_at[1] = skeleton.bone_world_at[BONE_NECK]; have[1] = true;
         } else if (have_head_bone) {
-            target[1] = {head.x, head.y - 0.06F, head.z}; have[1] = true;
+            target[1] = {head.x, head.y - 0.06F, head.z};
+            sample_at[1] = skeleton.bone_world_at[BONE_HEAD]; have[1] = true;
         }
         Vec3 chest{};
-        if (bone_world_ok(BONE_SPINE2, chest) || bone_world_ok(BONE_SPINE1, chest) || bone_world_ok(BONE_SPINE, chest)) {
-            target[2] = chest; have[2] = true;
+        for (int bone : {BONE_SPINE2, BONE_SPINE1, BONE_SPINE}) {
+            if (!bone_world_ok(bone, chest)) continue;
+            target[2] = chest; sample_at[2] = skeleton.bone_world_at[bone];
+            have[2] = true; break;
         }
 
         for (int i = 0; i < 3; ++i) {
             if (!have[i]) continue;
-            if (set_aim_point(box, i, target[i], view_projection, sw, sh)) box.aim_source = 1;
+            if (set_aim_point(box, i, target[i], view_projection, sw, sh)) {
+                box.aim_source = 1;
+                const double age = box.aim_sample_at - sample_at[i];
+                box.aim_sample_age[i] = sample_at[i] > 0.0 && age >= 0.0
+                    ? static_cast<float>(age) : 0.f;
+            }
         }
     }
 
@@ -8345,6 +8371,8 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
             g_aim_lead = {};
         }
         // Keep bot slots aligned with player slots: [0] head, [1] neck, [2] chest.
+        const float bot_sample_age = src.vel_valid && src.pos_age > 0.f
+            ? std::min(src.pos_age, kBotPosLeadMax) : 0.f;
         Vec3 head, neck, chest;
         if (src.head_valid) {
             // Точная кость головы модели: без оценки по росту от ног.
@@ -8359,6 +8387,7 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
         set_aim_point(box, 0, head, g_frame_vp, g_frame_sw, g_frame_sh);
         set_aim_point(box, 1, neck, g_frame_vp, g_frame_sw, g_frame_sh);
         set_aim_point(box, 2, chest, g_frame_vp, g_frame_sw, g_frame_sh);
+        for (float& age : box.aim_sample_age) age = bot_sample_age;
         if (!box.aim_valid[0] && !box.aim_valid[1] && !box.aim_valid[2]) continue;
         box.aim_source = src.head_valid ? 1 : 3; // 1 — кость, 3 — оценка от ног
         // Габариты для приличия: ноги и макушка в экранных координатах.
@@ -8996,7 +9025,13 @@ bool esp_box_reproject(EspBox& box) {
         if (ok) { box.bones[bone][0] = sb.x; box.bones[bone][1] = sb.y; }
     }
 
-    // Точки аима НЕ трогаем. Они привязаны к кадру съёма: там было упреждение
+    // Точки аима НЕ перепроецируем. При удержании для ESP они устарели:
+    // оставляем якорь для рисунка, но не разрешаем выстрел по старой кости.
+    for (int slot = 0; slot < 3; ++slot) {
+        box.aim_valid[slot] = false;
+        box.aim_world_valid[slot] = false;
+    }
+    // Они привязаны к кадру съёма: там было упреждение
     // по цели, баллистика и подъём на дальность (set_aim_point), и повторить их
     // из мирового якоря нечем. Свежая, но чужая точка в прицеле хуже одного
     // кадра без неё: аим и так держит цель своим окном захвата.
@@ -9224,8 +9259,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // resolver is not, even though this camera-only frame can publish.
         note_player_pipeline_health(player_list_ok);
         publish_camera_only_frame(sw, sh);
-        if (g_aim_bones_requested && g_state.aim_touch &&
-            g_state.aim_mode != AIM_MODE_SILENT) {
+        if (g_aim_bones_requested && g_state.aim_touch) {
             const uint64_t local_player = resolve_local_player();
             const PlayerAux* local_aux = nullptr;
             bool local_crouched = false;
@@ -9523,8 +9557,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             local_crouched = player_is_crouched(la);
         }
         read_local_aim_reference(local_player, local_aux, local_crouched);
-        if (g_aim_bones_requested && g_state.aim_touch &&
-            g_state.aim_mode != AIM_MODE_SILENT)
+        if (g_aim_bones_requested && g_state.aim_touch)
             update_aim_ballistics(local_player);
     }
 

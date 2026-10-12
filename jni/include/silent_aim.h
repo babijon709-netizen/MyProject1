@@ -16,7 +16,7 @@ struct Command {
     uint64_t player_handler_offset = 0, handler_player_offset = 0;
     uint64_t look_offset = 0, value_offset = 0;
     uint64_t target = 0;
-    float eye[3] = {}, aim[3] = {};
+    float eye[3] = {}, aim[3] = {}, velocity[3] = {}, eye_velocity[3] = {};
     bool recent_shot = false;
 };
 
