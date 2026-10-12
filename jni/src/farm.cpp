@@ -160,6 +160,15 @@ constexpr int   kDepletedFrames = 10;    // дебаунс сырого чтен
 constexpr float kStuckTime     = 2.20f;  // нет продвижения к точке подхода
 constexpr float kEvadeTime     = 1.70f;  // ~0.6 назад + ~1.1 вбок
 constexpr int   kEvadeMax      = 4;
+// «Заперт в стволе» (фаза 3): поджим в лоб упирается коллайдером игрока в
+// собственный узел, луч при этом «чистый» (ray_self) и обычный обход
+// перекрытия не срабатывает. Лог 22.10: rd 1.56 м ровными 10 с при
+// reach 1.50 — все замахи woosh, крестик не спавнился, пока камера не
+// сдвинулась на 2° и бот не съехал сам. Лечение: нет сближения, пока палец
+// на стике, — боковой сдвиг, потом снова поджим.
+constexpr float kPressStuckSec = 1.20f;  // нет сближения в поджиме — боковой сдвиг
+constexpr float kStrafeTime    = 0.70f;  // длительность сдвига вокруг ствола
+constexpr int   kPressStrafeMax = 3;     // сколько сдвигов пробуем, потом — чёрный список
 constexpr float kBlockedTime   = 0.30f;  // узел перекрыт дольше — пробуем обойти
 // Сколько линия удара должна быть чистой подряд, чтобы простить счётчик обходов
 // перекрытого узла. Мгновенное прощение (как было) означало бесконечный бюджет:
@@ -219,6 +228,13 @@ static void UpdateFarmInner(float dt) {
     static float s_evadeDir = 1.f;    // +1 вправо, -1 влево
     static int   s_evadeCount = 0;
     static int   s_evadeWhy = 0;      // 0 нет, 1 застрял на подходе, 2 узел перекрыт
+    static float s_pressStuck = 0.f;  // фаза 3: время без сближения в поджиме
+    static float s_strafeTime = 0.f;  // > 0: идёт боковой сдвиг вокруг ствола
+    static float s_strafeDir = 1.f;   // +1 вправо, -1 влево
+    static int   s_strafeCount = 0;
+    static float s_lastPressDist = 1e9f;
+    static float s_lastMineHp = -1.f;  // прогресс добычи: hp/серия не падают —
+    static int   s_lastMineStreak = 0; // сдвиг не нужен, позиция рабочая
     static float s_walkOffTime = 0.f; // гистерезис отпускания джойстика
     static float s_joyX = 0.f, s_joyY = 0.f;         // сглаженный вектор стика
     static float s_noRayTime = 0.f;   // сколько подряд у игры нет луча прицела
@@ -252,6 +268,9 @@ static void UpdateFarmInner(float dt) {
         s_depletedFrames = 0;
         s_lastWalk = 1e9f; s_stuckTime = 0.f;
         s_evadeTime = 0.f; s_evadeCount = 0; s_evadeWhy = 0;
+        s_pressStuck = 0.f; s_strafeTime = 0.f; s_strafeCount = 0;
+        s_lastPressDist = 1e9f;
+        s_lastMineHp = -1.f; s_lastMineStreak = 0;
         s_walkOffTime = 0.f; s_noRayTime = 0.f;
         s_blindSwings = 0; s_blindHp = -1.f;
         s_candId = 0; s_candFrames = 0; s_flickerTime = 0.f;
@@ -555,6 +574,9 @@ static void UpdateFarmInner(float dt) {
                 (int)tgt.ray_valid, (int)tgt.ray_self, (int)tgt.ray_blocked, (int)tgt.ray_foreign);
         s_dbgPhase = phase;
         s_dbgHb = 0.f; s_dbgHbHp = tgt.node_health; s_dbgSwings = 0;
+        s_pressStuck = 0.f; s_lastPressDist = 1e9f;
+        s_lastMineHp = -1.f; s_lastMineStreak = 0;
+        if (phase == 2) s_strafeTime = 0.f;   // ушли в подход — сдвиг не нужен
     }
     // Сердечник в фазе удара: раз в 3 с — здоровье (и дельта), луч, крестик,
     // статус памяти-джойстика. По дельте видно, засчитываются ли удары.
@@ -707,6 +729,49 @@ static void UpdateFarmInner(float dt) {
             if (s_walkOffTime < kWalkOffHold) wantWalk = true; // держим, гасим дёрганье
         }
 
+        // «Заперт в стволе»: поджим ведётся (палец на стике), а дистанция до
+        // точки удара не сокращается — коллайдер игрока уткнулся в собственный
+        // узел. Обычный обход здесь молчит: луч чистый (ray_self — бьём в свой
+        // же узел), а watchdog сдаёт узел только через kGiveUpDrain. Лог 22.10:
+        // 10 с ровных woosh (rd 1.56 при reach 1.50), крестик не спавнился,
+        // пока камера не сдвинулась и бот сам не съехал на 0.4 м.
+        if (phase == 3 && s_moveDown && s_evadeTime <= 0.f && s_strafeTime <= 0.f) {
+            // «Прогресс» — как у watchdog отказа: hp падает или серия растёт.
+            // Пока добыча идёт, позиция рабочая (rd 1.40 при reach 1.50 —
+            // удары засчитываются), и сдвигать бота не надо: иначе рабочий
+            // узел уйдёт в чёрный список через 3 сдвига.
+            const bool mineProgress =
+                (tgt.node_health >= 0.f && s_lastMineHp >= 0.f &&
+                 tgt.node_health < s_lastMineHp - 0.01f) ||
+                tgt.streak > s_lastMineStreak;
+            const bool distProgress = distNow < s_lastPressDist - 0.10f;
+            s_lastMineHp = tgt.node_health;
+            s_lastMineStreak = tgt.streak;
+            if (mineProgress || distProgress) {
+                s_lastPressDist = distNow;
+                s_pressStuck = 0.f;
+            } else if ((s_pressStuck += dt) > kPressStuckSec) {
+                s_pressStuck = 0.f;
+                s_lastPressDist = 1e9f;
+                if (s_strafeCount < kPressStrafeMax) {
+                    s_strafeTime = kStrafeTime;
+                    s_strafeDir = (s_strafeCount % 2 == 0) ? 1.f : -1.f;
+                    ++s_strafeCount;
+                    benz_log("FARM ствол: сдвиг #%d rd=%.2f reach=%.2f id=%llu",
+                             s_strafeCount, (double)distNow, (double)tgt.melee_reach,
+                             tgt.id);
+                } else {
+                    // Обойти ствол не вышло — как тупик на подходе: узел в
+                    // чёрный список, дальше по списку.
+                    esp_farm_blacklist(tgt.id, 30.f);
+                    releaseAll();
+                    resetNode();
+                    s_settle = kSettleTime;
+                    return;
+                }
+            }
+        }
+
         if (wantWalk) {
             // Направление на цель задаёт сам вектор стика, камера лишь доводит
             // прицел до точки удара.
@@ -719,6 +784,13 @@ static void UpdateFarmInner(float dt) {
                 if (s_evadeTime > kEvadeTime - 0.6f) { wantX = 0.f;                  wantY = -0.90f; }
                 else                                 { wantX = 0.95f * s_evadeDir;   wantY =  0.35f; }
                 if (s_evadeTime <= 0.f) { s_evadeTime = 0.f; s_stuckTime = 0.f; s_lastWalk = 1e9f; }
+            } else if (s_strafeTime > 0.f) {
+                // Боковой сдвиг вокруг ствола: жёстко вбок и чуть вперёд —
+                // те же веса, что у обхода, камера смотрит на узел, так что
+                // «вбок» это перпендикуляр оси бот—узел.
+                s_strafeTime -= dt;
+                wantX = 0.95f * s_strafeDir;
+                wantY = 0.35f;
             } else {
                 // Мёртвая зона: пара градусов дрожания yaw не должна рулить
                 // вовсе — знак у почти нулевой ошибки меняется каждый кадр, и
