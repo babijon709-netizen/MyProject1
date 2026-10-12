@@ -237,7 +237,6 @@ inline std::uint64_t PMK_HEALTH = game_offsets::PMK_HEALTH;
 inline std::uint64_t ARP_LATEST_VALUE = game_offsets::ARP_LATEST_VALUE;
 inline std::uint64_t HEALTH_VALUE = game_offsets::HEALTH_VALUE;
 inline std::uint64_t VITALS_MAX_HEALTH = game_offsets::VITALS_MAX_HEALTH;
-inline std::uint64_t VITALS_LAST_DAMAGE = game_offsets::VITALS_LAST_DAMAGE;
 inline std::uint64_t TOD_SCAN_RVA_BEGIN = game_offsets::TOD_SCAN_RVA_BEGIN;
 inline std::uint64_t TOD_SCAN_RVA_END = game_offsets::TOD_SCAN_RVA_END;
 inline std::uint64_t TOD_SKY_CYCLE = game_offsets::TOD_SKY_CYCLE;
@@ -536,7 +535,6 @@ inline void Select(GameVersion version) {
         ARP_LATEST_VALUE = game_offsets_beta::ARP_LATEST_VALUE;
         HEALTH_VALUE = game_offsets_beta::HEALTH_VALUE;
         VITALS_MAX_HEALTH = game_offsets_beta::VITALS_MAX_HEALTH;
-        VITALS_LAST_DAMAGE = game_offsets_beta::VITALS_LAST_DAMAGE;
         TOD_SCAN_RVA_BEGIN = game_offsets_beta::TOD_SCAN_RVA_BEGIN;
         TOD_SCAN_RVA_END = game_offsets_beta::TOD_SCAN_RVA_END;
         TOD_SKY_CYCLE = game_offsets_beta::TOD_SKY_CYCLE;
@@ -832,7 +830,6 @@ inline void Select(GameVersion version) {
         ARP_LATEST_VALUE = game_offsets::ARP_LATEST_VALUE;
         HEALTH_VALUE = game_offsets::HEALTH_VALUE;
         VITALS_MAX_HEALTH = game_offsets::VITALS_MAX_HEALTH;
-        VITALS_LAST_DAMAGE = game_offsets::VITALS_LAST_DAMAGE;
         TOD_SCAN_RVA_BEGIN = game_offsets::TOD_SCAN_RVA_BEGIN;
         TOD_SCAN_RVA_END = game_offsets::TOD_SCAN_RVA_END;
         TOD_SKY_CYCLE = game_offsets::TOD_SKY_CYCLE;

@@ -9,7 +9,6 @@
 #include "aim.h"
 #include "silent_aim.h"
 #include "farm.h"
-#include "auto_heal.h"
 #include "widgets.h"
 #include "menu.h"
 #include "config.h"
@@ -441,10 +440,6 @@ int main(int argc, char* argv[]) {
         UpdateAim(ImGui::GetIO().DeltaTime);
         slowMark();   // 2: после аима
         UpdateFarm(ImGui::GetIO().DeltaTime);
-        // Автохил — сразу после фарма и ДО отрисовки меню: он живёт на своём
-        // синтетическом пальце (слот 1) и не мешает ни аиму, ни фарму; порядок
-        // важен лишь тем, что здоровье и урон читаются в кадре один раз.
-        UpdateAutoHeal(ImGui::GetIO().DeltaTime);
         slowMark();   // 3: после фарма
         // Индикация привязки (тосты «игра найдена / не найдена») убрана:
         // состояние видно по счётчику игроков в пилюле.

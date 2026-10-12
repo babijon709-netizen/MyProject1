@@ -243,9 +243,6 @@ inline constexpr std::uint64_t PMK_HEALTH = game_offsets::PMK_HEALTH;
 inline constexpr std::uint64_t ARP_LATEST_VALUE = game_offsets::ARP_LATEST_VALUE;
 inline constexpr std::uint64_t HEALTH_VALUE = game_offsets::HEALTH_VALUE;
 inline constexpr std::uint64_t VITALS_MAX_HEALTH = game_offsets::VITALS_MAX_HEALTH;
-// m_LastDamageTime лежит в PlayerVitals : EntityVitals; раскладки управляемых
-// полей у беты и релиза совпадают (см. шапку файла), поэтому значение то же.
-inline constexpr std::uint64_t VITALS_LAST_DAMAGE = game_offsets::VITALS_LAST_DAMAGE;
 inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDE40000;
 inline constexpr std::uint64_t TOD_SCAN_RVA_END = 0xDE60000; // beta 11957: ih (TOD_Sky) self slot 0xDE4E800, outer 0xDAEFC10
 inline constexpr std::uint64_t TOD_SKY_CYCLE = game_offsets::TOD_SKY_CYCLE;
