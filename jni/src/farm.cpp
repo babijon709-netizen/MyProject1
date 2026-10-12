@@ -245,6 +245,9 @@ static void UpdateFarmInner(float dt) {
     static float s_flickerTime = 0.f; // сколько держимся прежнего, с
     // Диаг-лог: переходы вкл/выкл, такт сердцебиения в фазе удара, фаза.
     static bool  s_dbgOn = false;
+    static bool  s_dbgTgt = false;    // есть цель (FARM STOP при потере — один раз)
+    static unsigned s_dbgMask = 0;    // последний залогированный mask (ON на смене бит)
+    static float s_prevNodeDist = 1e9f; // node_dist на прошлом кадре (телепорт-гард)
     static int   s_dbgPhase = 0;
     static float s_dbgHb = 0.f;       // с до следующего сердечника
     static float s_dbgHbHp = -1.f;    // здоровье на прошлом сердечнике
@@ -271,6 +274,7 @@ static void UpdateFarmInner(float dt) {
         s_pressStuck = 0.f; s_strafeTime = 0.f; s_strafeCount = 0;
         s_lastPressDist = 1e9f;
         s_lastMineHp = -1.f; s_lastMineStreak = 0;
+        s_prevNodeDist = 1e9f;
         s_walkOffTime = 0.f; s_noRayTime = 0.f;
         s_blindSwings = 0; s_blindHp = -1.f;
         s_candId = 0; s_candFrames = 0; s_flickerTime = 0.f;
@@ -292,8 +296,8 @@ static void UpdateFarmInner(float dt) {
     esp_farm_set_range(g_state.farm_range);
 
     if (mask == 0 || !g_esp_attached) {
-        if (s_dbgOn) benz_log("FARM OFF (mask=%u attached=%d)", (unsigned)mask, (int)g_esp_attached);
-        s_dbgOn = false; s_dbgPhase = 0; s_dbgSwings = 0;
+        if (s_dbgOn || s_dbgTgt) benz_log("FARM OFF (mask=%u attached=%d)", (unsigned)mask, (int)g_esp_attached);
+        s_dbgOn = false; s_dbgTgt = false; s_dbgPhase = 0; s_dbgSwings = 0;
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
         g_farmHpPct = -1.f; g_farmSpotLife = -1.f; g_farmBlocked = false;
@@ -301,9 +305,12 @@ static void UpdateFarmInner(float dt) {
         resetNode(); s_settle = 0.f; s_lostTime = 0.f;
         return;
     }
-    if (!s_dbgOn) {
+    // По строке на включение/смену битов, а не на кадр: в логе 23.10 пара
+    // FARM ON/STOP повторялась 60 раз в секунду, пока не было цели — STOP
+    // сбрасывал s_dbgOn, и ON перелогировался из ветки цели на каждом кадре.
+    if (!s_dbgOn || s_dbgMask != mask) {
         benz_log("FARM ON mask=%u range=%.1f", (unsigned)mask, (double)g_state.farm_range);
-        s_dbgOn = true; s_dbgSwings = 0;
+        s_dbgOn = true; s_dbgMask = mask; s_dbgSwings = 0;
     }
     // Aim owns the camera while tracking a player, and calibration owns the
     // physical touch used to select a control zone. Menu and popover windows
@@ -341,13 +348,13 @@ static void UpdateFarmInner(float dt) {
             s_camTurn = false; s_memPend = false; s_memWait = 0.f;
             return; // палец движения оставляем, где был
         }
-        if (s_dbgOn) {
-            // Фарм был активен, цель ушла: именно сюда уходил молча простоя
-            // «бот далеко стоит и не бьёт». reason=5 + большое camoff — поза
+        if (s_dbgTgt) {
+            // Цель была и пропала: именно сюда уходил молча простой «бот
+            // далеко стоит и не бьёт». reason=5 + большое camoff — поза
             // камеры протухла (см. camOffAllSources в game_farm.cpp).
             benz_log("FARM STOP reason=%d camoff=%.1f m nodes=%d",
                      g_farmReason, (double)esp_farm_cam_off(), g_farmNodes);
-            s_dbgOn = false; s_dbgPhase = 0; s_dbgSwings = 0;
+            s_dbgTgt = false; s_dbgPhase = 0; s_dbgSwings = 0;
         }
         g_farmActive = false;
         releaseAll();
@@ -358,6 +365,7 @@ static void UpdateFarmInner(float dt) {
         return;
     }
     s_lostTime = 0.f;
+    s_dbgTgt = true;
     g_farmActive = true;
     g_farmPaused = !driving;
     g_farmTgtDist = tgt.aim_dist;
@@ -437,6 +445,23 @@ static void UpdateFarmInner(float dt) {
                 tgt.tool_purposes, g_farmToolNeed);
         if (hadNode) { releaseAll(); s_settle = kSettleTime; }
     }
+
+    // Чтение позиции узла может стать мёртвым в момент его смерти (память
+    // transform освобождается): лог 23.10 — node_dist прыгнул 1.8 -> 85.7 м
+    // за кадр, и бот гонял призрак 13 секунд, пока узел не респавнился рядом.
+    // Узел и игрок за кадр (да и за фликер-заморозку до 1 с) больше 10 м не
+    // смещаются (спринт ~6.4 м/с) — это мёртвое чтение: узел в стоп.
+    if (s_nodeId == tgt.id && s_prevNodeDist < 1e8f &&
+        fabsf(tgt.node_dist - s_prevNodeDist) > 10.0f) {
+        benz_log("FARM узел: прыжок %.1f->%.1f m id=%llu — чтение мёртвое, узел в стоп",
+                 (double)s_prevNodeDist, (double)tgt.node_dist, tgt.id);
+        esp_farm_blacklist(tgt.id, 30.f);
+        releaseAll();
+        resetNode();
+        s_settle = kSettleTime;
+        return;
+    }
+    s_prevNodeDist = tgt.node_dist;
 
     // Уже добытый узел уходит в чёрный список на месте, а не обходится кругами:
     // подборщик вернулся бы к нему, только когда в радиусе ничего нет, а танцы
@@ -1015,6 +1040,17 @@ static void UpdateFarmInner(float dt) {
     // ---- watchdog'и ------------------------------------------------------------
     if (phase == 2) {
         s_mineTime = 0.f;
+        // Сердечник подхода: раньше фаза 2 молчала целиком, и 13-секундные
+        // провалы (бот гоняет призрак мёртвого узла) в логе были просто
+        // пустотой. Раз в 3 с — куда идём и насколько далеко.
+        s_dbgHb += dt;
+        if (s_dbgHb >= 3.f) {
+            s_dbgHb = 0.f;
+            benz_log("WALK id=%llu dist=%.1f walk=%.1f camoff=%.1f ray=%d blk=%d fgn=%d",
+                     tgt.id, (double)tgt.node_dist, (double)tgt.walk_dist,
+                     (double)tgt.cam_off, (int)tgt.ray_valid,
+                     (int)tgt.ray_blocked, (int)tgt.ray_foreign);
+        }
         // Нет продвижения к точке подхода — упёрлись в препятствие. Сначала
         // пробуем обойти (назад + вбок, чередуя стороны), и только когда
         // манёвры не помогают, узел уходит в чёрный список. Меряем именно

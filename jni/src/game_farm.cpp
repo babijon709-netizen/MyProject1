@@ -704,10 +704,10 @@ static bool farm_ore_anchor_point(const FarmEntity& node, Vec3& out, float& dist
 // дистанцию до ресурса от призрака — ходил не туда, а фаза удара не наступала
 // вовсе. Поэтому:
 //   (a) walk_dist меряется от КОРНЯ ИГРОКА (ходит игрок, не камера);
-//   (b) aim_3d, если origin дальше kCamOffTrust от глаза (корень + 1.5 м),
-//       пересчитывается от корня: глаз над корнем, горизонталь не меняется;
-//   (c) g_farm_cam_off пишется в benzware.log — живая камера 1.5–3 м,
-//       > 6 м поза протухла, > 25 м все источники отклонены и фарм в простое.
+//   (b) aim_3d, если origin дальше 2.5 м от local, пересчитывается от local
+//       (лог 23.10: источник луча игры == local, оффсета «+1.5 м» нет);
+//   (c) g_farm_cam_off пишется в benzware.log — здор. origin 0–0.5 м от local,
+//       > 2.5 м поза протухла, > 25 м все источники отклонены и фарм в простое.
 static float g_farm_cam_off = -1.f;
 
 float esp_farm_cam_off() { return g_farm_cam_off; }
@@ -1128,22 +1128,23 @@ bool esp_farm_get_target(FarmTarget& out) {
     // на 1.5 м, а вся дальность удара — пара метров.
     // ИСКЛЮЧЕНИЕ — протухшая поза: origin в 25-метровом окне может стоять на
     // мёртвой точке (лог 21.10: 343 м от игрока), и тогда «честный» aim_3d —
-    // просто мусор. Здоровая камера ближе kCamOffTrust к глаз (корень + 1.5 м);
-    // дальше — пересчитываем от корня: глаз над корнем, горизонталь
-    // (aim_dist) не меняется, вертикаль — известный оффсет.
+    // просто мусор. Лог 23.10 показал метрику игры: rd (дистанция собственного
+    // луча) и aim_3d равны в сантиметрах, camoff = 0.0 — источник луча игры
+    // совпадает с g_frame_local_pos, «глаз +1.5 м над корнем» здесь не верен.
+    // Значит запасная метрика — дистанция от local БЕЗ оффсета; окно доверия
+    // к origin — от local, 2.5 м (здоровый origin в 0.1 м, протухший — в десятках).
     float aim_3d = 0.f;
     {
-        constexpr float kEyeAboveRoot = 1.5F;
-        constexpr float kCamOffTrust  = 6.0F;
+        constexpr float kCamOffTrust = 2.5F;
         if (g_frame_local_valid) {
             const float ex = origin.x - g_frame_local_pos.x;
-            const float ey = origin.y - (g_frame_local_pos.y + kEyeAboveRoot);
+            const float ey = origin.y - g_frame_local_pos.y;
             const float ez = origin.z - g_frame_local_pos.z;
             if (ex * ex + ey * ey + ez * ez <= kCamOffTrust * kCamOffTrust) {
                 const float dx = aim.x - origin.x, dy = aim.y - origin.y, dz = aim.z - origin.z;
                 aim_3d = sqrtf(dx * dx + dy * dy + dz * dz);
             } else {
-                const float dy = aim.y - (g_frame_local_pos.y + kEyeAboveRoot);
+                const float dy = aim.y - g_frame_local_pos.y;
                 aim_3d = sqrtf(aim_dist * aim_dist + dy * dy);
             }
         } else {
