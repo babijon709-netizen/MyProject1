@@ -37,6 +37,7 @@ namespace farmjoy {
 namespace {
 
 constexpr float kStickMax  = 1.00f;   // предел магнитуды стика
+constexpr float kProbeMax  = 0.60f;   // предел магнитуды непроверенного слота ввода
 constexpr float kTrialTime = 0.45f;   // сколько ведём кандидата «на пробу», с
 constexpr float kTrialGood = 0.12f;   // сближение, достаточное для подтверждения, м
 constexpr float kTrialBack = 0.35f;   // на столько ушли от цели — кандидат не тот, м
@@ -327,11 +328,21 @@ void tick(float dt) {
     }
 }
 
+// Слоты ввода (Nullable<Vector2> хендлера) могут оказаться и «взглядом»:
+// пока кандидат не подтверждён, ведём их мягче. Для проверки по сближению
+// этого хватает с запасом (нужно около 0.27 м/с, а ходьба даёт метры в
+// секунду), зато камеру, если слот окажется взглядом, тянет в разы слабее.
+bool probe_slot(int candidate) {
+    return candidate == C_OVR_A || candidate == C_OVR_B ||
+           candidate == C_OVR_A_S || candidate == C_OVR_B_S;
+}
+
 bool command(float x, float y) {
     if (!std::isfinite(x) || !std::isfinite(y)) { release(); return false; }
+    const float limit = (!s_confirmed && probe_slot(s_cur)) ? kProbeMax : kStickMax;
     const float len = sqrtf(x * x + y * y);
-    if (len > kStickMax && len > 0.0f) {
-        const float k = kStickMax / len;
+    if (len > limit && len > 0.0f) {
+        const float k = limit / len;
         x *= k;
         y *= k;
     }

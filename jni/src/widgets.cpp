@@ -785,21 +785,27 @@ static float DrawPopoverContentFG(ImDrawList* fg, ImFont* fn, float fs, int secI
         FgToggleRow(XS("Автофарм"), &g_state.farm_on, g_state.a_farm_on, false);
         // Джойстик движения ведётся ПАМЯТЬЮ игры (farm_joy.cpp): синтетического
         // тача по зоне стика больше нет, калибровать нечего. Вместо калибровки —
-        // состояние: какой слой ввода игра реально слушает (номер кандидата —
-        // #1 стик UI, #2 слот A, #3 слот B, #4 канал движения, #5 ввод игрока,
-        // #6/#7 те же слоты в запасной раскладке) и с какой скоростью бот
-        // сближается с целью. Номер с точкой — кандидат
-        // подтверждён (именно он ведёт ходьбу), без точки — идёт проба; прочерк с
-        // причиной — писать пока некуда (farmjoy::why_text).
+        // состояние: какой слой ввода игра реально слушает («стик UI», «слот A/B»
+        // в двух раскладках Nullable, «канал» движения, «ввод игрока») и как
+        // быстро бот сближается с целью, м/с. Точка у значения — кандидат
+        // подтверждён фактическим сближением (именно он ведёт ходьбу), «×N» —
+        // сколько его проб не подтвердилось; прочерк с причиной — писать пока
+        // некуда (farmjoy::why_text).
         {
             const farmjoy::Status js = farmjoy::status();
             const float cy2 = curY + rH * 0.5f;
             fg->AddText(fn, fs * 1.15f,
                 {cX + inset + padX, cy2 - fs * 1.15f * 0.5f},
                 C::UA(C::Txt(), alpha), XS("Джойстик"));
-            char jv[48];
-            if (js.writes > 0)
-                snprintf(jv, sizeof(jv), "#%d · %.1f %s", js.candidate + 1,
+            char jv[64];
+            const int fails = js.fails[js.candidate];
+            if (js.writes > 0 && fails > 0)
+                snprintf(jv, sizeof(jv), "%s ×%d · %.1f %s",
+                         farmjoy::candidate_name(js.candidate), fails,
+                         fabsf(js.closing_mps), XS("м/с"));
+            else if (js.writes > 0)
+                snprintf(jv, sizeof(jv), "%s · %.1f %s",
+                         farmjoy::candidate_name(js.candidate),
                          fabsf(js.closing_mps), XS("м/с"));
             else
                 snprintf(jv, sizeof(jv), "— %s", farmjoy::why_text(js.why));
