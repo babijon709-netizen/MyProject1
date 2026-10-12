@@ -676,12 +676,30 @@ static void UpdateFarmInner(float dt) {
                 }
                 if (s_walkOffTime > 0.f) { wantX = 0.f; wantY = 0.f; }  // доезжаем к центру
             }
-            // Гладим вектор к нужному отклонению вместо телепорта: прежний
-            // сглаженный тач делал то же самое с позицией пальца, и на памяти
-            // ощущение хода должно остаться прежним — 26/с, 90% пути за ~90 мс.
-            const float k = 1.f - expf(-26.f * dt);
-            s_joyX += (wantX - s_joyX) * k;
-            s_joyY += (wantY - s_joyY) * k;
+            // Гладим ТОЛЬКО направление, а к краю стик встаёт с первого кадра.
+            // Раньше сглаживался весь вектор, и при смене курса (камера доводит
+            // прицел, вектор стика едет за ней) его магнитуда висела на 0.9
+            // вместо 1.0 — игра, которая считает бег по отклонению стика, в этом
+            // случае ведёт пешком. Угол по-прежнему ведём 26/с (90% пути за
+            // ~90 мс), так что «дёрганья» руля нет, а отклонение всегда полное.
+            const float wantLen = sqrtf(wantX * wantX + wantY * wantY);
+            if (wantLen > 1e-4f) {
+                float ax = wantX / wantLen, ay = wantY / wantLen;
+                const float curLen = sqrtf(s_joyX * s_joyX + s_joyY * s_joyY);
+                if (curLen > 1e-3f) {
+                    const float k = 1.f - expf(-26.f * dt);
+                    const float cx = s_joyX / curLen + (ax - s_joyX / curLen) * k;
+                    const float cy = s_joyY / curLen + (ay - s_joyY / curLen) * k;
+                    const float cl = sqrtf(cx * cx + cy * cy);
+                    if (cl > 1e-4f) { ax = cx / cl; ay = cy / cl; }
+                }
+                const float mag = (wantLen > 1.f) ? 1.f : wantLen;
+                s_joyX = ax * mag;
+                s_joyY = ay * mag;
+            } else {
+                s_joyX = 0.f;
+                s_joyY = 0.f;
+            }
             farmjoy::command(s_joyX, s_joyY);
             s_moveDown = true;
         } else if (s_moveDown) {
