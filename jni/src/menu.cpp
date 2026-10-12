@@ -418,7 +418,8 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Видимость"));
         {
             const float visRowH = Layout::RowH;
-            CardBg(visRowH * 2.f);
+            // Три строки: тумблер, состояние меша карты, состояние построек.
+            CardBg(visRowH * 3.f);
             ToggleRow("##vvis", XS("Видимость"), &g_state.esp_vis, g_state.a_esp_vis, false, true);
             auto pos = ImGui::GetCursorScreenPos();
             const float availW = ImGui::GetContentRegionAvail().x;
@@ -446,6 +447,33 @@ float TabContent(int tab, float dt, float cW) {
                          {pos.x + availW - Layout::Inset - Layout::PadX - visTw,
                           pos.y + visRowH * 0.5f - fs2 * 0.44f},
                          C::UA(C::Acc(), 1.f), visTxt);
+
+            // Постройки игроков: отдельная строка, потому что это отдельный
+            // источник геометрии (каталог префабов + проход по spawned), и его
+            // состояние чинится иначе — не «положить map.obj», а «дополнить
+            // каталог». Числа: треугольники в дереве / имена без совпадения.
+            auto pos3 = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##vvis_dyn", {availW, visRowH});
+            const char* dynTxt = vis_dyn::status_text();
+            const float dynTw = ImGui::CalcTextSize(dynTxt).x;
+            // Слева — каталог префабов и сколько их там прочитано. strrchr для
+            // каталога не годится (это не путь к файлу), поэтому узкий вариант —
+            // просто число префабов, а не «имя файла».
+            char dynPath[96], dynNarrow[24];
+            snprintf(dynPath, sizeof(dynPath), "%s (%zu)", vis_map::pieces_dir(),
+                     vis_dyn::lib_entries());
+            snprintf(dynNarrow, sizeof(dynNarrow), "%zu", vis_dyn::lib_entries());
+            const char* dynLeft = dynPath;
+            if (ImGui::CalcTextSize(dynPath).x >
+                availW - Layout::Inset * 2.f - Layout::PadX * 2.f - dynTw - 12.f)
+                dynLeft = dynNarrow;
+            dl2->AddText(fn2, fs2 * 0.88f,
+                         {pos3.x + Layout::Inset + Layout::PadX, pos3.y + visRowH * 0.5f - fs2 * 0.44f},
+                         C::UA(C::Dim(), 1.f), dynLeft);
+            dl2->AddText(fn2, fs2 * 0.88f,
+                         {pos3.x + availW - Layout::Inset - Layout::PadX - dynTw,
+                          pos3.y + visRowH * 0.5f - fs2 * 0.44f},
+                         C::UA(C::Acc(), 1.f), dynTxt);
         }
 
         ImGui::Dummy({1.f, 12.f});

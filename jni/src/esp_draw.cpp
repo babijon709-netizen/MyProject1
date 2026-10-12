@@ -10,6 +10,7 @@
 #include "esp_box_hold.h"        // состав боксов/маркеров на кадр
 #include "overlay_geometry.h"
 #include "vis_check_map.h"      // geo-проверка видимости по мешу карты
+#include "game_internal.h"        // vis_dyn_collect: проход по spawned за постройками
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -104,6 +105,11 @@ static void ApplyVisCheck(std::vector<EspBox>& out) {
     if (!esp_frame_camera_position(eye)) return;   // кадра нет — и проверять не от чего
     vis_map::frame_begin();
     vis_map::request(true);
+    // Постройки игроков в меше карты не лежат: их дерево собирается отдельным
+    // чанковым проходом по Mirror.NetworkClient.spawned (game_markers.cpp).
+    // Зовётся здесь, а не в game.cpp, потому что нужна позиция камеры кадра и
+    // только когда проверка вообще включена.
+    vis_dyn_collect(eye);
     float pts[vis_map::kMaxPointsPerBox][3] = {};
     for (EspBox& box : out) {
         box.visible = true;

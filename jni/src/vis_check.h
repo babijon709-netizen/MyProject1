@@ -23,8 +23,11 @@
 //   * точки тела — мировые кости кадра ESP (game.cpp -> EspBox.anchor_bone);
 //   * глаз       — позиция камеры кадра (esp_frame_camera_position).
 // Динамику (постройки игроков, двери, мешки) статический меш не знает: их в нём
-// просто нет, и такие стены проверку не перекрывают. Террейн, скалы, деревья и
-// статические строения карты — перекрывают.
+// просто нет. Террейн, скалы, деревья и статические строения карты — перекрывает
+// он; постройки — второе дерево, собранное из префабов и мировых трансформов
+// (vis_check_dyn.h, слой vis_map). Этот файл остаётся std-only: повороты и
+// инстанс меша в мир нужны ровно для того, чтобы динамика собиралась снаружи,
+// не трогая ядро обхода.
 
 #include <algorithm>
 #include <cmath>
@@ -58,12 +61,92 @@ inline Vec3 Max3(const Vec3& a, const Vec3& b) { return {std::max(a.x, b.x), std
 
 struct Tri { Vec3 a, b, c; };
 
+
 struct AABB {
     Vec3 mn{ std::numeric_limits<float>::max(),  std::numeric_limits<float>::max(),  std::numeric_limits<float>::max()};
     Vec3 mx{-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
     void Grow(const Vec3& p) { mn = Min3(mn, p); mx = Max3(mx, p); }
     void Grow(const Tri& t) { Grow(t.a); Grow(t.b); Grow(t.c); }
 };
+
+// ---- Поворот/перенос: инстанс меша в мир -----------------------------------
+// Зачем. Динамика (постройки игроков) живёт в мире как ПРЕФАБ + мировой TRS:
+// сам префаб экспортируется один раз, а положение каждого куска читается из
+// иерархии трансформов игры (read_transform_hierarchy_layout даёт и позицию, и
+// мировой поворот). Поэтому меш библиотеки разворачивается в мир здесь, а не
+// правится в файле.
+struct Quat {
+    float x = 0, y = 0, z = 0, w = 1;
+    Quat() = default;
+    Quat(float X, float Y, float Z, float W) : x(X), y(Y), z(Z), w(W) {}
+};
+
+inline Quat QuatNormalized(const Quat& q) {
+    const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (!(n > 1e-6f) || !std::isfinite(n)) return Quat{0, 0, 0, 1};
+    const float inv = 1.0f / n;
+    return Quat{q.x * inv, q.y * inv, q.z * inv, q.w * inv};
+}
+
+// v' = q * v * q^-1, разложенное (тот же результат, что у проекта в game.cpp,
+// но без зависимости от него: vis_check.h остаётся std-only).
+inline Vec3 RotateByQuat(const Quat& q, const Vec3& v) {
+    const Vec3 u{q.x, q.y, q.z};
+    const float s = q.w;
+    const Vec3 t = Cross(u, v) * 2.0f;
+    return v + t * s + Cross(u, t);
+}
+
+inline Vec3 TransformPoint(const Vec3& p, const Vec3& pos, const Quat& rot, float scale = 1.0f) {
+    return RotateByQuat(rot, p * scale) + pos;
+}
+
+inline Tri TransformTri(const Tri& t, const Vec3& pos, const Quat& rot, float scale = 1.0f) {
+    return {TransformPoint(t.a, pos, rot, scale),
+            TransformPoint(t.b, pos, rot, scale),
+            TransformPoint(t.c, pos, rot, scale)};
+}
+
+// Локальный габарит набора треугольников: по нему делается и коробка-замена,
+// когда меша этого имени в библиотеке нет, и проверка «похоже ли на правду».
+inline bool LocalBounds(const Tri* tris, size_t n, Vec3& center, Vec3& extents) {
+    if (tris == nullptr || n == 0) return false;
+    AABB b;
+    for (size_t i = 0; i < n; ++i) b.Grow(tris[i]);
+    if (!(b.mn.x <= b.mx.x)) return false;   // пустой/неинициализированный AABB
+    center  = (b.mx + b.mn) * 0.5f;
+    extents = (b.mx - b.mn) * 0.5f;
+    return std::isfinite(center.x) && std::isfinite(center.y) && std::isfinite(center.z) &&
+           std::isfinite(extents.x) && std::isfinite(extents.y) && std::isfinite(extents.z);
+}
+
+// 12 треугольников из oriented box: центр/полуоси в локальных координатах,
+// разворот и перенос — мировые. Это и есть инстанс куска постройки.
+inline void AppendObb(const Vec3& center, const Vec3& extents,
+                      const Vec3& pos, const Quat& rot, float scale,
+                      std::vector<Tri>& out) {
+    const float ex = extents.x * scale, ey = extents.y * scale, ez = extents.z * scale;
+    if (!(ex > 1e-4f) || !(ey > 1e-4f) || !(ez > 1e-4f)) return;
+    if (!std::isfinite(ex) || !std::isfinite(ey) || !std::isfinite(ez)) return;
+    Vec3 c[8];
+    for (int i = 0; i < 8; ++i) {
+        const Vec3 local{
+            center.x * scale + ((i & 1) ? ex : -ex),
+            center.y * scale + ((i & 2) ? ey : -ey),
+            center.z * scale + ((i & 4) ? ez : -ez)};
+        // scale уже применён к полуосям и к центру: второй раз умножать нельзя.
+        c[i] = TransformPoint(local, pos, rot, 1.0f);
+    }
+    // 6 граней по 2 треугольника. Направления граней здесь не важны: RayTri
+    // двусторонний (det может быть отрицательным), луч всё равно ловится.
+    static const int kFaces[6][4] = {
+        {0, 1, 3, 2}, {4, 6, 7, 5}, {0, 4, 5, 1},
+        {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 5, 7, 3}};
+    for (const auto& f : kFaces) {
+        out.push_back({c[f[0]], c[f[1]], c[f[2]]});
+        out.push_back({c[f[0]], c[f[2]], c[f[3]]});
+    }
+}
 
 // Moller-Trumbore, двусторонний. Возвращает расстояние попадания в t.
 inline bool RayTri(const Vec3& o, const Vec3& d, const Tri& tr, float tMax, float& t) {

@@ -16,23 +16,32 @@
 //   * бюджет лучей на кадр: у проверки есть цена, и она не должна влиять на
 //     кадр оверлея даже в толпе.
 //
-// Чего проверка НЕ знает: динамики. Постройки игроков, двери, турели, чужие
-// стены в меше карты не лежат — их никто не экспортировал, они появляются в
-// мире в рантайме. Террейн, скалы, деревья, статические строения карты
-// перекрывают нормально.
+// Деревьев два. Статика — меш карты (террейн, скалы, деревья, статические
+// строения). Динамика — постройки игроков: они спавнятся в рантайме, поэтому
+// собираются как ПРЕФАБ из каталога <CfgDir>/pieces/ плюс мировой TRS каждого
+// поставленного куска, прочитанный из памяти (коллектор vis_dyn_collect в
+// game_markers.cpp). Луч гоняется по обоим: перекрытие в любом из них гасит
+// цель. Каталог пуст — динамика молчит, статика продолжает работать.
 //
-// Путь к мешу: <CfgDir>/map.obj по умолчанию, переопределяется боковым файлом
-// <CfgDir>/vismap.txt (одна строка — путь), как .mode у режима чтения.
+// Пути: <CfgDir>/map.obj и <CfgDir>/pieces/, переопределяются боковым файлом
+// <CfgDir>/vismap.txt (как .mode у режима чтения). Формат бокового файла:
+//   mesh=/data/local/benzware/map.obj
+//   pieces=/data/local/benzware/pieces
+//   radius=120
+// Строка без «=» по-прежнему понимается как путь к мешу (старый формат).
 
 #include "vis_check.h"
+#include "vis_check_dyn.h"   // постройки игроков: библиотека префабов + второе дерево
 #include "config.h"
 #include "hud.h"      // ShowToast — о состоянии карты сообщаем тостом с кадра
 #include "str.h"      // XS_RU: строки пути шифруются, как и остальные
 
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -88,6 +97,10 @@ inline std::atomic<int>    g_toast_pending{0};
 // ---- Путь ------------------------------------------------------------------
 inline char g_path[256] = {};
 inline bool g_path_ready = false;
+// Каталог префабов построек (динамика) и радиус, в котором куски вообще
+// собираются в дерево. Оба переопределяются тем же боковым файлом.
+inline char   g_pieces_dir[256] = {};
+inline float  g_radius = 120.0f;
 
 inline const char* sidecar_path() {
     static std::string s = std::string(CfgDir()) + XS_RU("vismap.txt");
@@ -99,10 +112,53 @@ inline const char* default_mesh_path() {
     return s.c_str();
 }
 
+inline const char* default_pieces_dir() {
+    static std::string s = std::string(CfgDir()) + XS_RU("pieces/");
+    return s.c_str();
+}
+
 inline void set_mesh_path_quiet(const char* path) {
     if (path == nullptr || path[0] == '\0') return;
     std::snprintf(g_path, sizeof(g_path), "%s", path);
     g_path_ready = true;
+}
+
+inline void set_pieces_dir_quiet(const char* dir) {
+    if (dir == nullptr || dir[0] == '\0') return;
+    std::snprintf(g_pieces_dir, sizeof(g_pieces_dir), "%s", dir);
+}
+
+// Радиус держим в здравых пределах: 10 м не закроет даже одну базу, а 2 км
+// превратят проход по spawned в чтение всей карты каждый цикл.
+inline void set_radius_quiet(float r) {
+    if (!std::isfinite(r) || r < 10.0f || r > 2000.0f) return;
+    g_radius = r;
+}
+
+inline float radius() { return g_radius; }
+inline const char* pieces_dir() { return g_pieces_dir[0] ? g_pieces_dir : default_pieces_dir(); }
+
+// Одна строка бокового файла. Пустая строка или строка без «=» — это путь к
+// мешу (старый формат, одна строка); остальное — директивы:
+//   pieces=/data/local/benzware/pieces
+//   radius=120
+inline void apply_sidecar_line(const char* raw) {
+    char line[256] = {};
+    std::snprintf(line, sizeof(line), "%s", raw);
+    for (char* p = line; *p; ++p)
+        if (*p == '\n' || *p == '\r') { *p = '\0'; break; }
+    char* key = line;
+    while (*key == ' ' || *key == '\t') ++key;
+    if (*key == '\0' || *key == '#') return;
+    char* eq = std::strchr(key, '=');
+    if (eq == nullptr) { set_mesh_path_quiet(key); return; }
+    *eq = '\0';
+    char* val = eq + 1;
+    while (*val == ' ' || *val == '\t') ++val;
+    for (char* p = key; *p; ++p) *p = (char)std::tolower((unsigned char)*p);
+    if (std::strcmp(key, "pieces") == 0)       set_pieces_dir_quiet(val);
+    else if (std::strcmp(key, "radius") == 0)  set_radius_quiet((float)std::atof(val));
+    else if (std::strcmp(key, "mesh") == 0)    set_mesh_path_quiet(val);
 }
 
 // Читаем боковой файл один раз за запуск (как .mode у режима чтения).
@@ -110,13 +166,11 @@ inline void ensure_path() {
     if (g_path_ready) return;
     g_path_ready = true;
     set_mesh_path_quiet(default_mesh_path());
+    set_pieces_dir_quiet(default_pieces_dir());
     FILE* f = std::fopen(sidecar_path(), "r");
     if (f == nullptr) return;
     char line[256] = {};
-    if (std::fgets(line, sizeof(line), f) != nullptr) {
-        for (char* p = line; *p; ++p) if (*p == '\n' || *p == '\r') { *p = '\0'; break; }
-        if (line[0] != '\0') set_mesh_path_quiet(line);
-    }
+    while (std::fgets(line, sizeof(line), f) != nullptr) apply_sidecar_line(line);
     std::fclose(f);
 }
 
@@ -164,6 +218,36 @@ inline const char* status_text() {
     return s;
 }
 
+// ---- Динамика (постройки) --------------------------------------------------
+// Единственный владелец дерева построек — этот слой: vis_dyn считает геометрию
+// (чистая функция build), а результат публикуется сюда и читается кадром
+// проверки. Второй такой же указатель в vis_dyn держать нельзя — тогда кадры
+// начинают читать разные деревья и цель «мигает» на половине лучей.
+inline std::shared_ptr<const vis::Bvh> g_dyn;
+inline void publish_dyn(std::shared_ptr<const vis::Bvh> bvh) {
+    std::atomic_store_explicit(&g_dyn, bvh, std::memory_order_release);
+}
+inline std::shared_ptr<const vis::Bvh> dyn_tree() {
+    return std::atomic_load_explicit(&g_dyn, std::memory_order_acquire);
+}
+
+// Пересборка дерева построек: геометрию считает vis_dyn (чистая функция), а
+// публикует и считает показания — этот слой. Коллектор в game_markers.cpp зовёт
+// её один раз на завершённый проход по spawned.
+// extra_unmatched — куски в радиусе, которым библиотека не дала геометрию
+// (имя не совпало ни с одним префабом, либо трансформ не прочитался). В само
+// дерево они не попадают, но в показания меню попадают обязательно: это сигнал
+// «дополни каталог префабов», а не молчаливая дыра в перекрытии.
+inline size_t rebuild_dynamic(const std::vector<vis_dyn::Piece>& pieces,
+                              const vis_dyn::Library& lib, size_t extra_unmatched = 0) {
+    size_t instanced = 0, unmatched = 0;
+    auto built = vis_dyn::build(pieces, lib, &instanced, &unmatched);
+    const size_t tris = built ? built->TriCount() : 0;
+    vis_dyn::set_counts(tris, instanced, unmatched + extra_unmatched);
+    publish_dyn(built);
+    return instanced;
+}
+
 // ---- Фоновый поток ---------------------------------------------------------
 // Тост только на смену состояния: «нет файла» исторгается один раз, а не
 // каждые пять секунд, пока проверка включена, а меша нет.
@@ -186,7 +270,25 @@ inline void publish(std::shared_ptr<const vis::Bvh> bvh) {
     g_status.store(VIS_STATUS_READY, std::memory_order_relaxed);
 }
 
+// Библиотека префабов не зависит от меша карты: динамика обязана работать и на
+// голой статике, и вообще без неё (только постройки). Поэтому грузим в начале
+// прохода, а не после успеха/отказа меша. Каталог пуст или отсутствует — не
+// ошибка, а «динамика молчит».
+inline std::atomic<bool> g_lib_attempted{false};
+inline void load_library() {
+    if (vis_dyn::library()) return;
+    // Пробуем один раз за запуск: пустого каталога нет смысла перечитывать
+    // каждые kRetrySeconds, а дополняют его всё равно с перезапуском.
+    bool expected = false;
+    if (!g_lib_attempted.compare_exchange_strong(expected, true)) return;
+    auto lib = std::make_shared<vis_dyn::Library>();
+    vis_dyn::LoadDir(*lib, pieces_dir(), kMeshScale, kMeshYUpToZUp);
+    if (lib->size() == 0) { vis_dyn::publish_library({}); return; }
+    vis_dyn::publish_library(lib);
+}
+
 inline void worker(std::string path) {
+    load_library();
     const std::string cache = path + XS_RU(".bvh");
     struct stat so {};
     struct stat sc {};
@@ -240,6 +342,20 @@ inline void start_load() {
     }).detach();
 }
 
+// ---- Подстановка деревьев для тестов ---------------------------------------
+// Host-тест не может поднять фоновый поток на реальном файле и не имеет памяти
+// игры, поэтому деревья подставляются напрямую. В бою эти функции не зовутся:
+// статика приходит из worker(), динамика — из vis_dyn_collect().
+inline void set_tree_for_test(std::shared_ptr<const vis::Bvh> bvh) {
+    g_tris.store(bvh ? bvh->TriCount() : 0, std::memory_order_relaxed);
+    std::atomic_store_explicit(&g_bvh, bvh, std::memory_order_release);
+    g_status.store(bvh && !bvh->Empty() ? VIS_STATUS_READY : VIS_STATUS_OFF,
+                   std::memory_order_relaxed);
+}
+inline void set_dyn_for_test(std::shared_ptr<const vis::Bvh> bvh) {
+    std::atomic_store_explicit(&g_dyn, bvh, std::memory_order_release);
+}
+
 // ---- Кадр ------------------------------------------------------------------
 // Зовётся каждый кадр с флагом «проверка нужна» (ESP «Видимость» или аим
 // «Только видимых»). Включение поднимает загрузку один раз; выключение дерево
@@ -282,7 +398,8 @@ inline std::unordered_map<uint64_t, Hit>& cache() {
     return m;
 }
 
-// Начало кадра проверки: счётчики бюджета, тосты, чистка кэша целей.
+// Начало кадра проверки: счётчики бюджета, тосты, снимок дерева построек,
+// чистка кэша целей.
 inline void frame_begin() {
     ++g_frame;
     g_rays_this_frame = 0;
@@ -302,13 +419,20 @@ inline void frame_begin() {
     if (cache().size() > 256) cache().clear();
 }
 
-// true — цель НЕ перекрыта (или проверка невозможна: дерева нет, бюджет
+// true — цель НЕ перекрыта (или проверка невозможна: деревьев нет, бюджет
 // кончился, точки невалидны). Неизвестность всегда отдаётся как «видна»:
 // молчащая проверка не должна гасить визуалы и выкидывать цель из аима.
+//
+// Луч гоняется по ОБОИМ деревьям: статика (меш карты) и динамика (постройки).
+// Достаточно любого из них — поэтому проверка работает и без меша карты, если
+// есть библиотека префабов, и наоборот.
 inline bool visible(uint64_t id, const float eye[3], const float (*pts)[3], int n) {
     std::shared_ptr<const vis::Bvh> bvh =
         std::atomic_load_explicit(&g_bvh, std::memory_order_acquire);
-    if (!bvh || bvh->Empty() || pts == nullptr || n <= 0 || eye == nullptr) return true;
+    std::shared_ptr<const vis::Bvh> dyn = dyn_tree();
+    const bool have_static = bvh && !bvh->Empty();
+    const bool have_dyn    = dyn && !dyn->Empty();
+    if ((!have_static && !have_dyn) || pts == nullptr || n <= 0 || eye == nullptr) return true;
 
     Hit& hit = cache()[id];
     // Цель уже проверена в этом кадре (FrameBoxes зовётся и оверлеем, и аимом,
@@ -330,7 +454,10 @@ inline bool visible(uint64_t id, const float eye[3], const float (*pts)[3], int 
         // дистанции — иначе в упор (цель в метре) луч обрезался бы в ноль.
         const float pad = len * 0.25f < 0.5f ? len * 0.25f : 0.5f;
         ++g_rays_this_frame;
-        if (!bvh->Occluded(eye_v, p, pad)) { clear_any = true; break; }
+        if (have_static && bvh->Occluded(eye_v, p, pad)) continue;
+        if (have_dyn && dyn->Occluded(eye_v, p, pad)) continue;
+        clear_any = true;
+        break;
     }
 
     if (clear_any) {

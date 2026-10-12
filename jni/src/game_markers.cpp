@@ -6,6 +6,7 @@
 #include "game_offsets_active.h"   // оффсеты (go_active)
 #include "manes_aim_source.h"
 #include "lang.h"
+#include "vis_check_map.h"   // динамика видимости: библиотека префабов + дерево построек
 #include <algorithm>
 #include <cstring>
 #include <cmath>
@@ -1550,6 +1551,11 @@ static void schedule_next_marker_scan(MarkerScanResult result, double now) {
     else g_marker_next_scan = now + (g_marker_entities.empty() ? 0.25 : 1.0);
 }
 
+// Сброс кэша имён и незавершённого прохода динамики (определение внизу файла,
+// рядом с самим проходом): после перезагрузки мира указатели NetworkIdentity
+// переиспользуются, и чужое имя куска осталось бы в кэше навсегда.
+static void vis_dyn_reset();
+
 void reset_marker_caches() {
     g_marker_entities.clear();
     g_marker_next_scan = 0.0;
@@ -1563,6 +1569,7 @@ void reset_marker_caches() {
     g_farm_entities.clear();
     g_farm_blacklist.clear();
     farm_scan_reset();
+    vis_dyn_reset();
 }
 
 // Точка головы бота из модели (NPCBrainHumanoid.modelInfo.head) — та же кость,
@@ -2048,4 +2055,225 @@ std::vector<BotAimEnt> esp_bot_aim_list() {
         out.push_back(bot);
     }
     return out;
+}
+
+// ==== Динамика проверки видимости: постройки игроков =========================
+//
+// Зачем отдельный проход. Статический меш карты (vis_check_map.h) не знает
+// построек: фундаменты, стены, двери и потолки спавнятся в рантайме, и в
+// ассетах лежит только ПРЕФАБ. Значит дерево перекрытий для них собирается из
+// двух частей: префаб (экспорт .obj на ПК, библиотека vis_dyn) + мировой TRS
+// каждого поставленного куска (память игры).
+//
+// Откуда берётся список кусков. Из того же реестра, что и маркеры:
+// Mirror.NetworkClient.spawned -> NetworkIdentity. Класс Building.BuildingPiece
+// в этом билде обфусцирован (известен только как поле LootObject+0xF8, а стены
+// не лут), поэтому опознание идёт НЕ по классу, а по имени GameObject: имена —
+// контент, их обфускатор не трогает, и проект уже читает их у лута и маркеров.
+// Имя совпало с библиотекой — кусок инстансится в мир. Не совпало — кусок
+// пропускается, и это не ломает проверку: статика продолжает работать, а
+// неизвестность всегда отдаётся как «видна» (см. vis_map::visible).
+//
+// Цена. Проход чанковый, ровно как у маркеров: порция ограничена временем
+// (kPieceScanBudgetSec), а не числом узлов, поэтому кадр оверлея не растягивается
+// на толстом реестре. Имена читаются ОДИН раз на NetworkIdentity и кэшируются —
+// поставленный кусок не переименовывается, а пересборка дерева идёт по позициям.
+//
+// Смещений нативных классов здесь нет ни одного: позиция и мировой поворот
+// берутся из иерархии трансформов (g_skeleton_layout, та же, что у скелетов),
+// имя — из GameObject. libunity.so в репо обрублен (0 _ZTI*), поэтому
+// Renderer::m_AABB не читается — см. tools/unity_rev/NOTES_VIS_DYN.md.
+
+// Одна запись кэша имён: что вообще удалось прочитать у NetworkIdentity.
+struct PieceNameInfo {
+    double   at = 0.0;       // mono_seconds() последнего чтения
+    bool     matched = false; // библиотека дала меш — кусок становится геометрией
+    bool     readable = false;// имя/трансформ прочитались (иначе повторить позже)
+    std::string name;        // имя, которое совпало (для диагностики)
+};
+
+static std::unordered_map<uint64_t, PieceNameInfo> g_piece_name_cache;
+static std::vector<uint64_t> g_piece_scan_buffer;
+static int32_t g_piece_scan_cursor = -1;
+static int32_t g_piece_scan_total = 0;
+static uint64_t g_piece_scan_identity_class = 0;
+static double    g_piece_pass_started = 0.0;
+static std::vector<vis_dyn::Piece> g_piece_staging;
+static size_t    g_piece_staging_unmatched = 0;
+
+constexpr double kPieceScanBudgetSec = 0.006;  // столько же, сколько у маркеров
+constexpr double kPiecePassEvery     = 0.7;    // пересборка дерева
+constexpr double kPieceNameRefresh   = 30.0;   // перечитать имя (разрушили/починили)
+constexpr int32_t kPieceRegistryLimit = 8192;
+constexpr size_t  kPieceSubtreeNodes  = 6;     // детей одного куска смотрим не больше
+
+// Имя GameObject куска: сначала сам объект, при промахе — его дети (геометрия
+// часто лежит на LOD-потомке с другим именем). Возвращает запись библиотеки.
+static const vis_dyn::Entry* piece_find_entry(uint64_t transform, char* name_out, size_t cap) {
+    std::shared_ptr<const vis_dyn::Library> lib = vis_dyn::library();
+    if (!lib || lib->size() == 0 || !transform) return nullptr;
+    char name[48] = {};
+    if (read_transform_name(transform, name, sizeof(name)) && name[0]) {
+        if (const vis_dyn::Entry* e = lib->Find(name)) {
+            if (name_out) std::snprintf(name_out, cap, "%s", name);
+            return e;
+        }
+    }
+    std::vector<uint64_t> nodes;
+    collect_transform_subtree(transform, nodes, kPieceSubtreeNodes);
+    for (size_t i = 1; i < nodes.size(); ++i) {   // [0] — уже проверенный корень
+        char child[48] = {};
+        if (!read_transform_name(nodes[i], child, sizeof(child)) || !child[0]) continue;
+        if (const vis_dyn::Entry* e = lib->Find(child)) {
+            if (name_out) std::snprintf(name_out, cap, "%s", child);
+            return e;
+        }
+    }
+    if (name_out) std::snprintf(name_out, cap, "%s", name[0] ? name : "");
+    return nullptr;
+}
+
+// Мировой TRS куска. Поворот обязателен: стена, развёрнутая на 90°, коробкой
+// «как есть» не закрывает ничего, а инстанс меша без поворота лежит не там.
+// Vec3 здесь — игровой (Vector.h), а не vis::Vec3: read_transform_hierarchy_layout
+// объявлен именно с ним.
+static bool piece_world_trs(uint64_t transform, vis::Vec3& pos, vis::Quat& rot) {
+    if (!transform || !g_skeleton_layout_valid) return false;
+    Vec3 p{};
+    Vec4 q{};
+    if (!read_transform_hierarchy_layout(transform, g_skeleton_layout, p, &q)) return false;
+    pos = vis::Vec3{p.x, p.y, p.z};
+    rot = vis::Quat{q.x, q.y, q.z, q.w};
+    // Иерархия хранит единичный масштаб в Matrix34.scale, поэтому масштаб
+    // куска не читаем: у построек он и так 1, а всё остальное сидит в самом
+    // префабе.
+    return true;
+}
+
+int vis_dyn_collect(const float cam[3]) {
+    if (cam == nullptr || !std::isfinite(cam[0]) || !std::isfinite(cam[1]) || !std::isfinite(cam[2]))
+        return 0;
+    std::shared_ptr<const vis_dyn::Library> lib = vis_dyn::library();
+    if (!lib || lib->size() == 0) return 0;   // нечего инстансить — проход не нужен
+
+    const double now = mono_seconds();
+    const vis::Vec3 eye{cam[0], cam[1], cam[2]};
+    const float radius = vis_map::radius();
+
+    // Кэш имён разросся — режем: сеть пересоздаёт NetworkIdentity, и мёртвые
+    // ключи остаются навсегда.
+    if (g_piece_name_cache.size() > 2048) g_piece_name_cache.clear();
+
+    // Новый проход: снимок реестра одним чтением, как у маркеров. Чаще раза в
+    // kPiecePassEvery не начинаем: база не перестраивается каждый кадр, а
+    // чтение имён — самая дорогая часть прохода.
+    if (g_piece_scan_cursor < 0) {
+        if (now - g_piece_pass_started < kPiecePassEvery) return (int)vis_dyn::piece_count();
+        uint64_t dictionary = resolve_network_client_spawned();
+        if (!dictionary) return 0;
+        g_piece_scan_identity_class = resolve_network_identity_class();
+        int32_t count = 0;
+        if (!rd_exact(dictionary + DICT_COUNT, count) || count <= 0) return 0;
+        uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+        if (!valid_obj(entries)) return 0;
+        if (count > kPieceRegistryLimit) count = kPieceRegistryLimit;
+        g_piece_scan_buffer.resize((size_t)count * DICT_ENTRY_STRIDE);
+        if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, g_piece_scan_buffer.data(),
+                    g_piece_scan_buffer.size()))
+            return 0;
+        g_piece_scan_total = count;
+        g_piece_scan_cursor = 0;
+        g_piece_pass_started = now;
+        g_piece_staging.clear();
+        g_piece_staging.reserve(256);
+        g_piece_staging_unmatched = 0;
+    }
+
+    uint64_t behaviours[8];
+    int32_t i = g_piece_scan_cursor;
+    const int32_t count = g_piece_scan_total;
+    for (; i < count; ++i) {
+        if (i > g_piece_scan_cursor && mono_seconds() - now > kPieceScanBudgetSec) break;
+        uint64_t identity = 0;
+        memcpy(&identity, g_piece_scan_buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE,
+               sizeof(identity));
+        if (!valid_obj(identity)) continue;
+        if (g_piece_scan_identity_class && rd_ptr(identity) != g_piece_scan_identity_class) continue;
+
+        uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
+        if (!valid_obj(array)) continue;
+        int32_t behaviour_count = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
+        if (behaviour_count <= 0) continue;
+        if (behaviour_count > 8) behaviour_count = 8;
+        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours,
+                    (size_t)behaviour_count * sizeof(uint64_t)))
+            continue;
+
+        // Позицию берём от первого компонента, у которого читается трансформ:
+        // у куска постройки геометрия и корень совпадают, а порядок behaviours
+        // нам не известен.
+        uint64_t transform = 0;
+        for (int32_t b = 0; b < behaviour_count; ++b) {
+            if (!valid_obj(behaviours[b])) continue;
+            const uint64_t native = managed_object_native(behaviours[b]);
+            if (!native) continue;
+            const uint64_t t = native_component_transform(native);
+            if (t) { transform = t; break; }
+        }
+        if (!transform) continue;
+
+        vis::Vec3 pos{};
+        vis::Quat rot{};
+        if (!piece_world_trs(transform, pos, rot)) continue;
+        const float dx = pos.x - eye.x, dy = pos.y - eye.y, dz = pos.z - eye.z;
+        const float dist2 = dx * dx + dy * dy + dz * dz;
+        if (!std::isfinite(dist2) || dist2 > radius * radius) continue;
+
+        // Имя — самое дорогое в проходе (чтение строки из кучи игры + обход
+        // детей), поэтому кэшируется на NetworkIdentity и перечитывается редко.
+        PieceNameInfo& info = g_piece_name_cache[identity];
+        const bool fresh = info.readable && (now - info.at) < kPieceNameRefresh;
+        if (!fresh) {
+            char matched_name[48] = {};
+            const vis_dyn::Entry* e = piece_find_entry(transform, matched_name, sizeof(matched_name));
+            info.at = now;
+            info.readable = true;
+            info.matched = (e != nullptr);
+            info.name = matched_name;
+        }
+        if (!info.matched) { ++g_piece_staging_unmatched; continue; }
+
+        vis_dyn::Piece p;
+        p.pos = pos;
+        p.rot = rot;
+        p.scale = 1.0f;
+        p.name = info.name;
+        g_piece_staging.push_back(std::move(p));
+    }
+    g_piece_scan_cursor = i;
+
+    // Проход не закончен — дерево не трогаем: показывать половину базы хуже,
+    // чем показать предыдущий снимок.
+    if (g_piece_scan_cursor < count) return (int)vis_dyn::piece_count();
+
+    const size_t staged = g_piece_staging.size();
+    vis_map::rebuild_dynamic(g_piece_staging, *lib, g_piece_staging_unmatched);
+    g_piece_scan_cursor = -1;
+    g_piece_staging.clear();
+    return (int)staged;
+}
+
+static void vis_dyn_reset() {
+    g_piece_name_cache.clear();
+    g_piece_scan_buffer.clear();
+    g_piece_scan_cursor = -1;
+    g_piece_scan_total = 0;
+    g_piece_scan_identity_class = 0;
+    g_piece_pass_started = 0.0;
+    g_piece_staging.clear();
+    g_piece_staging_unmatched = 0;
+    // Дерево снимаем сразу: мир перезагружен, прежних кусков в нём нет, а
+    // «стена», которой больше не существует, гасила бы цели до следующего прохода.
+    vis_map::publish_dyn({});
+    vis_dyn::set_counts(0, 0, 0);
 }
