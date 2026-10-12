@@ -11,6 +11,49 @@
 #include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <ctime>
+#include <mutex>
+#include <sys/time.h>
+
+// ==== Диаг-лог фарма: «не спавнит крестик» ==================================
+// В этой сборке общего писателя benzware.log нет — свой автономный: отдельный
+// файл, append, mutex, ротация на 1 МБ. Вопрос, который он отвечает:
+//   (1) удары наносят урон вообще? (node_health падает по тактам),
+//   (2) в момент удара что с лучом игры (ray_valid/self/blocked/foreign),
+//   (3) записи farmjoy (атака/бег/стик) реально проходят (attack_why и т.п.).
+namespace {
+std::mutex g_flogMutex;
+FILE*      g_flogFile = nullptr;
+void farmLog(const char* fmt, ...) {
+    char line[512];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    std::lock_guard<std::mutex> lk(g_flogMutex);
+    FILE* f = g_flogFile;
+    if (!f) {
+        f = fopen("/storage/emulated/0/Download/benzware_farm.log", "a");
+        if (!f) return;
+        g_flogFile = f;
+        setvbuf(f, nullptr, _IOLBF, 0);   // построчно — kill не съест хвост
+    }
+    if (ftell(f) > (1 << 20)) {           // ротация: файл не растёт бесконечно
+        fclose(f);
+        f = fopen("/storage/emulated/0/Download/benzware_farm.log", "w");
+        if (!f) return;
+        g_flogFile = f;
+        setvbuf(f, nullptr, _IOLBF, 0);
+    }
+    char ts[24];
+    struct timeval tv; gettimeofday(&tv, nullptr);
+    struct tm tmv; localtime_r(&tv.tv_sec, &tmv);
+    snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)(tv.tv_usec / 1000));
+    fprintf(f, "%s %s\n", ts, line);
+}
+}
 
 // Главный принцип: КАМЕРА СМОТРИТ В ЦЕНТР РЕСУРСА, А УДАРЫ ИДУТ ПО
 // КРЕСТИКАМ. Крестик (hit-streak marker) читается напрямую из памяти игры:
@@ -220,6 +263,13 @@ static void UpdateFarmInner(float dt) {
     static unsigned long long s_candId = 0; // узел-кандидат на смену цели
     static int   s_candFrames = 0;    // сколько кадров подряд он лучший
     static float s_flickerTime = 0.f; // сколько держимся прежнего, с
+    // Диаг-лог: переходы вкл/выкл, такт сердцебиения в фазе удара, фаза.
+    static bool  s_dbgOn = false;
+    static int   s_dbgPhase = 0;
+    static float s_dbgHb = 0.f;       // с до следующего сердечника
+    static float s_dbgHbHp = -1.f;    // здоровье на прошлом сердечнике
+    static int   s_dbgSwings = 0;     // ударов с начала удара по этому узлу
+    static bool  s_dbgPinLogged = false; // пин на текущем узле уже залогирован
 
     auto releaseAll = [&]() {
         if (s_moveDown) { farmjoy::release(); s_moveDown = false; }
@@ -259,12 +309,18 @@ static void UpdateFarmInner(float dt) {
     esp_farm_set_range(g_state.farm_range);
 
     if (mask == 0 || !g_esp_attached) {
+        if (s_dbgOn) farmLog("FARM OFF (mask=%u attached=%d)", (unsigned)mask, (int)g_esp_attached);
+        s_dbgOn = false; s_dbgPhase = 0; s_dbgSwings = 0;
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
         g_farmHpPct = -1.f; g_farmSpotLife = -1.f; g_farmBlocked = false;
         g_farmSpot = 0; g_farmStreak = 0;
         resetNode(); s_settle = 0.f; s_lostTime = 0.f;
         return;
+    }
+    if (!s_dbgOn) {
+        farmLog("FARM ON mask=%u range=%.1f", (unsigned)mask, (double)g_state.farm_range);
+        s_dbgOn = true; s_dbgSwings = 0;
     }
     // Aim owns the camera while tracking a player, and calibration owns the
     // physical touch used to select a control zone. Menu and popover windows
@@ -381,6 +437,13 @@ static void UpdateFarmInner(float dt) {
         s_fracStart = tgt.fraction;
         s_healthStart = tgt.node_health;
         s_blockedTime = 0.f;
+        s_dbgSwings = 0; s_dbgHbHp = tgt.node_health;
+        farmLog("NODE id=%llu kind=%d hp=%.1f/%.1f frac=%.2f ext=%d spot=%d src=%d "
+                "reach=%.2f period=%.2f dist=%.1f purposes=%d/%d",
+                tgt.id, tgt.kind, tgt.node_health, tgt.node_health_max, tgt.fraction,
+                (int)tgt.ext_found, (int)tgt.has_spot, tgt.spot_source,
+                (double)tgt.melee_reach, (double)tgt.attack_period, (double)tgt.node_dist,
+                tgt.tool_purposes, g_farmToolNeed);
         if (hadNode) { releaseAll(); s_settle = kSettleTime; }
     }
 
@@ -514,6 +577,35 @@ static void UpdateFarmInner(float dt) {
     // кадра, а камера доворачивается параллельно — ходьба её не ждёт.
     const int phase = inReach ? 3 : 2;
     g_farmPhase = phase;
+    if (phase != s_dbgPhase) {
+        farmLog("PHASE %d->%d id=%llu dist=%.1f ray=%d self=%d blk=%d fgn=%d",
+                s_dbgPhase, phase, tgt.id, (double)tgt.node_dist,
+                (int)tgt.ray_valid, (int)tgt.ray_self, (int)tgt.ray_blocked, (int)tgt.ray_foreign);
+        s_dbgPhase = phase;
+        s_dbgHb = 0.f; s_dbgHbHp = tgt.node_health; s_dbgSwings = 0;
+    }
+    // Сердечник в фазе удара: раз в 3 с — здоровье (и дельта), луч, крестик,
+    // статус памяти-джойстика. По дельте видно, засчитываются ли удары.
+    if (phase == 3) {
+        s_dbgHb += dt;
+        if (s_dbgHb >= 3.f) {
+            s_dbgHb = 0.f;
+            const float dHp = (tgt.node_health >= 0.f && s_dbgHbHp >= 0.f)
+                            ? s_dbgHbHp - tgt.node_health : -1.f;
+            s_dbgHbHp = tgt.node_health;
+            farmjoy::Status js = farmjoy::status();
+            farmLog("HB id=%llu hp=%.1f dHp=%.1f swings=%d ray=%d self=%d why=%d blk=%d "
+                    "fgn=%d rd=%.2f reach=%.2f ext=%d spot=%d src=%d st=%d | "
+                    "joy cand=%d conf=%d atk=%d atkwhy=%d spr=%d sprwhy=%d",
+                    tgt.id, tgt.node_health, dHp, s_dbgSwings,
+                    (int)tgt.ray_valid, (int)tgt.ray_self, tgt.ray_self_why,
+                    (int)tgt.ray_blocked, (int)tgt.ray_foreign,
+                    (double)tgt.ray_distance, (double)tgt.melee_reach,
+                    (int)tgt.ext_found, (int)tgt.has_spot, tgt.spot_source, tgt.streak,
+                    js.candidate, (int)js.confirmed, (int)js.attacking, js.attack_why,
+                    (int)js.sprinting, js.sprint_why);
+        }
+    }
 
     // Сел ли прицел на ЦЕНТР УЗЛА. Для ударов это критично только без пина
     // (шаблон ещё не выучен): тап тогда уходит по лучу игры, и камера должна
@@ -549,6 +641,15 @@ static void UpdateFarmInner(float dt) {
                 s_pinNode = 0;
                 s_pinRetry = 2.f;
             }
+        }
+        if (s_pinOn && !s_dbgPinLogged) {
+            farmLog("PIN ARMED id=%llu tree=%d ext=0x%llx marker=0x%llx",
+                    tgt.id, (int)(tgt.kind == 0),
+                    (unsigned long long)tgt.cross_ext,
+                    (unsigned long long)tgt.cross_marker_transform);
+            s_dbgPinLogged = true;
+        } else if (!s_pinOn) {
+            s_dbgPinLogged = false;
         }
     }
 
@@ -829,8 +930,22 @@ static void UpdateFarmInner(float dt) {
                 // Зажимаем кнопку атаки в памяти хендлера ввода — тот же путь,
                 // которым идёт зажатая кнопка атаки на экране. Экрана и зоны
                 // огня для удара больше не нужно.
-                farmjoy::attack(true);
+                const bool atkOk = farmjoy::attack(true);
                 s_swingOn = true;
+                ++s_dbgSwings;
+                // Один лог на замах: состояние луча игры + здоровья + записи
+                // кнопки. Это и есть ответ на «крестик не спавнится»: виден ли
+                // замах игре (ray_self), сколько hp до/после (по HB), прошла ли
+                // запись (atkOk / atkwhy в HB).
+                farmLog("SWING#%d ok=%d id=%llu hp=%.1f ray=%d self=%d why=%d blk=%d "
+                        "fgn=%d rd=%.2f aim3d=%.2f atSpot=%d ext=%d spot=%d src=%d "
+                        "st=%d ayaw=%.1f apit=%.1f",
+                        s_dbgSwings, (int)atkOk, tgt.id, tgt.node_health,
+                        (int)tgt.ray_valid, (int)tgt.ray_self, tgt.ray_self_why,
+                        (int)tgt.ray_blocked, (int)tgt.ray_foreign,
+                        (double)tgt.ray_distance, (double)tgt.aim_3d, (int)tgt.at_spot,
+                        (int)tgt.ext_found, (int)tgt.has_spot, tgt.spot_source, tgt.streak,
+                        (double)tgt.yaw, (double)tgt.pitch);
                 s_swingTimer = (int)holdMs;
                 if (!tgt.ray_valid) {      // замах вслепую — под контроль
                     s_blindHp = tgt.node_health;
