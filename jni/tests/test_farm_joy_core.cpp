@@ -120,7 +120,20 @@ int main() {
         }
     }
 
-    // 8. Порог подтверждения: чуть-чуть сближения недостаточно, ощутимое — да.
+    // 8. Разрыв дистанции (переехала цель или точка подхода): окно заново, без
+    //    отбраковки слоя — метры чужого пути ему не принадлежат.
+    {
+        TrialState state(kLayers);
+        state.set_armed(true, true);
+        for (int i = 0; i < 20; ++i) assert(state.observe(kDt, 12.f, true) == TrialState::NONE);
+        assert(state.observe(kDt, 40.f, true) == TrialState::NONE);   // прыжок +28 м
+        assert(!state.rejected(0));
+        assert(state.trials() == 0);
+        // Дальше окно идёт с новой дистанции и обычным сближением подтверждается.
+        assert(run(state, 0.5f, 40.f, 4.f) == TrialState::CONFIRMED);
+    }
+
+    // 9. Порог подтверждения: чуть-чуть сближения недостаточно, ощутимое — да.
     {
         TrialState state(kLayers);
         state.set_armed(true, true);
