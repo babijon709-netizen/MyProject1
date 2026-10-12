@@ -697,6 +697,49 @@ static bool farm_ore_anchor_point(const FarmEntity& node, Vec3& out, float& dist
     return true;
 }
 
+// ==== Камера ↔ корень игрока: диагностика и запасная дистанция ================
+// Протухшая поза камеры, ПРОШЕДШАЯ 25-метровое окно farm_cam_source_ok,
+// всё равно ломает фарм: в логе 21.10 конвейер игроков был не в порядке
+// 15 минут, камера стояла на мёртвой точке в 343 м от игрока, и фарм мерял
+// дистанцию до ресурса от призрака — ходил не туда, а фаза удара не наступала
+// вовсе. Поэтому:
+//   (a) walk_dist меряется от КОРНЯ ИГРОКА (ходит игрок, не камера);
+//   (b) aim_3d, если origin дальше kCamOffTrust от глаза (корень + 1.5 м),
+//       пересчитывается от корня: глаз над корнем, горизонталь не меняется;
+//   (c) g_farm_cam_off пишется в benzware.log — живая камера 1.5–3 м,
+//       > 6 м поза протухла, > 25 м все источники отклонены и фарм в простое.
+static float g_farm_cam_off = -1.f;
+
+float esp_farm_cam_off() { return g_farm_cam_off; }
+
+static void camOffFrom(const Vec3& p) {
+    if (!g_frame_local_valid) { g_farm_cam_off = -1.f; return; }
+    const float dx = p.x - g_frame_local_pos.x;
+    const float dy = p.y - g_frame_local_pos.y;
+    const float dz = p.z - g_frame_local_pos.z;
+    g_farm_cam_off = sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+// Все источники отклонены (idle reason 5): сколько ближайший из них был
+// от корня — по числу видно, что это мусор (десятки/тысячи метров), а не
+// камера, просто позади.
+static void camOffAllSources() {
+    if (!g_frame_local_valid) { g_farm_cam_off = -1.f; return; }
+    float best = 1e30f;
+    auto consider = [&](bool valid, const Vec3& p) {
+        if (!valid || !vec3_is_finite(p)) return;
+        const float dx = p.x - g_frame_local_pos.x;
+        const float dy = p.y - g_frame_local_pos.y;
+        const float dz = p.z - g_frame_local_pos.z;
+        const float d = dx * dx + dy * dy + dz * dz;
+        if (d < best) best = d;
+    };
+    consider(g_aim_ref_valid, g_aim_ref_origin);
+    consider(g_cam_pose_valid, g_cam_pos);
+    consider(g_frame_cam_basis_valid, g_frame_cam_pos);
+    g_farm_cam_off = (best < 1e30f) ? sqrtf(best) : -1.f;
+}
+
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
     if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
@@ -978,6 +1021,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     const bool ok_frame = g_frame_cam_basis_valid && farm_cam_source_ok(g_frame_cam_pos);
     if (!ok_ref && !ok_pose && !ok_frame) {
         g_farm_idle_reason = 5;
+        camOffAllSources();
         return false;
     }
     // Углы меряем от позы КАМЕРЫ, когда она читается: камеру мы и ведём
@@ -990,6 +1034,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     const Vec3& fwd    = use_ref ? g_aim_ref_forward : use_pose ? g_cam_forward : g_frame_cam_fwd;
     const Vec3& right  = use_ref ? g_aim_ref_right   : use_pose ? g_cam_right   : g_frame_cam_right;
     const Vec3& up     = use_ref ? g_aim_ref_up      : use_pose ? g_cam_up      : g_frame_cam_up;
+    camOffFrom(origin);
 
     // КАМЕРА ВСЕГДА ВЕДЁТ ЦЕНТР КОРПУСА УЗЛА: точка стабильная (не прыгает
     // с крестиком), со стороны бот выглядит обычно — смотрит на ресурс, как
@@ -1044,7 +1089,13 @@ bool esp_farm_get_target(FarmTarget& out) {
     }
     float walk_yaw = 0.0F, walk_dist = best_dist;
     {
-        const float gx = goal.x - origin.x, gz = goal.z - origin.z;
+        // Меряем от КОРНЯ ИГРОКА, а не от origin: ходит игрок, а протухшая
+        // поза в 25-метровом окне сдвигала и дистанцию до точки подхода
+        // (порог прихода и стик-вадогон врили), и курс стика. Курс при этом
+        // остаётся в базисе камеры: стик рулит относительно оси камеры, а
+        // камеру в этот же кадр ведём на узел.
+        const Vec3& walker = g_frame_local_valid ? g_frame_local_pos : origin;
+        const float gx = goal.x - walker.x, gz = goal.z - walker.z;
         const float gd = sqrtf(gx * gx + gz * gz);
         if (std::isfinite(gd)) {
             walk_dist = gd;
@@ -1075,8 +1126,31 @@ bool esp_farm_get_target(FarmTarget& out) {
     // FPMelee.ZkX, решая засчитать удар или сыграть промах. От
     // g_frame_local_pos (корень игрока) её мерить нельзя: глаз выше примерно
     // на 1.5 м, а вся дальность удара — пара метров.
-    const float edx = aim.x - origin.x, edy = aim.y - origin.y, edz = aim.z - origin.z;
-    const float aim_3d = sqrtf(edx * edx + edy * edy + edz * edz);
+    // ИСКЛЮЧЕНИЕ — протухшая поза: origin в 25-метровом окне может стоять на
+    // мёртвой точке (лог 21.10: 343 м от игрока), и тогда «честный» aim_3d —
+    // просто мусор. Здоровая камера ближе kCamOffTrust к глаз (корень + 1.5 м);
+    // дальше — пересчитываем от корня: глаз над корнем, горизонталь
+    // (aim_dist) не меняется, вертикаль — известный оффсет.
+    float aim_3d = 0.f;
+    {
+        constexpr float kEyeAboveRoot = 1.5F;
+        constexpr float kCamOffTrust  = 6.0F;
+        if (g_frame_local_valid) {
+            const float ex = origin.x - g_frame_local_pos.x;
+            const float ey = origin.y - (g_frame_local_pos.y + kEyeAboveRoot);
+            const float ez = origin.z - g_frame_local_pos.z;
+            if (ex * ex + ey * ey + ez * ez <= kCamOffTrust * kCamOffTrust) {
+                const float dx = aim.x - origin.x, dy = aim.y - origin.y, dz = aim.z - origin.z;
+                aim_3d = sqrtf(dx * dx + dy * dy + dz * dz);
+            } else {
+                const float dy = aim.y - (g_frame_local_pos.y + kEyeAboveRoot);
+                aim_3d = sqrtf(aim_dist * aim_dist + dy * dy);
+            }
+        } else {
+            const float dx = aim.x - origin.x, dy = aim.y - origin.y, dz = aim.z - origin.z;
+            aim_3d = sqrtf(dx * dx + dy * dy + dz * dz);
+        }
+    }
 
     g_farm_idle_reason = 0;
     out.valid = true;
@@ -1087,6 +1161,7 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.pitch = pitch;
     out.aim_dist = std::isfinite(aim_dist) ? aim_dist : best_dist;
     out.aim_3d = std::isfinite(aim_3d) ? aim_3d : out.aim_dist;
+    out.cam_off = g_farm_cam_off;
     out.aim_x = aim.x; out.aim_y = aim.y; out.aim_z = aim.z;
     out.node_x = best->pos.x; out.node_y = best->pos.y; out.node_z = best->pos.z;
     // Дальность удара текущего орудия — из игры (FPMelee.m_MaxReach +

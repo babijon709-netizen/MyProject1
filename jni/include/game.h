@@ -317,8 +317,11 @@ struct FarmTarget {
 
     // Куда идти: точка подхода перед крестиком (или перед узлом, если X нет).
     float walk_yaw = 0.f;         // градусы от оси камеры (+вправо)
-    float walk_dist = 0.f;        // метры до точки подхода
+    float walk_dist = 0.f;        // метры до точки подхода (от корня игрока)
     float node_dist = 0.f;        // метры по горизонтали до самого узла
+    float cam_off = -1.f;         // метры от origin до корня игрока (диаг: живая
+                                  // камера 1.5–3; > 6 поза протухла — aim_3d уже
+                                  // пересчитан от корня; -1 корень не читается)
 
     // Орудие в руках и состояние узла — значения из самой игры (дамп 62a8534:
     // FPTool.m_ToolPurposes, FPMelee.m_TimeBetweenAttacks/pauseAfterAttack,
@@ -432,6 +435,9 @@ void        esp_farm_blacklist(unsigned long long id, float seconds);
 // орудием, 7 выбранный узел умер (класс компонента сменился — память уже
 // переиспользована, см. проверку живости в esp_farm_get_target).
 void        esp_farm_debug(int& nodes_cached, int& idle_reason);
+// Метры от origin до корня игрока из последнего кадра (-1 корень не читается).
+// > 6 — поза камеры протухла, дальности фарма меряются от корня.
+float       esp_farm_cam_off();
 // Что умеет орудие в руках и какие умения запросили отброшенные узлы (флаги
 // ToolPurpose). need != 0 при reason == 6 — «ближайший узел нечем взять».
 void        esp_farm_tool_info(int& purposes_have, int& purposes_need);

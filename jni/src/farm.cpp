@@ -322,6 +322,14 @@ static void UpdateFarmInner(float dt) {
             s_camTurn = false; s_memPend = false; s_memWait = 0.f;
             return; // палец движения оставляем, где был
         }
+        if (s_dbgOn) {
+            // Фарм был активен, цель ушла: именно сюда уходил молча простоя
+            // «бот далеко стоит и не бьёт». reason=5 + большое camoff — поза
+            // камеры протухла (см. camOffAllSources в game_farm.cpp).
+            benz_log("FARM STOP reason=%d camoff=%.1f m nodes=%d",
+                     g_farmReason, (double)esp_farm_cam_off(), g_farmNodes);
+            s_dbgOn = false; s_dbgPhase = 0; s_dbgSwings = 0;
+        }
         g_farmActive = false;
         releaseAll();
         g_farmPhase = 0; g_farmPaused = false;
@@ -559,12 +567,12 @@ static void UpdateFarmInner(float dt) {
             s_dbgHbHp = tgt.node_health;
             farmjoy::Status js = farmjoy::status();
             benz_log("HB id=%llu hp=%.1f dHp=%.1f swings=%d ray=%d self=%d why=%d blk=%d "
-                    "fgn=%d rd=%.2f reach=%.2f ext=%d spot=%d src=%d st=%d | "
+                    "fgn=%d rd=%.2f reach=%.2f camoff=%.1f ext=%d spot=%d src=%d st=%d | "
                     "joy cand=%d conf=%d atk=%d atkwhy=%d spr=%d sprwhy=%d",
                     tgt.id, tgt.node_health, dHp, s_dbgSwings,
                     (int)tgt.ray_valid, (int)tgt.ray_self, tgt.ray_self_why,
                     (int)tgt.ray_blocked, (int)tgt.ray_foreign,
-                    (double)tgt.ray_distance, (double)tgt.melee_reach,
+                    (double)tgt.ray_distance, (double)tgt.melee_reach, (double)tgt.cam_off,
                     (int)tgt.ext_found, (int)tgt.has_spot, tgt.spot_source, tgt.streak,
                     js.candidate, (int)js.confirmed, (int)js.attacking, js.attack_why,
                     (int)js.sprinting, js.sprint_why);
