@@ -73,7 +73,13 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
         // читались вовсе — тогда аим уходил на запасной расчёт по росту, а
         // признак смерти по позе вообще нечем было мерить.
         esp_set_aim_bones_enabled(g_state.aim_touch || g_state.aim_mode == AIM_MODE_MEMORY);
-        esp_set_markers_enabled(g_state.esp_ore, g_state.esp_animal,
+        // «Руда» считается включённой, только если включён хотя бы один тип:
+        // иначе ни список меток, ни их скан не нужны вовсе.
+        const bool ore_any = g_state.esp_ore &&
+            (g_state.esp_ore_stone || g_state.esp_ore_iron || g_state.esp_ore_sulfur);
+        esp_set_ore_types_enabled(g_state.esp_ore_stone, g_state.esp_ore_iron,
+                                  g_state.esp_ore_sulfur);
+        esp_set_markers_enabled(ore_any, g_state.esp_animal,
                                 g_state.esp_loot, g_state.esp_pickup,
                                 g_state.esp_vehicles, g_state.esp_bots,
                                 g_state.esp_scrap, g_state.esp_turrets,

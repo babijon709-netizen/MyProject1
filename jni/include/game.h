@@ -171,6 +171,11 @@ void        esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pick
                                     bool turrets = false, bool backpacks = false,
                                     bool sleepers = false, bool house = false,
                                     bool cupboards = false);
+// Типы руды для меток: общий тумблер «Руда» включает их целиком, а эти три
+// решают, какие именно камни через него проходят (камень / железо / сера).
+// Смена значений перезапускает скан маркеров — снятая галочка гасит метки
+// сразу, а не в конце текущего прохода реестра.
+void        esp_set_ore_types_enabled(bool stone, bool iron, bool sulfur);
 // Упреждение аима: секунды забега вперёд по скорости цели (0 = вести по
 // текущему положению кости). Слайдер «Упреждение» на вкладке аима.
 void        esp_set_screen_stretch(float factor);

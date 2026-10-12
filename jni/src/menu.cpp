@@ -426,11 +426,22 @@ float TabContent(int tab, float dt, float cW) {
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NW-1);
         }
 
-        SHdr(XS("Цвета руды"));
-        CardBg(Layout::RowH * 3);
-        ColorRow("##orst", XS("Камень"), &cfg::esp::ore_stone_col, false);
-        ColorRow("##ormt", XS("Железо"), &cfg::esp::ore_metal_col, false);
-        ColorRow("##orsf", XS("Сера"),   &cfg::esp::ore_sulfur_col, true);
+        // Типы руды: включение и цвет одного типа в одной строке. Общая
+        // «Руда» (выше, в «Мире») остаётся главным выключателем — здесь
+        // выбирается, какие именно камни через него проходят.
+        SHdr(XS("Руда по типам"));
+        {
+            struct OreRow { const char* id; const char* lbl; bool* v; float* a; ImVec4* col; };
+            OreRow orows[] = {
+                {"##orvt", XS("Камень"), &g_state.esp_ore_stone,  &g_state.a_esp_ore_stone,  &cfg::esp::ore_stone_col},
+                {"##orvi", XS("Железо"), &g_state.esp_ore_iron,   &g_state.a_esp_ore_iron,   &cfg::esp::ore_metal_col},
+                {"##orvs", XS("Сера"),   &g_state.esp_ore_sulfur, &g_state.a_esp_ore_sulfur, &cfg::esp::ore_sulfur_col},
+            };
+            constexpr int NOR = 3;
+            CardBg(rowH * NOR);
+            for (int i = 0; i < NOR; i++)
+                EspToggleColorRow(orows[i].id, orows[i].lbl, orows[i].v, orows[i].a, orows[i].col, i == NOR-1);
+        }
 
         SHdr(XS("Дальность"));
         CardBg(Layout::SliderH);
@@ -1779,6 +1790,9 @@ void RenderMenu() {
     Tick(g_state.a_esp_chams,  g_state.esp_chams,          dt);
     Tick(g_state.a_esp_weapon, g_state.esp_weapon,         dt);
     Tick(g_state.a_esp_ore,    g_state.esp_ore,            dt);
+    Tick(g_state.a_esp_ore_stone,  g_state.esp_ore_stone,  dt);
+    Tick(g_state.a_esp_ore_iron,   g_state.esp_ore_iron,   dt);
+    Tick(g_state.a_esp_ore_sulfur, g_state.esp_ore_sulfur, dt);
     Tick(g_state.a_esp_animal, g_state.esp_animal,         dt);
     Tick(g_state.a_esp_loot,   g_state.esp_loot,           dt);
     Tick(g_state.a_esp_pickup, g_state.esp_pickup,         dt);

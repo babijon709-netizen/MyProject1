@@ -144,6 +144,35 @@ void esp_set_markers_enabled(bool ore, bool animals, bool loot, bool pickups,
 }
 
 
+// ---- Фильтр по типам руды ---------------------------------------------------
+// Общий тумблер «Руда» включает метки руды целиком, а эти три решают, какие
+// именно камни через него проходят. Тип берётся из MarkerLook.ore_type, то
+// есть отбор работает и для узлов, распознанных по EntityType, и для тех, что
+// нашлись по имени префаба или по дропу.
+static bool g_ore_stone_enabled = true;
+static bool g_ore_iron_enabled = true;
+static bool g_ore_sulfur_enabled = true;
+
+static bool ore_type_enabled(int ore_type) {
+    if (ore_type == 0) return g_ore_stone_enabled;
+    if (ore_type == 1) return g_ore_iron_enabled;
+    if (ore_type == 2) return g_ore_sulfur_enabled;
+    return true;   // тип не определён (например, «камень» по имени префаба)
+}
+
+void esp_set_ore_types_enabled(bool stone, bool iron, bool sulfur) {
+    if (stone == g_ore_stone_enabled && iron == g_ore_iron_enabled &&
+        sulfur == g_ore_sulfur_enabled)
+        return;
+    g_ore_stone_enabled = stone;
+    g_ore_iron_enabled = iron;
+    g_ore_sulfur_enabled = sulfur;
+    // Часть списка уже собрана по старому отбору — начинаем скан заново, иначе
+    // снятая галочка продолжала бы показывать метки до конца текущего прохода.
+    g_marker_next_scan = 0.0;
+    marker_scan_abort();
+}
+
 void esp_set_marker_max_distance(float metres) {
     if (!std::isfinite(metres)) return;
     if (metres < 10.0F) metres = 10.0F;
@@ -174,6 +203,7 @@ struct MarkerEntity {
     double   head_last_ok = 0.0;
     botlead::Track lead{};
     int      kind = ESP_MARKER_ORE;
+    int      ore_type = -1;   // 0 камень, 1 железо, 2 сера, -1 = не руда
     // Fixed labels point into static strings; ground pickups build their own
     // ("Ягоды x12"), in which case `text` holds it and `label` is null.
     const char* label = nullptr;
@@ -248,13 +278,17 @@ struct MarkerLook {
     bool has_color = false;
     bool rainbow = false; // drawn in a cycling rainbow colour (elite crates)
     unsigned char rgb[3] = {255, 255, 255};
+    // Тип руды: 0 камень, 1 железо, 2 сера, -1 = не руда. Нужен, чтобы общий
+    // тумблер «Руда» можно было разделить по типам (см. ore_type_enabled).
+    int ore_type = -1;
 };
 
-static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false, {190, 190, 190}};
-static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}};
-static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}};
+static const MarkerLook kOreStone  {ESP_MARKER_ORE, "Камень", true, false, {190, 190, 190}, 0};
+static const MarkerLook kOreMetal  {ESP_MARKER_ORE, "Железо", true, false, {255, 140,  40}, 1};
+static const MarkerLook kOreSulfur {ESP_MARKER_ORE, "Сера",   true, false, {255, 225,  50}, 2};
 
 static void apply_ore_cfg(MarkerLook& look, int which) {
+    look.ore_type = which;
     ImVec4 c = cfg::esp::ore_stone_col;
     if (which == 1) c = cfg::esp::ore_metal_col;
     else if (which == 2) c = cfg::esp::ore_sulfur_col;
@@ -1410,11 +1444,16 @@ static MarkerScanResult rebuild_marker_entities() {
                 if (!known && g_markers_pickup_enabled) known = gather_marker_from_loot(component, look);
             }
             if (!known) continue;
+            // Тип руды отключён тумблером — узел не берём: метки руды
+            // статичны, и держать их в списке незачем (то же, что с ящиками и
+            // скрапом: отбор на обходе, а не на отрисовке).
+            if (look.kind == ESP_MARKER_ORE && !ore_type_enabled(look.ore_type)) continue;
 
             MarkerEntity entity;
             entity.identity = identity;
             entity.id = component;
             entity.kind = look.kind;
+            entity.ore_type = look.ore_type;
             if (entity.kind == ESP_MARKER_BOT) {
                 // The death handler is a sibling behaviour, not the Mineable
                 // component used to classify the marker. Never read 0xE8 on it.
@@ -1807,7 +1846,8 @@ std::vector<EspMarker> esp_get_markers() {
 
     const float max_distance = g_marker_max_distance;
     for (MarkerEntity& entity : g_marker_entities) {
-        if (entity.kind == ESP_MARKER_ORE && !g_markers_ore_enabled) continue;
+        if (entity.kind == ESP_MARKER_ORE &&
+            (!g_markers_ore_enabled || !ore_type_enabled(entity.ore_type))) continue;
         if (entity.kind == ESP_MARKER_ANIMAL && !g_markers_animal_enabled) continue;
         if (entity.kind == ESP_MARKER_LOOT && !g_markers_loot_enabled) continue;
         if (entity.kind == ESP_MARKER_SCRAP && !g_markers_scrap_enabled) continue;

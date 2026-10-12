@@ -34,6 +34,12 @@ struct AppState {
     bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
     bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
+    // Типы руды: какие именно камни показывать. «Руда» выше — общий
+    // выключатель меток руды, эти три — отбор внутри него (камень / железо /
+    // сера). Сессионные, как и выбор ресурсов автофарма: в замороженном
+    // CfgBlob свободного места нет, а общий тумблер «Руда» ездит в конфиг как
+    // раньше и без этих трёх означает «показывать все три типа».
+    bool  esp_ore_stone = true, esp_ore_iron = true, esp_ore_sulfur = true;
     bool  esp_pickup = false;
     bool  esp_bots = false, esp_vehicles = false;
     bool  esp_scrap = false;              // бочки и дорожные знаки
@@ -131,6 +137,7 @@ struct AppState {
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
     float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
+    float a_esp_ore_stone = 1, a_esp_ore_iron = 1, a_esp_ore_sulfur = 1;
     float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0, a_esp_house_boxes = 0;
     float a_esp_turrets = 0, a_esp_backpacks = 0, a_esp_sleepers = 0, a_esp_cupboards = 0;
     float a_always_day = 0;
