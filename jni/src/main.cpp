@@ -1,4 +1,5 @@
 #include "main.h"
+#include "benz_log.h"
 #include "game.h"
 #include "Blur/Blur.h"
 #include "Android_touch/TouchHelperA.h"
@@ -295,6 +296,8 @@ int main(int argc, char* argv[]) {
             return skeldiag::Run(argc - i, argv + i);
     }
 
+    benz_log("app запущен (pid=%d)", getpid());
+
     // Страж-трейсер САМЫМ ПЕРВЫМ делом после разбора аргументов: процесс ещё
     // однопоточен (чистый fork), а PTRACE_SEIZE обязан случиться ДО
     // PR_SET_DUMPABLE=0 в ApplyEarly — не-root среда иначе не даст потомку
@@ -466,6 +469,12 @@ int main(int argc, char* argv[]) {
             clock_gettime(CLOCK_THREAD_CPUTIME_ID, &slowCpu1);
             const double slowCpu = (slowCpu1.tv_sec - slowCpu0.tv_sec) * 1000.0 +
                                    (slowCpu1.tv_nsec - slowCpu0.tv_nsec) * 1e-6;
+            benz_log("кадр: %d мс (esp %d аим %d фарм %d меню %d фри %d своп %d) cpu %d мс",
+                     (int)(slowT[6] - slowT[0]),
+                     (int)(slowT[1] - slowT[0]), (int)(slowT[2] - slowT[1]),
+                     (int)(slowT[3] - slowT[2]), (int)(slowT[4] - slowT[3]),
+                     (int)(slowT[5] - slowT[4]), (int)(slowT[6] - slowT[5]),
+                     (int)slowCpu);
         }
         g_frame_done.store(true);
     }

@@ -1,3 +1,4 @@
+#include "benz_log.h"
 #include "config.h"
 #include <cmath>
 #include "str.h"
@@ -444,6 +445,7 @@ void ConfigSave() {
     } while (access(cfgpath.c_str(), F_OK) == 0);
     ConfigSaveToPath(cfgpath);
     CfgScanDir();
+    benz_log("конфиг: создан %s", baseName);
     ShowToast(XS("Конфиг создан"));
     PlaySound(SND_SUCCESS);
 }
@@ -452,6 +454,7 @@ void ConfigUpdate(int idx) {
     if (idx < 0 || idx >= g_configCount) return;
     std::string path = CfgPath(g_configs[idx].name);
     ConfigSaveToPath(path);
+    benz_log("конфиг: сохранён %s", g_configs[idx].name);
     ShowToast(XS("Конфиг сохранён"));
     PlaySound(SND_SUCCESS);
 }
@@ -475,7 +478,13 @@ static void LoadCfgByName(const char* name, bool announce) {
     if (got != sizeof(buf)) { if (announce) ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
     memcpy(&s, buf, sizeof(s));
-    if (s.magic != 0x58564345U || s.version != 4) { if (announce) ShowToast(XS("Старый конфиг — пересохрани")); return; }
+    if (s.magic != 0x58564345U || s.version != 4) {
+        if (announce) ShowToast(XS("Старый конфиг — пересохрани"));
+        benz_log("конфиг: %s несовместим (magic=%08x ver=%d)", name,
+                 (unsigned)s.magic, (int)s.version);
+        return;
+    }
+    benz_log("конфиг: загружен %s", name);
     // Загруженный конфиг становится самым свежим: startup восстанавливает по mtime.
     utime(path.c_str(), nullptr);
 
@@ -667,6 +676,7 @@ void ConfigLoadLast() {
 void ConfigDelete(int idx) {
     if (idx < 0 || idx >= g_configCount) return;
     std::string path = CfgPath(g_configs[idx].name);
+    benz_log("конфиг: удалён %s", g_configs[idx].name);
     if (strcmp(g_configs[idx].name, g_loadedConfigName) == 0) {
         g_loadedConfigName[0] = '\0';
         g_cfgLoadedIdx = -1;

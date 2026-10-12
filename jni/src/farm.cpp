@@ -10,50 +10,14 @@
 #include "esp_draw.h"            // FrameBoxes
 #include "menu.h"                // g_calibMode
 #include "process.h"             // g_esp_attached
+#include "benz_log.h"            // центральный лог benzware.log
 #include <cmath>
-#include <cstdarg>
-#include <cstdio>
-#include <ctime>
-#include <mutex>
-#include <sys/time.h>
 
-// ==== Диаг-лог фарма: «не спавнит крестик» ==================================
-// В этой сборке общего писателя benzware.log нет — свой автономный: отдельный
-// файл, append, mutex, ротация на 1 МБ. Вопрос, который он отвечает:
-//   (1) удары наносят урон вообще? (node_health падает по тактам),
-//   (2) в момент удара что с лучом игры (ray_valid/self/blocked/foreign),
-//   (3) записи farmjoy (атака/бег/стик) реально проходят (attack_why и т.п.).
-namespace {
-std::mutex g_flogMutex;
-FILE*      g_flogFile = nullptr;
-void farmLog(const char* fmt, ...) {
-    char line[512];
-    va_list ap; va_start(ap, fmt);
-    vsnprintf(line, sizeof(line), fmt, ap);
-    va_end(ap);
-    std::lock_guard<std::mutex> lk(g_flogMutex);
-    FILE* f = g_flogFile;
-    if (!f) {
-        f = fopen("/storage/emulated/0/Download/benzware_farm.log", "a");
-        if (!f) return;
-        g_flogFile = f;
-        setvbuf(f, nullptr, _IOLBF, 0);   // построчно — kill не съест хвост
-    }
-    if (ftell(f) > (1 << 20)) {           // ротация: файл не растёт бесконечно
-        fclose(f);
-        f = fopen("/storage/emulated/0/Download/benzware_farm.log", "w");
-        if (!f) return;
-        g_flogFile = f;
-        setvbuf(f, nullptr, _IOLBF, 0);
-    }
-    char ts[24];
-    struct timeval tv; gettimeofday(&tv, nullptr);
-    struct tm tmv; localtime_r(&tv.tv_sec, &tmv);
-    snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
-             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)(tv.tv_usec / 1000));
-    fprintf(f, "%s %s\n", ts, line);
-}
-}
+// ==== Диаг фарма: «не спавнит крестик» =====================================
+// Вопрос, который должен ответить лог (строки SWING#/HB/NODE/PHASE/PIN в
+// benzware.log): удары наносят урон вообще (node_health падает по тактам),
+// что с лучом игры в момент удара (ray_valid/self/blocked/foreign) и прошли
+// ли записи farmjoy (атака/бег/стик — why-коды в HB).
 
 // Главный принцип: КАМЕРА СМОТРИТ В ЦЕНТР РЕСУРСА, А УДАРЫ ИДУТ ПО
 // КРЕСТИКАМ. Крестик (hit-streak marker) читается напрямую из памяти игры:
@@ -309,7 +273,7 @@ static void UpdateFarmInner(float dt) {
     esp_farm_set_range(g_state.farm_range);
 
     if (mask == 0 || !g_esp_attached) {
-        if (s_dbgOn) farmLog("FARM OFF (mask=%u attached=%d)", (unsigned)mask, (int)g_esp_attached);
+        if (s_dbgOn) benz_log("FARM OFF (mask=%u attached=%d)", (unsigned)mask, (int)g_esp_attached);
         s_dbgOn = false; s_dbgPhase = 0; s_dbgSwings = 0;
         releaseAll();
         g_farmActive = false; g_farmPhase = 0; g_farmPaused = false;
@@ -319,7 +283,7 @@ static void UpdateFarmInner(float dt) {
         return;
     }
     if (!s_dbgOn) {
-        farmLog("FARM ON mask=%u range=%.1f", (unsigned)mask, (double)g_state.farm_range);
+        benz_log("FARM ON mask=%u range=%.1f", (unsigned)mask, (double)g_state.farm_range);
         s_dbgOn = true; s_dbgSwings = 0;
     }
     // Aim owns the camera while tracking a player, and calibration owns the
@@ -438,7 +402,7 @@ static void UpdateFarmInner(float dt) {
         s_healthStart = tgt.node_health;
         s_blockedTime = 0.f;
         s_dbgSwings = 0; s_dbgHbHp = tgt.node_health;
-        farmLog("NODE id=%llu kind=%d hp=%.1f/%.1f frac=%.2f ext=%d spot=%d src=%d "
+        benz_log("NODE id=%llu kind=%d hp=%.1f/%.1f frac=%.2f ext=%d spot=%d src=%d "
                 "reach=%.2f period=%.2f dist=%.1f purposes=%d/%d",
                 tgt.id, tgt.kind, tgt.node_health, tgt.node_health_max, tgt.fraction,
                 (int)tgt.ext_found, (int)tgt.has_spot, tgt.spot_source,
@@ -578,7 +542,7 @@ static void UpdateFarmInner(float dt) {
     const int phase = inReach ? 3 : 2;
     g_farmPhase = phase;
     if (phase != s_dbgPhase) {
-        farmLog("PHASE %d->%d id=%llu dist=%.1f ray=%d self=%d blk=%d fgn=%d",
+        benz_log("PHASE %d->%d id=%llu dist=%.1f ray=%d self=%d blk=%d fgn=%d",
                 s_dbgPhase, phase, tgt.id, (double)tgt.node_dist,
                 (int)tgt.ray_valid, (int)tgt.ray_self, (int)tgt.ray_blocked, (int)tgt.ray_foreign);
         s_dbgPhase = phase;
@@ -594,7 +558,7 @@ static void UpdateFarmInner(float dt) {
                             ? s_dbgHbHp - tgt.node_health : -1.f;
             s_dbgHbHp = tgt.node_health;
             farmjoy::Status js = farmjoy::status();
-            farmLog("HB id=%llu hp=%.1f dHp=%.1f swings=%d ray=%d self=%d why=%d blk=%d "
+            benz_log("HB id=%llu hp=%.1f dHp=%.1f swings=%d ray=%d self=%d why=%d blk=%d "
                     "fgn=%d rd=%.2f reach=%.2f ext=%d spot=%d src=%d st=%d | "
                     "joy cand=%d conf=%d atk=%d atkwhy=%d spr=%d sprwhy=%d",
                     tgt.id, tgt.node_health, dHp, s_dbgSwings,
@@ -643,7 +607,7 @@ static void UpdateFarmInner(float dt) {
             }
         }
         if (s_pinOn && !s_dbgPinLogged) {
-            farmLog("PIN ARMED id=%llu tree=%d ext=0x%llx marker=0x%llx",
+            benz_log("PIN ARMED id=%llu tree=%d ext=0x%llx marker=0x%llx",
                     tgt.id, (int)(tgt.kind == 0),
                     (unsigned long long)tgt.cross_ext,
                     (unsigned long long)tgt.cross_marker_transform);
@@ -937,7 +901,7 @@ static void UpdateFarmInner(float dt) {
                 // кнопки. Это и есть ответ на «крестик не спавнится»: виден ли
                 // замах игре (ray_self), сколько hp до/после (по HB), прошла ли
                 // запись (atkOk / atkwhy в HB).
-                farmLog("SWING#%d ok=%d id=%llu hp=%.1f ray=%d self=%d why=%d blk=%d "
+                benz_log("SWING#%d ok=%d id=%llu hp=%.1f ray=%d self=%d why=%d blk=%d "
                         "fgn=%d rd=%.2f aim3d=%.2f atSpot=%d ext=%d spot=%d src=%d "
                         "st=%d ayaw=%.1f apit=%.1f",
                         s_dbgSwings, (int)atkOk, tgt.id, tgt.node_health,

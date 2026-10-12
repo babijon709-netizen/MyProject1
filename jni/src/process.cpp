@@ -1,3 +1,4 @@
+#include "benz_log.h"
 #include "process.h"
 #include "game.h"
 
@@ -165,6 +166,7 @@ void start_attach_thread() {
                     g_target_pid = attached_pid;
                     g_esp_attached = true;
                     g_alive_check_failures = 0;
+                    benz_log("attach: игра pid=%d", attached_pid);
                 }
             } else {
                 const bool same_process = pid_still_game(g_target_pid);
@@ -184,6 +186,7 @@ void start_attach_thread() {
                     g_esp_attached = false;
                     g_target_pid = -1;
                     g_alive_check_failures = 0;
+                    benz_log("detach: игра (процесс/память мертва)");
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));

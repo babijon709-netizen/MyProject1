@@ -1,5 +1,6 @@
 #include "farm_joy.h"
 
+#include "benz_log.h"
 #include "farm_joy_core.h"   // логика выбора слоя (тестируется на хосте)
 #include "game_internal.h"
 #include <cmath>
@@ -364,6 +365,15 @@ bool     s_prev_ok = false;
 float    s_ack = 0.0f;            // измеренная скорость сближения, м/с
 int      s_writes = 0;            // удачных записей за сессию
 int      s_why = WHY_OK;
+// Лог why-кодов: только на СМЕНЕ кода. Кнопки атаки/бега пишутся раз в кадр,
+// один устойчивый сбой не должен затопить бензваровский лог.
+static int s_attack_why_log = WHY_OK;
+static int s_sprint_why_log = WHY_OK;
+static void joyWhyLog(const char* what, int why, int& last) {
+    if (last == why) return;
+    last = why;
+    benz_log("JOY %s: why=%d (%s)", what, why, why_text(why));
+}
 unsigned s_sticks = 0;            // какие стики найдены (диагностика)
 
 void revalidate(int candidate) {
@@ -475,14 +485,17 @@ bool attack(bool on) {
     int why = WHY_OK;
     if (!resolve_handler(handler, klass, owner, why)) {
         s_attack_why = why;
+        joyWhyLog("атака", s_attack_why, s_attack_why_log);
         return false;                 // класть 1 было некуда — и не надо
     }
     const unsigned char value = on ? 1u : 0u;
     if (!wr_buf(handler + PLAYER_INPUT_HANDLER_ATTACK_HELD, &value, sizeof(value))) {
         s_attack_why = WHY_WRITE;
+        joyWhyLog("атака", s_attack_why, s_attack_why_log);
         return false;                 // состояние не меняем: попробуем ещё
     }
     s_attack_why = WHY_OK;
+    joyWhyLog("атака", s_attack_why, s_attack_why_log);
     s_attack_value = value;
     return true;
 }
@@ -490,7 +503,11 @@ bool attack(bool on) {
 bool sprint(bool on) {
     if (!on && !s_sprint_on) return true;          // возвращать нечего
     if (!sprint_alive()) {
-        if (!resolve_sprint(s_sprint_chain)) { s_sprint_why = s_sprint_chain.why; return false; }
+        if (!resolve_sprint(s_sprint_chain)) {
+            s_sprint_why = s_sprint_chain.why;
+            joyWhyLog("бег", s_sprint_why, s_sprint_why_log);
+            return false;
+        }
         s_sprint_base_known = false;               // объект мог смениться
     }
     const uint64_t phase_addr = s_sprint_chain.phase;
@@ -501,15 +518,24 @@ bool sprint(bool on) {
         s_sprint_base_known  = true;
     }
     const unsigned char phase = on ? INPUT_ACTION_PHASE_STARTED : s_sprint_base_phase;
-    if (!wr_buf(phase_addr, &phase, sizeof(phase))) { s_sprint_why = WHY_WRITE; return false; }
+    if (!wr_buf(phase_addr, &phase, sizeof(phase))) {
+        s_sprint_why = WHY_WRITE;
+        joyWhyLog("бег", s_sprint_why, s_sprint_why_log);
+        return false;
+    }
     if (s_sprint_direct) {
         const unsigned char press = on ? 1u : s_sprint_base_sprint;
-        if (!wr_buf(press_addr, &press, sizeof(press))) { s_sprint_why = WHY_WRITE; return false; }
+        if (!wr_buf(press_addr, &press, sizeof(press))) {
+            s_sprint_why = WHY_WRITE;
+            joyWhyLog("бег", s_sprint_why, s_sprint_why_log);
+            return false;
+        }
         if (!on) s_sprint_direct = false;
     }
     s_sprint_on = on;
     if (!on) s_sprint_miss = 0;
     s_sprint_why = WHY_OK;
+    joyWhyLog("бег", s_sprint_why, s_sprint_why_log);
     return true;
 }
 
@@ -545,11 +571,22 @@ void observe(float walk_dist, bool clean) {
 
     // Решение по пробе — в ядре (farm_joy_core.h): здесь только его последствия.
     const int from = s_trial.current();
-    if (s_trial.observe(s_dt, walk_dist, clean) != TrialState::NEXT) return;
+    const TrialState::Decision dec = s_trial.observe(s_dt, walk_dist, clean);
+    if (dec == TrialState::CONFIRMED) {
+        // Подтверждение — событие однократное (confirmed_ дальше не сбрасывается,
+        // пока не release): один лог на застёгнутый слой стика.
+        benz_log("JOY стик: кандидат %d (%s) ПОДТВЕРЖДЁН trials=%d сближение=%.2f м/с",
+                 from, candidate_name(from), s_trial.trials(), s_ack);
+        return;
+    }
+    if (dec != TrialState::NEXT) return;
     if (!s_touched[from]) return;
     zero_target(s_targets[from]);   // слой не подтвердился: стик не оставляем нажатым
     s_touched[from] = false;
     s_ack = 0.0f;
+    benz_log("JOY стик: кандидат %d (%s) отклонён fails=%d why=%d (%s)",
+             from, candidate_name(from), s_trial.fails(from),
+             s_targets[from].why, why_text(s_targets[from].why));
 }
 
 Status status() {
