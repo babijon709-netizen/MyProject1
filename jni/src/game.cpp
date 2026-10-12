@@ -7682,6 +7682,44 @@ int esp_camera_state() {
     return (g_cam_pose_valid ? 1 : 0) | (g_cam_pose_derived ? 2 : 0) | (g_aim_ref_valid ? 4 : 0);
 }
 
+// Жизненные показатели локального игрока (см. game.h). Цепочка здоровья — та
+// же, что у остальных игроков в esp_get_boxes, и с той же осторожностью к
+// слотам значения: дизассемблер сеттера Health пишет новое значение в +0x20,
+// а раскладка AsyncReactiveProperty из дампа даёт +0x18, поэтому берём
+// правдоподобное из двух (лог 16:32 подтвердил +0x20). «Не прочиталось» —
+// это -1, а НЕ ноль: ноль по этой цепочке означает настоящую смерть.
+bool esp_local_vitals(float& health, float& health_max, float& damage_stamp) {
+    health = -1.0F;
+    health_max = -1.0F;
+    damage_stamp = -1.0F;
+    if (g_pid <= 0 || !g_il2cpp_base) return false;
+    const uint64_t player = g_local_player ? g_local_player : resolve_local_player();
+    if (!player) return false;
+    const uint64_t vitals = rd_ptr(player + PLAYER_VITALS);
+    if (vitals < 0x10000) return false;
+    float max_health = rd<float>(vitals + VITALS_MAX_HEALTH);
+    if (std::isfinite(max_health) && max_health > 0.0F && max_health < 100000.0F)
+        health_max = max_health;
+    const uint64_t entity = rd_ptr(vitals + PMP_ENTITY);
+    if (entity >= 0x10000) {
+        const uint64_t hv = rd_ptr(entity + PMK_HEALTH);
+        if (hv >= 0x10000) {
+            const float hp20 = rd<float>(hv + HEALTH_VALUE);
+            const float hp18 = rd<float>(hv + ARP_LATEST_VALUE);
+            const auto plausible = [](float v) {
+                return std::isfinite(v) && v >= 0.0F && v <= 100000.0F;
+            };
+            if (plausible(hp20))      health = hp20;
+            else if (plausible(hp18)) health = hp18;
+        }
+    }
+    // Метка урона: поле приватное, семантику не знаем — отдаём сырое значение,
+    // решение принимает автохил (по изменению, см. game_offsets.h).
+    const float stamp = rd<float>(vitals + VITALS_LAST_DAMAGE);
+    if (std::isfinite(stamp) && stamp >= 0.0F && stamp < 1.0e9F) damage_stamp = stamp;
+    return true;
+}
+
 // Pipeline status for the on-screen debug line:
 //   R  = ragdoll build stage (0 ok; 2 no KCC, 3 no anim, 4 anim backref,
 //        5 no ragdoll, 6 no array, 7 bad count, 8/11 few bones, 9 layout,

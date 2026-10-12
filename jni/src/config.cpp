@@ -202,6 +202,83 @@ static void LayoutFromArray(const float* v) {
     g_state.xray_btn_x = cl(v[18]);    g_state.xray_btn_y = cl(v[19]);
 }
 
+// Настройки автохила — третьим прицепом, после UI-прицепа. Ни CfgBlob, ни
+// viewmodel::ConfigExtension, ни CfgUiTrailer не меняются: старые конфиги
+// читаются как раньше, а отсутствие этого прицепа означает «автохил выключен
+// и не настроен» — ровно то, что было до появления фичи.
+struct CfgHealTrailer {
+    uint32_t magic;          // "CUH1"
+    uint32_t version;        // 1
+    uint32_t flags;          // bit 0: автохил вкл, bit 1: лечить только в бою
+    float    hp_pct;         // порог здоровья, %
+    float    combat_s;       // окно боя после урона, с
+    float    hold_ms;        // удержание кнопки использования, мс
+    float    cooldown_s;     // пауза между попытками, с
+    float    react_ms;       // задержка реакции, мс
+    float    tries;          // попыток на серию
+    // Точки (слот аптечки и кнопка использования) — доли экрана, -1 = не заданы:
+    // та же природа, что у прочих калибровок устройства (см. layout выше).
+    float    slot_x, slot_y, use_x, use_y;
+};
+static constexpr uint32_t kCfgHealMagic = 0x31485543u;  // "CUH1"
+
+static void WriteHealTrailer(std::ostream& f) {
+    CfgHealTrailer t{};
+    t.magic = kCfgHealMagic;
+    t.version = 1;
+    t.flags = (g_state.autoheal_on ? 1u : 0u) | (g_state.autoheal_combat_only ? 2u : 0u);
+    t.hp_pct = g_state.autoheal_hp;
+    t.combat_s = g_state.autoheal_combat_s;
+    t.hold_ms = g_state.autoheal_hold_ms;
+    t.cooldown_s = g_state.autoheal_cooldown_s;
+    t.react_ms = g_state.autoheal_react_ms;
+    t.tries = (float)g_state.autoheal_tries;
+    t.slot_x = g_state.autoheal_slot_x; t.slot_y = g_state.autoheal_slot_y;
+    t.use_x = g_state.autoheal_use_x;   t.use_y = g_state.autoheal_use_y;
+    uint8_t buf[sizeof(t)];
+    memcpy(buf, &t, sizeof(t));
+    XorBuf(buf, sizeof(buf));
+    f.write((char*)buf, sizeof(buf));
+}
+
+static bool ReadHealTrailer(std::istream& f, CfgHealTrailer& t) {
+    memset(&t, 0, sizeof(t));
+    uint8_t buf[sizeof(CfgHealTrailer)];
+    f.read((char*)buf, sizeof(buf));
+    const size_t got = (size_t)f.gcount();
+    if (got != sizeof(buf)) return false;
+    XorBuf(buf, got);
+    memcpy(&t, buf, got);
+    return t.magic == kCfgHealMagic && t.version == 1;
+}
+
+// Значения автохила из прицепа в состояние. Диапазоны те же, что у слайдеров:
+// битый/чужой конфиг не должен давать удержание в минуту или порог в 500%.
+static void ApplyHealTrailer(const CfgHealTrailer& t) {
+    auto range = [](float v, float lo, float hi, float def) {
+        return (v >= lo && v <= hi) ? v : def;
+    };
+    g_state.autoheal_on = (t.flags & 1u) != 0;
+    g_state.autoheal_combat_only = (t.flags & 2u) != 0;
+    g_state.autoheal_hp = range(t.hp_pct, 5.f, 95.f, 60.f);
+    g_state.autoheal_combat_s = range(t.combat_s, 0.f, 20.f, 6.f);
+    g_state.autoheal_hold_ms = range(t.hold_ms, 150.f, 6000.f, 3500.f);
+    g_state.autoheal_cooldown_s = range(t.cooldown_s, 0.3f, 10.f, 1.6f);
+    g_state.autoheal_react_ms = range(t.react_ms, 0.f, 800.f, 180.f);
+    const int tries = (int)(t.tries + 0.5f);
+    g_state.autoheal_tries = (tries >= 1 && tries <= 6) ? tries : 3;
+    auto point = [](float v) { return (v >= 0.f && v < 1.f) ? v : -1.f; };
+    g_state.autoheal_slot_x = point(t.slot_x); g_state.autoheal_slot_y = point(t.slot_y);
+    g_state.autoheal_use_x = point(t.use_x);   g_state.autoheal_use_y = point(t.use_y);
+    // Точки без пары не бывают: половина раскладки — это тап в пустоту.
+    if (g_state.autoheal_slot_x < 0.f || g_state.autoheal_slot_y < 0.f) {
+        g_state.autoheal_slot_x = g_state.autoheal_slot_y = -1.f;
+    }
+    if (g_state.autoheal_use_x < 0.f || g_state.autoheal_use_y < 0.f) {
+        g_state.autoheal_use_x = g_state.autoheal_use_y = -1.f;
+    }
+}
+
 static void WriteUiTrailer(std::ostream& f) {
     CfgUiTrailer t{};
     t.magic = kCfgUiMagic;
@@ -427,6 +504,7 @@ static void ConfigSaveToPath(const std::string& path) {
         XorBuf(extra, sizeof(extra));
         f.write((char*)extra, sizeof(extra));
         WriteUiTrailer(f);
+        WriteHealTrailer(f);
         f.close();
         if (f.fail()) remove(tmp.c_str());
         else rename(tmp.c_str(), path.c_str());
@@ -471,6 +549,10 @@ static void LoadCfgByName(const char* name, bool announce) {
     size_t extraGot = (size_t)f.gcount();
     CfgUiTrailer ui{};
     const bool hasUi = ReadUiTrailer(f, ui);
+    // Автохил: прицепа может не быть (конфиг старше фичи) — тогда всё по
+    // умолчанию, а фича выключена.
+    CfgHealTrailer heal{};
+    const bool hasHeal = hasUi && ReadHealTrailer(f, heal);
     f.close();
     if (got != sizeof(buf)) { if (announce) ShowToast(XS("Несовместимый конфиг")); return; }
     XorBuf(buf, sizeof(s));
@@ -578,6 +660,14 @@ static void LoadCfgByName(const char* name, bool announce) {
         g_state.ui_accent_idx = idx;
         g_state.ui_accent_rgb = {cl(ui.accent_rgb[0]), cl(ui.accent_rgb[1]), cl(ui.accent_rgb[2]), 1.0f};
         LayoutFromArray(ui.layout);
+    }
+    // Автохил: прицеп есть — берём из него, нет — сбрасываем точки, чтобы
+    // калибровка от прошлого профиля не била по чужой раскладке.
+    if (hasHeal) {
+        ApplyHealTrailer(heal);
+    } else {
+        g_state.autoheal_slot_x = g_state.autoheal_slot_y = -1.f;
+        g_state.autoheal_use_x = g_state.autoheal_use_y = -1.f;
     }
     // Точка пальца аима. В конфигах, где этого поля ещё не было, лежат значения
     // прежних настроек ESP (2.0 и 0.0) — они вне 0..1 и читаются как «не задана».

@@ -540,6 +540,15 @@ inline constexpr std::uint64_t ARP_LATEST_VALUE      = 0x18; // float latestValu
 // слот выбирается по правдоподобию, а лог печатает оба.
 inline constexpr std::uint64_t HEALTH_VALUE          = 0x20;
 inline constexpr std::uint64_t VITALS_MAX_HEALTH     = 0x88; // GenericVitals.m_MaxHealth
+// Метка последнего полученного урона (автохил: «в бою» = урон свежий).
+//   Oxide.PlayerVitals : EntityVitals : GenericVitals
+//     private float m_LastDamageTime; // 0x158   (dump 11949, TypeDefIndex 9358)
+// Семантика значения в дампе не видна (имя приватное, тип float): это либо
+// Time.time, либо собственный накопитель. Поэтому НЕ сравниваем его с нашим
+// временем — читаем и следим только за ИЗМЕНЕНИЕМ: сдвинулось → игра
+// зарегистрировала урон. Второй, независимый признак боя — падение здоровья
+// между кадрами (см. auto_heal.cpp).
+inline constexpr std::uint64_t VITALS_LAST_DAMAGE     = 0x158; // PlayerVitals.m_LastDamageTime
 
 // ---- Время суток: TOD_Sky (ассет Time Of Day) ------------------------------
 // Oxide.TimeOfDay в боевых сценах не живёт: его ленивые метадата-слоты не

@@ -71,6 +71,22 @@ struct AppState {
     float farm_fire_x = -1.f, farm_fire_y = -1.f;
     // Дальность поиска ресурсов, метры.
     float farm_range = 100.f;
+    // Автохил в бою: применение аптечки штатным тапом, когда нас бьют.
+    // Здоровье ниже autoheal_hp И урон не старше autoheal_combat_s (или
+    // combat_only снят — тогда только порог). Точки задаются калибровкой:
+    // слот аптечки в хотбаре и кнопка использования (доли экрана, -1 = нет).
+    bool  autoheal_on = false;
+    bool  autoheal_combat_only = true;
+    float autoheal_hp = 60.f;          // порог здоровья, %
+    float autoheal_combat_s = 6.f;     // окно «в бою» после урона, с
+    // 3.5 с по умолчанию: бинт применяется ~3 с, аптечка ~4 — недодержали
+    // значит «не подействовало» и лишняя попытка. Слайдер до 6 с.
+    float autoheal_hold_ms = 3500.f;   // сколько держим кнопку использования
+    float autoheal_cooldown_s = 1.6f;  // пауза между попытками
+    float autoheal_react_ms = 180.f;   // задержка реакции после урона
+    int   autoheal_tries = 3;          // попыток на одну серию
+    float autoheal_slot_x = -1.f, autoheal_slot_y = -1.f;
+    float autoheal_use_x = -1.f, autoheal_use_y = -1.f;
     // Иксрей: визуально срезает мир вокруг игрока (0 = выкл), метры.
     bool  xray_on = false;
     float xray_range = 5.f;
@@ -136,6 +152,7 @@ struct AppState {
     float a_always_day = 0;
     float a_ui_dark = 1;
     float a_farm_on = 0, a_farm_wood = 1, a_farm_stone = 0, a_farm_metal = 0, a_farm_sulfur = 0;
+    float a_autoheal_on = 0;
     float a_xray_on = 0;
     float a_xray_btn_show = 0;
     float a_freecam_on = 0;
@@ -144,6 +161,7 @@ struct AppState {
     float a_fps_90 = 0, a_fps_120 = 0, a_fps_144 = 0, a_fps_rst = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size, sl_aim_lead, sl_screen_stretch;
+    SliderAnim sl_heal_hp, sl_heal_combat, sl_heal_hold, sl_heal_cd, sl_heal_react;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()

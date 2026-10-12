@@ -924,6 +924,9 @@ float TabContent(int tab, float dt, float cW) {
         // Вход в окно управления ботом (секция 5). Выбор цветов метки/тела
         // ноды убран по просьбе пользователя — рисуются фирменными цветами.
         CollapsibleHeader("##fnfarm", XS("Автофарм"), 5);
+        // Автохил в бою: своё окно (секция 6) — там порог, окно боя и
+        // калибровка двух точек (слот аптечки и кнопка использования).
+        CollapsibleHeader("##fnaut", XS("Автохил"), 6);
 
         auto& vm = g_state.viewmodel;
         SHdr(XS("Кастомный FOV"));
@@ -1870,6 +1873,8 @@ void RenderMenu() {
             : (g_calibMode == 7) ? XS("Тапни куда поставить зону обзора")
             : (g_calibMode == 8) ? XS("Тапни куда поставить кнопку FakeLag")
             : (g_calibMode == 9) ? XS("Тапни куда поставить кнопку Иксрей")
+            : (g_calibMode == 10) ? XS("Тапни по слоту аптечки")
+            : (g_calibMode == 11) ? XS("Тапни по кнопке использования")
                                  : XS("Тапни по точке, где аим водит палец");
         const char* sub = XS("Тап записывает зону. Меню откроется само.");
         float tfs = ImGui::GetFontSize() * 1.5f;
@@ -1917,6 +1922,14 @@ void RenderMenu() {
             if (g_calibMode == 9) {
                 if (g_state.xray_btn_x >= 0.f) { zx = g_state.xray_btn_x * dw; zy = g_state.xray_btn_y * dh; }
                 else { zx = kXrBtnDefX * dw; zy = kXrBtnDefY * dh; }
+            }
+            // Автохил: слот аптечки и кнопка использования. Пока не заданы —
+            // маркера нет: угадывать чужую раскладку хотбара нечем.
+            if (g_calibMode == 10 && g_state.autoheal_slot_x >= 0.f) {
+                zx = g_state.autoheal_slot_x * dw; zy = g_state.autoheal_slot_y * dh;
+            }
+            if (g_calibMode == 11 && g_state.autoheal_use_x >= 0.f) {
+                zx = g_state.autoheal_use_x * dw; zy = g_state.autoheal_use_y * dh;
             }
             if (zx >= 0.f) {
                 if (g_calibMode == 7) {
@@ -2020,6 +2033,8 @@ void RenderMenu() {
                 const bool fcl  = (g_calibMode == 7);
                 const bool flb  = (g_calibMode == 8);
                 const bool xrb  = (g_calibMode == 9);
+                const bool hsl  = (g_calibMode == 10);
+                const bool hsu  = (g_calibMode == 11);
                 if (g_calibMode == 1) {
                     g_state.farm_joy_x = rx; g_state.farm_joy_y = ry;
                     ShowToast(XS("Зона джойстика сохранена"));
@@ -2054,6 +2069,12 @@ void RenderMenu() {
                     if (fabsf(ry - 0.5f) < 0.04f) ry = 0.5f;
                     g_state.xray_btn_x = rx; g_state.xray_btn_y = ry;
                     ShowToast(XS("Кнопка Иксрей сохранена"));
+                } else if (hsl) {
+                    g_state.autoheal_slot_x = rx; g_state.autoheal_slot_y = ry;
+                    ShowToast(XS("Слот аптечки сохранён"));
+                } else if (hsu) {
+                    g_state.autoheal_use_x = rx; g_state.autoheal_use_y = ry;
+                    ShowToast(XS("Кнопка использования сохранена"));
                 } else {
                     g_state.aim_tx = rx; g_state.aim_ty = ry;
                     ShowToast(XS("Точка пальца сохранена"));
@@ -2065,6 +2086,7 @@ void RenderMenu() {
                 // в окно автофарма, точка аима — на вкладку «Аим», счётчик —
                 // на вкладку «Опции», джойстик и кнопка фрикама — в «Разное».
                 if (farm)            PopoverOpen(XS("Автофарм"), 5);
+                else if (hsl || hsu) PopoverOpen(XS("Автохил"), 6);
                 else if (hud)        g_state.cur_tab = 5;
                 else if (fcb || fcj || fcl || flb || xrb) g_state.cur_tab = 3;
                 else                 g_state.cur_tab = 1;
