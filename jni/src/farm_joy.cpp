@@ -1,5 +1,6 @@
 #include "farm_joy.h"
 
+#include "farm_joy_core.h"   // логика выбора слоя (тестируется на хосте)
 #include "game_internal.h"
 #include <cmath>
 #include <cstring>
@@ -38,12 +39,9 @@ namespace {
 
 constexpr float kStickMax  = 1.00f;   // предел магнитуды стика
 constexpr float kProbeMax  = 0.60f;   // предел магнитуды непроверенного слота ввода
-constexpr float kTrialTime = 0.45f;   // сколько ведём кандидата «на пробу», с
-constexpr float kTrialGood = 0.12f;   // сближение, достаточное для подтверждения, м
-constexpr float kTrialBack = 0.35f;   // на столько ушли от цели — кандидат не тот, м
-constexpr float kCleanDist = 2.00f;   // ближе — подвод к точке удара, а не ходьба
 constexpr float kResolveT  = 1.00f;   // как часто перечитываем цепочку целиком, с
 constexpr float kAckAlpha  = 0.25f;   // сглаживание скорости сближения (диагностика)
+// Длины и пороги пробы — в farm_joy_core.h (там же вся логика выбора слоя).
 
 enum {
     WHY_OK = 0,
@@ -289,21 +287,12 @@ Target resolve(int candidate) {
 
 // --- состояние ------------------------------------------------------------
 
-int      s_cur = C_UI_STICK;      // кандидат, который ведём сейчас
-bool     s_confirmed = false;     // он подтверждён фактическим сближением
-bool     s_rejected[C_COUNT] = {}; // ведёт не туда (поехали назад) — не повторяем
-int      s_fails[C_COUNT] = {};   // просто не подтвердился
-int      s_trials = 0;            // завершённых проб
 Target   s_targets[C_COUNT];
+TrialState s_trial(C_COUNT);      // выбор слоя: проба -> подтверждение/ротация
 float    s_age = kResolveT;       // возраст резолва, с
 float    s_dt = 1.0f / 60.0f;
-bool     s_armed = false;         // стик ведём
-bool     s_strong = false;        // в этом окне велели ненулевую магнитуду
 bool     s_touched[C_COUNT] = {}; // в этот кандидат уже писали (есть что обнулять)
 float    s_x = 0.0f, s_y = 0.0f;  // последний записанный вектор
-float    s_trial = 0.0f;          // время текущей пробы
-float    s_d0 = 0.0f;             // дистанция в начале пробы
-float    s_dmin = 0.0f;           // минимум дистанции за пробу
 float    s_prev_dist = 0.0f;      // дистанция в прошлом кадре (для скорости)
 bool     s_prev_ok = false;
 float    s_ack = 0.0f;            // измеренная скорость сближения, м/с
@@ -311,7 +300,10 @@ int      s_writes = 0;            // удачных записей за сесс
 int      s_why = WHY_OK;
 unsigned s_sticks = 0;            // какие стики найдены (диагностика)
 
-void revalidate(int candidate) { s_targets[candidate] = resolve(candidate); }
+void revalidate(int candidate) {
+    s_targets[candidate] = resolve(candidate);
+    s_trial.set_available(candidate, alive(s_targets[candidate]));
+}
 
 } // namespace
 
@@ -321,7 +313,8 @@ void tick(float dt) {
     s_dt = dt;
     s_age += dt;
 
-    if (s_age >= kResolveT || !alive(s_targets[s_cur])) {
+    const int cur = s_trial.current();
+    if (s_age >= kResolveT || !alive(s_targets[cur])) {
         s_age = 0.0f;
         for (int c = 0; c < C_COUNT; ++c) revalidate(c);
         s_sticks = s_targets[C_UI_STICK].sticks;
@@ -339,7 +332,8 @@ bool probe_slot(int candidate) {
 
 bool command(float x, float y) {
     if (!std::isfinite(x) || !std::isfinite(y)) { release(); return false; }
-    const float limit = (!s_confirmed && probe_slot(s_cur)) ? kProbeMax : kStickMax;
+    const int cur = s_trial.current();
+    const float limit = (!s_trial.confirmed() && probe_slot(cur)) ? kProbeMax : kStickMax;
     const float len = sqrtf(x * x + y * y);
     if (len > limit && len > 0.0f) {
         const float k = limit / len;
@@ -349,27 +343,25 @@ bool command(float x, float y) {
     if (!std::isfinite(x) || !std::isfinite(y)) { release(); return false; }
     s_x = x;
     s_y = y;
-    s_armed = true;
-    s_strong = (len >= 0.5f);
+    s_trial.set_armed(true, len >= 0.5f);
 
-    if (!alive(s_targets[s_cur])) revalidate(s_cur);
-    if (!alive(s_targets[s_cur])) {
-        s_why = s_targets[s_cur].why;
+    if (!alive(s_targets[cur])) revalidate(cur);
+    if (!alive(s_targets[cur])) {
+        s_why = s_targets[cur].why;
         return false;
     }
-    if (!write_target(s_targets[s_cur], x, y)) {
+    if (!write_target(s_targets[cur], x, y)) {
         s_why = WHY_WRITE;
         return false;
     }
     s_why = WHY_OK;
-    s_touched[s_cur] = true;
+    s_touched[cur] = true;
     ++s_writes;
     return true;
 }
 
 void release() {
-    s_armed = false;
-    s_strong = false;
+    s_trial.release();
     s_x = 0.0f;
     s_y = 0.0f;
     for (int c = 0; c < C_COUNT; ++c) {
@@ -377,81 +369,45 @@ void release() {
         zero_target(s_targets[c]);
         s_touched[c] = false;
     }
-    s_trial = 0.0f;
-    s_d0 = 0.0f;
-    s_dmin = 0.0f;
 }
 
 void observe(float walk_dist, bool clean) {
+    // Скорость сближения — только для строки статуса: по «чистым» кадрам.
     const bool usable = clean && std::isfinite(walk_dist) && walk_dist > 0.0f;
     if (!usable) {
         s_prev_ok = false;
-        s_trial = 0.0f;
-        return;
+    } else {
+        if (s_prev_ok && s_dt > 0.0f) {
+            const float rate = (s_prev_dist - walk_dist) / s_dt;   // >0 — сближаемся
+            if (std::isfinite(rate) && rate > -30.0f && rate < 30.0f)
+                s_ack += (rate - s_ack) * kAckAlpha;
+        }
+        s_prev_dist = walk_dist;
+        s_prev_ok = true;
     }
-    if (s_prev_ok && s_dt > 0.0f) {
-        const float rate = (s_prev_dist - walk_dist) / s_dt;   // >0 — сближаемся
-        if (std::isfinite(rate) && rate > -30.0f && rate < 30.0f)
-            s_ack += (rate - s_ack) * kAckAlpha;
-    }
-    s_prev_dist = walk_dist;
-    s_prev_ok = true;
 
-    // Проба идёт только когда бот реально идёт вперёд к цели: на подводе,
-    // в манёвре обхода и у самой точки сближение меряется иначе.
-    if (!s_armed || !s_strong || s_confirmed || walk_dist <= kCleanDist) {
-        s_trial = 0.0f;
-        s_dmin = walk_dist;
-        return;
-    }
-    if (s_trial <= 0.0f) {
-        s_d0 = walk_dist;
-        s_dmin = walk_dist;
-    }
-    s_trial += s_dt;
-    if (walk_dist < s_dmin) s_dmin = walk_dist;
-    if (s_trial < kTrialTime) return;
-
-    const float gain = s_d0 - s_dmin;     // сколько прошли к цели за пробу
-    const float back = walk_dist - s_d0;  // насколько ушли от неё к концу пробы
-    s_trial = 0.0f;
-    ++s_trials;
-    if (gain >= kTrialGood) {
-        s_confirmed = true;               // кандидат везёт: закрепляем до конца сессии
-        return;
-    }
-    if (back >= kTrialBack) {
-        // Поехали назад — это не ввод движения вовсе (или знак перевёрнут):
-        // такой кандидат больше не пробуем, иначе бот будет уходить от цели.
-        s_rejected[s_cur] = true;
-    }
-    ++s_fails[s_cur];
-    if (s_touched[s_cur]) {
-        zero_target(s_targets[s_cur]);    // обнуляем, чтобы не осталось «нажатого» стика
-        s_touched[s_cur] = false;
-    }
-    for (int i = 1; i <= C_COUNT; ++i) {
-        const int c = (s_cur + i) % C_COUNT;
-        if (!s_rejected[c] && alive(s_targets[c])) { s_cur = c; break; }
-    }
-    s_d0 = walk_dist;
-    s_dmin = walk_dist;
+    // Решение по пробе — в ядре (farm_joy_core.h): здесь только его последствия.
+    const int from = s_trial.current();
+    if (s_trial.observe(s_dt, walk_dist, clean) != TrialState::NEXT) return;
+    if (!s_touched[from]) return;
+    zero_target(s_targets[from]);   // слой не подтвердился: стик не оставляем нажатым
+    s_touched[from] = false;
     s_ack = 0.0f;
-    s_prev_ok = false;
 }
 
 Status status() {
     Status out;
-    out.candidate = s_cur;
-    out.confirmed = s_confirmed;
-    out.armed = s_armed;
+    const int cur = s_trial.current();
+    out.candidate = cur;
+    out.confirmed = s_trial.confirmed();
+    out.armed = s_trial.armed();
     out.x = s_x;
     out.y = s_y;
     out.closing_mps = s_ack;
     out.writes = s_writes;
-    out.trials = s_trials;
-    for (int c = 0; c < C_COUNT; ++c) out.fails[c] = s_fails[c];
-    out.why = s_why != WHY_OK ? s_why : s_targets[s_cur].why;
+    out.trials = s_trial.trials();
+    for (int c = 0; c < C_COUNT; ++c) out.fails[c] = s_trial.fails(c);
+    out.why = s_why != WHY_OK ? s_why : s_targets[cur].why;
     out.sticks = s_sticks;
     return out;
 }
