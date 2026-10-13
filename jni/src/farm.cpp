@@ -133,9 +133,20 @@ constexpr float kPitchDeadWalk = 18.0f;  // и только сильно зад�
 // смещение декали от коры. Ниже kSpotTolMin не опускаем: это уже мельче шага
 // записи накопителя (kMemDeadDeg/kMemAckEps), доводиться бессмысленно; выше
 // kSpotTolMax — «по площади», а не по крестику.
-constexpr float kSpotHitM   = 0.09f;     // м: допуск промаха по крестику
+constexpr float kSpotHitM   = 0.09f;     // м: допуск доводки по крестику
 constexpr float kSpotTolMin = 0.30f;     // град
 constexpr float kSpotTolMax = 6.00f;     // град
+// Доводим прицел до ЦЕНТРА крестика, а не «примерно в него»: 2 см промаха на
+// текущей дистанции (не мельче 0.20° — это предел разрешения записи/чтения
+// накопителя). Прежний допуск «в пределах X» на 1.5 м давал до 9 см мимо центра
+// по yaw, а по pitch ошибку до 6° вообще съедала мёртвая зона, и крестик стоял
+// выше/ниже центра экрана.
+constexpr float kSpotAimM    = 0.02f;    // м: докудa доводим прицел
+constexpr float kSpotAimMin  = 0.20f;    // град: предел разрешения доводки
+// Замах открываем чуть раньше идеала: 5 см — заведомо внутри 15 см, которыми
+// игра меряет серию, зато не ждём последних сантиметров доводки.
+constexpr float kSpotSwingM  = 0.05f;    // м: допуск удара по X
+constexpr float kSpotSwingMin= 0.30f;    // град
 // Сколько ждём доводку в допуск, прежде чем махнуть рукой на крестик: стоим в
 // упор, а камера не садится (запись в накопитель не проходит). Тогда бьём по
 // корпусу — урон по узлу идёт, серия просто не растёт; иначе watchdog сдал бы
@@ -494,26 +505,39 @@ static void UpdateFarmInner(float dt) {
     const float reachNow = atSpot ? (wasMining ? meleeHold : meleeTight) : meleeBody;
     const bool inReach = distNow <= reachNow;
 
-    // Допуск наведения по крестику: сколько градусов промаха даёт kSpotHitM
-    // метров на текущем удалении. Меряем от глаза (aim_3d) — угловая ошибка
-    // превращается в промах именно через эту дистанцию.
+    // Допуски наведения по крестику: сколько градусов промаха даёт N метров на
+    // текущем удалении. Меряем от глаза (aim_3d) — угловая ошибка превращается в
+    // промах именно через эту дистанцию.
     const bool lookSpot = tgt.look_spot;
-    float spotTol = kSpotTolMax;
-    {
-        const float eye = (std::isfinite(tgt.aim_3d) && tgt.aim_3d > 0.05f)
+    const float eyeDist = (std::isfinite(tgt.aim_3d) && tgt.aim_3d > 0.05f)
                         ? tgt.aim_3d : tgt.aim_dist;
-        if (std::isfinite(eye) && eye > 0.05f)
-            spotTol = atan2f(kSpotHitM, eye) * 57.29577951f;
-        spotTol = fminf(fmaxf(spotTol, kSpotTolMin), kSpotTolMax);
-    }
-    // Доводка камеры с гистерезисом: доводить начинаем, когда ошибка явно
-    // снаружи, и прекращаем глубоко внутри — иначе камера дёргается
-    // влево-вправо вокруг центра. По крестику обе границы жёсткие: промах
-    // больше spotTol — это уже мимо X (серия не растёт).
+    auto offset_deg = [&](float meters, float min_deg) {
+        float deg = min_deg;
+        if (std::isfinite(eyeDist) && eyeDist > 0.05f)
+            deg = atan2f(meters, eyeDist) * 57.29577951f;
+        return fminf(fmaxf(deg, min_deg), kSpotTolMax);
+    };
+    const float aimTol   = offset_deg(kSpotAimM,   kSpotAimMin);    // докудa доводим
+    const float swingTol = offset_deg(kSpotSwingM, kSpotSwingMin);  // порог удара
+    // Ошибка наведения. По крестику — расхождение «точка попадания -> X» (по нему
+    // удар садится в центр, см. game_farm.cpp), а пока луч не в узле — обычная
+    // «камера смотрит мимо X»; по корпусу — как раньше.
+    const bool aimByHit = lookSpot && tgt.aim_delta_valid;
+    const float steerYaw   = aimByHit ? tgt.aim_dyaw   : tgt.yaw;
+    const float steerPitch = aimByHit ? tgt.aim_dpitch : tgt.pitch;
+    // Мёртвая зона по pitch: по крестику она РАВНА доводке (внутри допуска pitch
+    // всё равно не двигаем, но и ошибка там уже в сантиметрах), по корпусу в
+    // упор половина градуса, а на подходе правим только сильно задранную камеру.
+    const float pitchDead = lookSpot ? aimTol
+                                     : (inReach ? kPitchDeadSpot : kPitchDeadWalk);
+    // По крестику доводим и по pitch до того же допуска (по корпусу мёртвая зона
+    // по pitch съедает ошибку до полуградуса — там это не важно).
+    // Доводка камеры с гистерезисом: доводим, пока ошибка снаружи допуска, и
+    // прекращаем внутри него — так камера встаёт в центр X и не дёргается.
     float startDeg, stopDeg;
     if (lookSpot) {
-        stopDeg  = spotTol;
-        startDeg = fmaxf(spotTol * 1.5f, stopDeg + 0.25f);
+        stopDeg  = aimTol;
+        startDeg = aimTol * 1.6f;
     } else if (inReach) {
         startDeg = kAimBodyStart;
         stopDeg  = kAimBodyStop;
@@ -521,15 +545,11 @@ static void UpdateFarmInner(float dt) {
         startDeg = kAimWalkStart;
         stopDeg  = kAimWalkStop;
     }
-    // Мёртвая зона по pitch: по крестику она равна допуску (иначе субградусная
-    // ошибка по X остаётся недоведённой и удар уходит на сантиметры мимо), по
-    // корпусу в упор половина градуса, а на подходе правим только сильно
-    // задранную камеру.
-    const float pitchDead = lookSpot ? spotTol
-                                     : (inReach ? kPitchDeadSpot : kPitchDeadWalk);
-    const float steerYaw = tgt.yaw;
-    const float steerPitch = tgt.pitch;
-    const float pitchErr = fmaxf(fabsf(steerPitch) - pitchDead, 0.f);
+    // По крестику pitch сравнивается с допуском напрямую: вычитать мёртвую зону
+    // нельзя, иначе errDeg «съедал» ошибку pitch и доводка прекращалась, не
+    // поставив крестик в центр по вертикали.
+    const float pitchErr = lookSpot ? fabsf(steerPitch)
+                                    : fmaxf(fabsf(steerPitch) - pitchDead, 0.f);
     const float errDeg = fmaxf(fabsf(steerYaw), pitchErr);
 
     // В пределах удара — всегда MINE: камера доводится записью в накопитель
@@ -545,11 +565,15 @@ static void UpdateFarmInner(float dt) {
     // допуска: иначе удар ляжет мимо X и серия не вырастет (ради неё всё и
     // делается). По корпусу допуск широкий — узел большой, а первое попадание
     // лишь создаёт крестик.
-    const bool aimOnSpot = fabsf(tgt.yaw) <= spotTol && fabsf(tgt.pitch) <= spotTol;
-    if (phase == 3 && lookSpot && !aimOnSpot) s_spotAimStuck += dt;
+    const bool aimCentered = fabsf(steerYaw) <= aimTol && fabsf(steerPitch) <= aimTol;
+    if (phase == 3 && lookSpot && !aimCentered) s_spotAimStuck += dt;
     else s_spotAimStuck = 0.f;
-    // Страховка: довестись не удаётся долго — бьём по корпусу (урон пройдёт,
-    // серия не вырастет), но узел в работе.
+    // Удар открываем, когда промах в допуске удара (5 см): серия меряется 15 см,
+    // так что этого хватает с запасом. Страховка: довестись не удаётся долго
+    // (запись в накопитель не проходит) — бьём, лишь бы камера смотрела в узел:
+    // урон по узлу пойдёт, серия просто не вырастет, зато watchdog не сдаст
+    // живой узел в чёрный список.
+    const bool aimOnSpot = fabsf(steerYaw) <= swingTol && fabsf(steerPitch) <= swingTol;
     const bool aimSettled = lookSpot
         ? (aimOnSpot || (s_spotAimStuck > kSpotStuckTime &&
                          fabsf(tgt.yaw) <= kSwingBodyYaw))

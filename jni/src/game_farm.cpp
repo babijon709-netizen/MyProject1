@@ -697,6 +697,14 @@ static bool farm_ore_anchor_point(const FarmEntity& node, Vec3& out, float& dist
     return true;
 }
 
+// Санитары наведения по факту попадания: точка попадания и крестик обязаны
+// стоять рядом, иначе это чужая геометрия или мусор чтения и править по ней
+// курс нельзя. kAimDeltaMax — предел «сойдёт для правки» (узел большой, X может
+// стоять на стволе/склоне заметно в стороне от текущего попадания),
+// kAimDeltaNear — «попал вплотную к крестику, владелец уже не важен».
+constexpr float kAimDeltaMax  = 1.20F;
+constexpr float kAimDeltaNear = 0.60F;
+
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
     if (!g_farm_mask) { g_farm_idle_reason = 1; return false; }
@@ -966,11 +974,6 @@ bool esp_farm_get_target(FarmTarget& out) {
     // попадания), так что повторный вызов почти бесплатен.
     int ray_self_why = 0;
     const bool ray_on_node = reach.ray_hit_object && ray_hit_is_self_node(reach, node, ray_self_why);
-    // Луч упёрся в ПОСТОРОННИЙ объект. В этом состоянии наведение по крестику
-    // уводит луч мимо узла (крестик-декаль висит чуть в стороне от меша, и
-    // прицел «по декали» луч меша не цепляет) — там смотрим в корпус узла,
-    // пока луч не вернётся на узел.
-    const bool ray_off_node = reach.ray_valid && reach.ray_hit_object && !ray_on_node;
 
     // ---- Точка удара (куда реально ложатся замахи) ---------------------------
     // Крестик есть — точка удара это ОН: камера ведёт крестик (см. look ниже),
@@ -1025,19 +1028,68 @@ bool esp_farm_get_target(FarmTarget& out) {
         if (look.y < lo) look.y = lo;
         if (look.y > hi) look.y = hi;
     }
-    // Переключение корпус<->крестик с задержкой: у камня маркер иногда висит
-    // под очень пологим углом, и прицел по нему на кадр-два уводит луч с
-    // поверхности — без задержки камера металась бы между X и корпусом, а
-    // удары открывались бы через кадр. Ушли на корпус — держим его ~0.3 с,
-    // этого хватает вернуть луч на узел, а потом снова пробуем X.
-    static int s_body_aim_frames = 0;
-    if (ray_off_node) s_body_aim_frames = 18;
-    else if (s_body_aim_frames > 0) --s_body_aim_frames;
-
-    // look_spot — наружу: контроллер по нему берёт «крестиковый» допуск
-    // наведения (доли градуса) вместо корпусного и жёстче открывает удары.
-    const bool look_spot = has_spot && s_body_aim_frames == 0;
+    // Крестик есть — ведём ЕГО, и всегда: раньше на кадр-другой луч мог уйти в
+    // посторонний объект, и камера откатывалась в центр корпуса. Со стороны это
+    // выглядело как «бот не доводится до крестика»: камера металась между X и
+    // корпусом (это метры по высоте у дерева) и ни разу не вставала в X.
+    // От «махать в чужое» это не спасает и не нужно: замах и так блокируется,
+    // когда луч игры упёрся не в свой узел (swingByRay/ray_foreign в farm.cpp).
+    const bool look_spot = has_spot;
     if (look_spot) look = spot;
+
+    // ---- Наведение ПО ФАКТУ: куда ушёл луч против крестика -------------------
+    // Живой луч прицела игры (GKo.RaycastHit.m_Point) — это буквально та точка,
+    // в которую уйдёт следующий замах. Значит мало вести камеру «на крестик»:
+    // между осью камеры и осью луча могут быть покачивание оружия, отдача и
+    // смещение виртуальной камеры, и тогда крестик «в центре» по нашей мерке, а
+    // удар ложится в стороне. Поэтому ошибкой наведения считаем РАСХОЖДЕНИЕ
+    // «точка попадания -> крестик» и обнуляем именно её: тогда в X садится сам
+    // удар, а не картинка.
+    //
+    // Расхождение сглаживается: по бугристому камню точка попадания дрожит на
+    // сантиметры от кадра к кадру, и камера дёргалась бы вместе с ней. Если луч
+    // надолго ушёл с узла (обход, прицел в землю) — сглаживание начинаем заново.
+    static unsigned long long s_delta_id = 0;
+    static float s_dyaw = 0.f, s_dpitch = 0.f;
+    static int   s_delta_seen = 0;   // 0 — сглаженного значения ещё нет
+    static int   s_delta_gap  = 0;   // кадров подряд без годного расхождения
+    if (s_delta_id != best->identity) {
+        s_delta_id = best->identity; s_delta_seen = 0; s_delta_gap = 0;
+        s_dyaw = 0.f; s_dpitch = 0.f;
+    }
+
+    bool aim_delta_valid = false;
+    float aim_dyaw = 0.f, aim_dpitch = 0.f;
+    if (has_spot && reach.ray_valid && reach.ray_point_valid && reach.ray_distance > 0.05F) {
+        const Vec3 e = {spot.x - reach.ray_point.x, spot.y - reach.ray_point.y,
+                        spot.z - reach.ray_point.z};
+        const float ex = e.x * right.x + e.y * right.y + e.z * right.z;
+        const float eu = e.x * up.x    + e.y * up.y    + e.z * up.z;
+        const float ef = e.x * fwd.x   + e.y * fwd.y   + e.z * fwd.z;
+        const float elen = sqrtf(ex * ex + eu * eu + ef * ef);
+        // Годится и попадание в САМ узел, и попадание вплотную к крестику
+        // (например, луч ушёл в землю под X): расхождение маленькое, значит
+        // правка ведёт именно к X. Дальнее чужое попадание отбрасываем — по
+        // стене/соседнему узлу курс править нельзя.
+        const bool usable = std::isfinite(elen) && elen < kAimDeltaMax &&
+                            (ray_on_node || elen < kAimDeltaNear);
+        if (usable) {
+            const float dy = atan2f(ex, reach.ray_distance) * 57.29577951F;
+            const float dp = atan2f(eu, reach.ray_distance) * 57.29577951F;
+            if (std::isfinite(dy) && std::isfinite(dp)) {
+                if (s_delta_seen == 0) { s_dyaw = dy; s_dpitch = dp; }
+                else { s_dyaw += (dy - s_dyaw) * 0.35F; s_dpitch += (dp - s_dpitch) * 0.35F; }
+                if (s_delta_seen < 60) ++s_delta_seen;
+                s_delta_gap = 0;
+                aim_dyaw = s_dyaw; aim_dpitch = s_dpitch;
+                aim_delta_valid = true;
+            }
+        }
+    }
+    if (!aim_delta_valid && ++s_delta_gap > 30) {
+        s_delta_gap = 0;
+        s_delta_seen = 0;   // сглаженное устарело: следующий годный кадр — заново
+    }
 
     const Vec3 d = {look.x - origin.x, look.y - origin.y, look.z - origin.z};
     const float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
@@ -1215,6 +1267,9 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.at_spot = at_spot;
     out.has_spot = has_spot;
     out.look_spot = look_spot;
+    out.aim_delta_valid = aim_delta_valid;
+    out.aim_dyaw = aim_dyaw;
+    out.aim_dpitch = aim_dpitch;
     out.spot_front = spot_front;
     out.spot_source = spot_source;
     out.streak = streak;
