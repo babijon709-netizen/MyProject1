@@ -380,6 +380,37 @@ inline constexpr std::uint64_t PLAYER_WEAPONS_ARRAY     = 0x1B8;
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_DATA = 0x20; // _playerInventoryData
 inline constexpr std::uint64_t INV_PLAYER_INVENTORY_CLIENT = 0x28; // _playerInventoryClient
 
+// ---- Сверка с dump.cs (11949 релиз и 11957 бета) ----------------------------
+// Профиль ниже проверен против Il2CppDumper-дампов обоих билдов — имена классов
+// там разные (обфускация ротируется), поля и адреса совпадают, и искать класс в
+// новом билде надо по форме, а не по имени:
+//   WeaponPiece (9708 / 9787): Enabled 0x0, Number 0x2, Skin 0x4, SkinLevel
+//     0x6, Loaded 0x7, Mods 0x8 — layout совпадает. Но Number — короткий индекс
+//     в перечислении предметов (Oxide.ItemDatabase 9659: m_Categories 0x18 ->
+//     ItemCategory 9647: m_Items 0x18 -> ItemData), а не постоянный id: у самого
+//     предмета id лежит в m_Id 0x58 и он int. Поэтому подписи по номеру —
+//     последняя подстраховка (weapon_label_for_item_id в game.cpp).
+//   ItemData (9653 / 9731): m_Name 0x18, m_ShortName 0x20, m_Id 0x58 — те же
+//     поля, что читают ITEM_DATA/ITEMDATA_NAME/ITEMDATA_SHORTNAME ниже.
+//   ItemDatabase (9659 / 9737): m_Categories 0x18, m_ById 0x28, m_ByShortName
+//     0x30 — то есть поиск предмета по индексу в перечислении неустойчив, а по
+//     m_Id/shortname — нет.
+//   Oxide.PlayerEventHandler переименован (11949 — Vsh/9369, 11957 — AZn/9447),
+//     имена полей не обфусцированы: LookDirection 0x140, LastLocalHitPoint
+//     0x170, LastLocalHitTime 0x178, все трое Vsf<T> (значение в +0x20) — по
+//     этой тройке класс и находится в новом билде. В обоих дампах на него
+//     ссылается PlayerInputHandler (поле 0x38).
+//   PlayerInputHandler (9310 / 9388): private bool на 0x68 — адрес
+//     PLAYER_INPUT_HANDLER_ATTACK_HELD подтверждён в обоих билдах (имя поля
+//     ротируется: qNz -> PmQ).
+//   PlayerManager (9722 / 9801): bool respawning 0x228 сразу за
+//     nextTerrainCheck 0x224 — подтверждён в обоих билдах.
+//   FPWeaponBase: bool 0x120 и float 0x124 — FPWEAPON_IS_AIMING /
+//     FPWEAPON_SHOT_PERIOD подтверждены в обоих билдах (0x118 там синхронизиро-
+//     ванный wrapper, 0x121 — второй bool того же блока).
+// Имён предметов в дампе нет: ItemData — ScriptableObject, строки живут в
+// global-metadata.dat и бандлах, поэтому items.txt за таблицей номеров всё
+// равно снимается с устройства.
 // ---- Remote (third-person) held weapon, from dump.cs ------------------------
 // The FP objects above are local-only MonoBehaviours, so enemies never resolve
 // through them. What every client *does* get is the networked weapon component:
@@ -442,6 +473,8 @@ inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = 0x18;
 inline constexpr std::uint64_t EVENT_HANDLER_LOOK_DIRECTION  = 0x140;
 // Отметка выстрела: FPHitscan.ZDW(Ray) кладёт сюда точку попадания (0x170) и
 // время (0x178) — по ним в логе видно, когда именно стреляли и что лежало в оси.
+// В дампе 11949 это Vsh (typedef 9369): LastLocalHitPoint / LastLocalHitTime,
+// оба Vsf<float>/Vsf<Vector3> ⇒ SYNC_VALUE_OFFSET обязателен.
 inline constexpr std::uint64_t EVENT_HANDLER_LAST_HIT_POINT  = 0x170;
 inline constexpr std::uint64_t EVENT_HANDLER_LAST_HIT_TIME   = 0x178;
 inline constexpr std::uint64_t SYNC_VALUE_OFFSET             = 0x20;

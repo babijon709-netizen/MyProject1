@@ -6022,11 +6022,12 @@ static uint64_t resolve_player_model_info(uint64_t player, const PlayerAux& aux)
 }
 
 // Route A: PlayerWeapon -> weapon view -> spawned weapon GameObject.
-// Item id -> label, dumped straight from this build's Oxide.ItemDatabase
-// (items.txt, /storage/emulated/0/benzware). The id comes from the synced
-// WeaponPiece.Number, so this is the FIRST choice for the weapon label:
-// exact, cheap (no prefab-name reads), and survives prefab renames. The
-// prefab-name path below stays as the fallback for ids not listed here.
+// Item number -> label, dumped from this build's Oxide.ItemDatabase (items.txt,
+// /storage/emulated/0/benzware). WeaponPiece.Number is an INDEX INTO THE
+// GAME'S ITEM LIST, not a stable id, so it drifts whenever the game adds or
+// removes an item: this lookup is the LAST fallback (see
+// remote_weapon_display_name) and has to be re-dumped after every update — a
+// stale table is worse than no table, because it names the wrong item.
 static const char* weapon_label_for_item_id(int id) {
     switch (id) {
         // -- melee / tools --------------------------------------------------
@@ -6169,12 +6170,6 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
         piece_number = rd<int16_t>(piece + WEAPONPIECE_NUMBER);
         knows_slot = true;
         holds_weapon = (enabled != 0) || piece_number != 0;
-        // Exact match first: the synced item id resolves the label with zero
-        // extra reads and never suffers from renamed/obfuscated prefabs.
-        if (holds_weapon && piece_number != 0) {
-            const char* byId = weapon_label_for_item_id((int)piece_number);
-            if (byId) { snprintf(out, cap, "%s", byId); definite = true; return true; }
-        }
         if (weapon_name_from_view(aux.weapon_component, out, cap)) { definite = true; return true; }
     }
 
@@ -6183,6 +6178,19 @@ static bool remote_weapon_display_name(uint64_t player, char* out, size_t cap, b
     if (aux.model_info && weapon_name_from_model_holders(aux.model_info, out, cap)) {
         definite = true;
         return true;
+    }
+
+    // Номер предмета — ПОСЛЕДНЯЯ подстраховка, а не первый источник. В дампе
+    // 11949 предметы перечисляются так: Oxide.ItemDatabase (9659) m_Categories
+    // 0x18 -> ItemCategory (9647) m_Items 0x18 -> ItemData (9653), у которого
+    // m_Name 0x18, m_ShortName 0x20 и СВОЙ id в m_Id 0x58 (int). Значит
+    // синхронный WeaponPiece.Number (short) — индекс в этом перечислении, а не
+    // постоянный id: игра добавляет и убирает предметы, и индексы сдвигаются
+    // разом — именно так арбалет и подписывался «Факелом». Имя префаба
+    // переживает обновление, число — нет.
+    if (holds_weapon && piece_number != 0) {
+        const char* byId = weapon_label_for_item_id((int)piece_number);
+        if (byId) { snprintf(out, cap, "%s", byId); definite = true; return true; }
     }
 
     // Nothing found. If the synced slot says a weapon *is* equipped, fall back
