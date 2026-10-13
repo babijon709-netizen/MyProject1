@@ -369,9 +369,6 @@ int main(int argc, char* argv[]) {
         shutdown();
         Touch_Close();
         silent_aim::shutdown();
-    // Автоогонь: защёлку кнопки атаки снимаем до отвязки — после выхода чита
-    // вернуть её игре уже некому.
-    AimReleaseTriggerLatch();
         esp_freecam_set(false);
         stop_attach_thread();
         esp_viewmodel_reset(true);

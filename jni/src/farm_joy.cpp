@@ -487,6 +487,16 @@ bool attack(bool on) {
     return true;
 }
 
+bool attack_held(bool& held) {
+    held = false;
+    uint64_t handler = 0, klass = 0, owner = 0;
+    int why = WHY_OK;
+    if (!resolve_handler(handler, klass, owner, why)) { s_attack_why = why; return false; }
+    held = rd<unsigned char>(handler + PLAYER_INPUT_HANDLER_ATTACK_HELD) != 0;
+    s_attack_why = WHY_OK;
+    return true;
+}
+
 bool sprint(bool on) {
     if (!on && !s_sprint_on) return true;          // возвращать нечего
     if (!sprint_alive()) {

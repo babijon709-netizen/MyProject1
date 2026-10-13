@@ -152,8 +152,9 @@ struct CfgBlob {
     //       bit 12 aim "только при стрельбе", bit 13 стрелки 360°,
     //       bit 14 стрелки ВЕЗДЕ (инвертировано, как 4 и 8: старые конфиги
     //              держат 0, то есть «только вне экрана» — как дефолт фичи),
-    //       bit 15 дистанция у стрелок, bit 16 автоогонь при наведении,
-    //       bit 17 радар 360°.
+    //       bit 15 дистанция у стрелок, bit 17 радар 360°.
+    //       Bit 16 belongs to the removed auto-fire option: never written and
+    //       deliberately ignored on load, so it stays reserved like bit 9.
     //   y = marker draw distance (m),
     //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
     //   w = pickup colour packed as r*65536 + g*256 + b (exact in a float,
@@ -406,7 +407,6 @@ static void ConfigSaveToPath(const std::string& path) {
                           (g_state.esp_arrows ? 8192 : 0) |
                           (g_state.esp_arrows_offscreen ? 0 : 16384) |
                           (g_state.esp_arrows_dist ? 32768 : 0) |
-                          (g_state.aim_trigger ? 65536 : 0) |
                           (g_state.esp_radar ? 131072 : 0);
         auto ch = [](float v) { int i = (int)(v * 255.f + 0.5f); return i < 0 ? 0 : (i > 255 ? 255 : i); };
         const float packed = (float)(ch(cfg::esp::pickup_col.x) * 65536
@@ -555,17 +555,16 @@ static void LoadCfgByName(const char* name, bool announce) {
         g_state.esp_house_boxes = (flags & 256) == 0;
         g_state.fakelag_btn_show = (flags & 1024) == 0;
         g_state.xray_btn_show = (flags & 2048) == 0;
-        // Биты 12..17 — новые тумблеры. Конфиги, написанные до них, держат тут
-        // нули, то есть получают дефолты фич (всё выкл, стрелки — только вне
-        // экрана, потому что этот бит инвертирован).
+        // Биты 12..17 — тумблеры новых фич (16 вырезан, см. шапку). Конфиги,
+        // написанные до них, держат тут нули, то есть получают дефолты фич
+        // (всё выкл, стрелки — только вне экрана, потому что этот бит
+        // инвертирован).
         g_state.aim_fire_only = (flags & 4096) != 0;
         g_state.esp_arrows = (flags & 8192) != 0;
         g_state.esp_arrows_offscreen = (flags & 16384) == 0;
         g_state.esp_arrows_dist = (flags & 32768) != 0;
-        g_state.aim_trigger = (flags & 65536) != 0;
         g_state.esp_radar = (flags & 131072) != 0;
         cfg::aim::fire_only = g_state.aim_fire_only;
-        cfg::aim::trigger_bot = g_state.aim_trigger;
         g_state.marker_dist = (s.esp_extra.y >= 25.f && s.esp_extra.y <= 300.f) ? s.esp_extra.y : 150.f;
         int pr = (int)(s.esp_extra.z + 0.5f) - 1;
         g_state.aim_priority = (pr >= 0 && pr <= 2) ? pr : 0;

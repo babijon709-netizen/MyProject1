@@ -20,16 +20,10 @@ struct AppState {
 
     int   cur_tab = 1;   // при запуске открыта вкладка «Аим»
     bool  aim_touch = false, aim_pos = false, aim_special = false, aim_scope_only = false;
-    // «Только при стрельбе»: аим ведёт камеру, только пока из ствола реально
-    // летят выстрелы (см. aim.cpp, признак — метка выстрела игры). Пара к
+    // «Только при стрельбе»: аим ведёт камеру, пока держится кнопка огня
+    // (см. aim.cpp — признак там и у игры, и у хендлера ввода). Пара к
     // «Только в прицеле»: тот смотрит на прицел, этот — на огонь.
     bool  aim_fire_only = false;
-    // Автоогонь при наведении (триггер): держит кнопку атаки, пока крестик на
-    // противнике. Работает сам по себе, с выключенным аимом.
-    bool  aim_trigger = false;
-    // Радиус захвата триггера — проценты короткой стороны экрана (не пиксели:
-    // телефон и планшет обязаны вести себя одинаково).
-    float aim_trigger_radius = 1.6f;
     int   aim_bone = 1;   // 0 голова, 1 шея, 2 тело (как слоты аима)
     // Чем именно аим крутит прицел: 0 тач (синтетический палец), 1 память
     // (запись ввода взгляда в игру), 2 сайлент (запись оси выстрела).
@@ -56,7 +50,7 @@ struct AppState {
     // противника, включая тех, кого нет в кадре (за спиной, из-за угла).
     bool  esp_arrows = false;
     // Радар 360° в углу: те же пеленги, что у стрелок, но точка лежит на
-    // кольце_radara пропорционально дистанции — по нему видно не «где», а
+    // кольце радара пропорционально дистанции — по нему видно не «где», а
     // «кто близко». Размер и дальность — сессионные (в CfgBlob мест нет).
     bool  esp_radar = false;
     float esp_radar_size = 170.f;
@@ -150,7 +144,7 @@ struct AppState {
 
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
-    float a_aim_fire = 0, a_aim_trigger = 0;
+    float a_aim_fire = 0;
     float a_aim_mode0 = 1, a_aim_mode1 = 0, a_aim_mode2 = 0;
     RadioAnim ra_aim_mode0, ra_aim_mode1, ra_aim_mode2;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
@@ -181,7 +175,7 @@ struct AppState {
     float a_fps_90 = 0, a_fps_120 = 0, a_fps_144 = 0, a_fps_rst = 0;
 
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size, sl_aim_lead, sl_screen_stretch;
-    SliderAnim sl_aim_trig_radius, sl_esp_arrow_ring;
+    SliderAnim sl_esp_arrow_ring;
     SliderAnim sl_esp_radar_size, sl_esp_radar_range;
 };
 extern AppState g_state;

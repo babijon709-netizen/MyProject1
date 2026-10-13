@@ -89,23 +89,18 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::bone       = g_state.aim_bone;
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
         cfg::aim::fire_only      = g_state.aim_fire_only;
-        cfg::aim::trigger_bot    = g_state.aim_trigger;
 
         SHdr(XS("Аим"));
-        CardBg(Layout::RowH * 5);
+        CardBg(Layout::RowH * 4);
         const bool aimWasOn = g_state.aim_touch;
         ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
         if (aimWasOn != g_state.aim_touch)
             ;
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
-        // Аим ведёт, только пока из ствола реально летят выстрелы (отметка
-        // выстрела игры). Пара к предыдущему: тот смотрит на прицел, этот — на
-        // огонь. С «Автоогнем» ниже работает в связке: триггер стреляет, аим
-        // подводит прицел под его выстрелы.
+        // Аим ведёт, пока держится кнопка огня: наведение начинается первым
+        // кадром нажатия, а не тогда, когда пуля задела. Пара к предыдущему: тот смотрит на прицел, этот — на
+        // огонь.
         ToggleRow("##ta7", XS("Только при стрельбе"), &g_state.aim_fire_only, g_state.a_aim_fire, false);
-        // Держит кнопку атаки, пока крестик на противнике; работает и с
-        // выключенным аимом. Темп — у оружия, не отсюда.
-        ToggleRow("##ta8", XS("Автоогонь при наведении"), &g_state.aim_trigger, g_state.a_aim_trigger, false);
         ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true, false, &cfg::aim::fov_col);
 
         // ---- Режим: чем именно аим крутит прицел ---------------------------
@@ -234,22 +229,14 @@ float TabContent(int tab, float dt, float cW) {
         }
 
         SHdr(XS("Наводка"));
-        CardBg(Layout::SliderH * 5);
+        CardBg(Layout::SliderH * 3);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", false, false, g_state.sl_gun_str, dt);
         // Предикт: аим ведёт по точке, куда цель уйдёт за N мс.
         // Уровень 0 = вести по кости; шаг 15 мс, уровень 10 = 150 мс.
         SliderRow("##aldd", XS("Предикт"), &g_state.aim_predict,
-                  0.f, 10.f, "%.0f", false, false, g_state.sl_aim_lead, dt);
-        // Автоогонь: насколько широко считать «крестик на противнике» —
-        // проценты короткой стороны (в пикселях телефон и планшет стреляли бы
-        // по-разному). 0% = ровно по кости выбранной точки.
-        SliderRow("##atrr", XS("Радиус автоогня"), &g_state.aim_trigger_radius,
-                  0.f, 8.f, XS("%.1f%"), false, false, g_state.sl_aim_trig_radius, dt);
-        // Пауза между «цель на прицеле» и нажатием кнопки: не давать выстрел
-        // на каждом кадре, где противник только мелькнул из-за угла.
-        SliderRow("##atrd", XS("Задержка"), &g_state.gun_trigger_delay,
-                  0.f, 0.3f, XS("%.2f с"), true, false, g_state.sl_gun_trig, dt);
+                  0.f, 10.f, "%.0f", true, false, g_state.sl_aim_lead, dt);
+
         g_state.aim_predict = std::round(g_state.aim_predict);
         g_state.aim_lead_ms = g_state.aim_predict * kAimPredictStepMs;
 
@@ -1832,7 +1819,6 @@ void RenderMenu() {
     Tick(g_state.a_aim_spec,   g_state.aim_special,        dt);
     Tick(g_state.a_aim_scope,  g_state.aim_scope_only,     dt);
     Tick(g_state.a_aim_fire,   g_state.aim_fire_only,      dt);
-    Tick(g_state.a_aim_trigger, g_state.aim_trigger,       dt);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
     Tick(g_state.a_esp_wall,   g_state.esp_wall,           dt);
