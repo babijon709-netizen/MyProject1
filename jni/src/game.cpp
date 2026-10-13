@@ -15,6 +15,7 @@
 #include "player_motion_prediction.h" // дорисовка сетевых позиций между тиками
 #include "mount_latch.h"           // удержание бокса на транспорте (хост-проверяемый)
 #include "body_clip.h"             // отсечение тела по ближней плоскости (хост-проверяемый)
+#include "weapon_name.h"            // имена оружия в подписях (хост-проверяемые)
 #include "Vector.h"
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
@@ -562,149 +563,11 @@ static bool fp_object_display_name(uint64_t weapon, uint64_t player, bool strict
     return false;
 }
 
-// ===================== Weapon label localisation =====================
-//
-// Weapon labels arrive in three flavours: the item definition name for the
-// local player ("Assault Rifle"), the item short name ("assault.rifle") and —
-// for remote players — the prefab name of the model in their hands, which the
-// game builds as "<NN>_Default<Name>" / "<NN>_Skin<Name>" (e.g.
-// "07_DefaultAssault Riffle"). All three are reduced to a normalized key
-// (lowercase letters and digits only) and mapped to one Russian name, so the
-// skin/prefab decorations never reach the screen.
-static void weapon_key_normalize(const char* in, char* out, size_t cap) {
-    size_t n = 0;
-    for (const char* p = in; *p && n + 1 < cap; ++p) {
-        unsigned char c = (unsigned char)*p;
-        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
-        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out[n++] = (char)c;
-    }
-    out[n] = '\0';
-}
-
-// Every weapon / tool / throwable the game ships (item list from class `rs`
-// in dump.cs). `key` is the normalized form, `en` the name the game itself
-// uses in its UI (ItemData.m_Name) and `ru` the Russian variant.
-//
-// The table is a canonicaliser, not a whitelist: a weapon that is missing here
-// still shows up, just with the cleaned prefab name. Its job is to make the
-// label identical no matter which source it came from (prefab name, item name
-// or short name) and to survive any extra decoration a skin prefab may carry.
-//
-// Matching is exact first, then longest-substring, so "pickaxehammer" wins
-// over "pickaxe" and "crossbow" over "bow" regardless of the order here.
-struct WeaponName { const char* key; const char* en; const char* ru; };
-static const WeaponName kWeaponNames[] = {
-    // ---- Firearms ----
-    {"assaultriffle",         "AK-47",           "АК-47"},
-    {"assaultrifle",          "AK-47",           "АК-47"},
-    {"fnfal",                 "FN FAL",          "Автомат FAL"},
-    {"thompson",              "Thompson",        "Томпсон"},
-    {"krissvector",           "Kriss Vector",    "Вектор"},
-    {"vector",                "Kriss Vector",    "Вектор"},
-    {"submachinegun",         "Submachine Gun",  "Пистолет-пулемёт"},
-    {"smg",                   "Submachine Gun",  "Пистолет-пулемёт"},
-    {"steelballgun",          "Steel Ball Gun",  "Шаровое ружьё"},
-    {"shotgun",               "Shotgun",         "Дробовик"},
-    {"huntingriffle",         "Hunting Rifle",   "Охотничья винтовка"},
-    {"huntingrifle",          "Hunting Rifle",   "Охотничья винтовка"},
-    {"winchester",            "Winchester",      "Винчестер"},
-    {"dmr",                   "DMR",             "Винтовка DMR"},
-    {"dvl",                   "DVL",             "Снайперская винтовка"},
-    {"sniperriffle",          "Sniper Rifle",    "Снайперская винтовка"},
-    {"sniperrifle",           "Sniper Rifle",    "Снайперская винтовка"},
-    {"hmlmg",                 "HMLMG",           "Пулемёт"},
-    {"lmg",                   "LMG",             "Пулемёт"},
-    {"machinegun",            "Machine Gun",     "Пулемёт"},
-    {"revolver",              "Revolver",        "Револьвер"},
-    {"deserteagle",           "Desert Eagle",    "Дезерт Игл"},
-    {"handmadepistol",        "Handmade Pistol", "Самодельный пистолет"},
-    {"pistol",                "Pistol",          "Пистолет"},
-    {"flaregun",              "Flare Gun",       "Ракетница"},
-    {"rocketlauncher",        "Rocket Launcher", "РПГ"},
-    // ---- Bows ----
-    {"crossbow",              "Crossbow",        "Арбалет"},
-    {"woodenbow",             "Wooden Bow",      "Лук"},
-    {"bowarrow",              "Wooden Bow",      "Лук"},
-    {"bow",                   "Wooden Bow",      "Лук"},
-    // ---- Melee ----
-    {"machete",               "Machete",             "Мачете"},
-    {"mace",                  "Mace",                "Булава"},
-    {"boneclub",              "Bone Club",           "Костяная дубина"},
-    {"woodenspikedclub",      "Wooden Spiked Club",  "Шипованная дубина"},
-    {"spikedclub",            "Wooden Spiked Club",  "Шипованная дубина"},
-    {"woodenspear",           "Wooden Spear",        "Деревянное копьё"},
-    {"ironspear",             "Iron Spear",          "Железное копьё"},
-    {"icespear",              "Ice Spear",           "Ледяное копьё"},
-    {"spear",                 "Spear",               "Копьё"},
-    {"fists",                 "Fists",               "Кулаки"},
-    {"unarmed",               "Fists",               "Кулаки"},
-    // Пустые руки игра называет головой модели («MaleHead»).
-    {"malehead",              "Hand",                "Рука"},
-    {"femalehead",            "Hand",                "Рука"},
-    // ---- Tools ----
-    {"stonehatchet",          "Stone Hatchet",   "Каменный топор"},
-    {"hatchet",               "Hatchet",         "Топор"},
-    {"axe",                   "Axe",             "Топор"},
-    {"pickaxehammer",         "Pickaxe Hammer",  "Кирка-молот"},
-    {"pickaxe",               "Pickaxe",         "Кирка"},
-    {"buildinghammer",        "Building Hammer", "Молоток"},
-    {"hammer",                "Hammer",          "Молоток"},
-    {"sawripper",             "Saw Ripper",      "Пила"},
-    {"chainsaw",              "Chainsaw",        "Бензопила"},
-    {"jackhammer",            "Jackhammer",      "Отбойный молоток"},
-    {"torch",                 "Torch",           "Факел"},
-    {"buildingplan",          "Building Plan",   "План постройки"},
-    {"rock",                  "Rock",            "Камень"},
-    // ---- Throwables / explosives ----
-    {"explosivecharge",       "Explosive Charge",   "С4"},
-    {"c4",                    "Explosive Charge",   "С4"},
-    {"eventgrenadesmoke",     "Smoke Grenade",      "Дымовая граната"},
-    {"smokegrenade",          "Smoke Grenade",      "Дымовая граната"},
-    {"eventgrenademakeshift", "Makeshift Grenade",  "Самодельная граната"},
-    {"makeshiftgrenade",      "Makeshift Grenade",  "Самодельная граната"},
-    {"grenadecupcake",        "Cupcake Grenade",    "Граната-кекс"},
-    {"grenademilitary",       "Grenade",            "Граната"},
-    {"grenade",               "Grenade",            "Граната"},
-    {"tacticalairmarker",     "Air Marker",         "Авиамаркер"},
-    {"snowball",              "Snowball",           "Снежок"},
-    // ---- Other things that can be in hands ----
-    {"medkit",                "Medkit",         "Аптечка"},
-    {"bandage",               "Bandage",        "Бинт"},
-    {"waterbottle",           "Water Bottle",   "Бутылка воды"},
-    {"fireworks",             "Fireworks",      "Фейерверк"},
-    {"cctvcamera",            "CCTV Camera",    "Камера"},
-    {"binoculars",            "Binoculars",     "Бинокль"},
-    {"fishingrod",            "Fishing Rod",    "Удочка"},
-    {"flaslight",             "Flashlight",     "Фонарик"},
-    {"flashlight",            "Flashlight",     "Фонарик"},
-};
-
-// Canonicalise the label: replace it with the game's own name for that weapon
-// so the same gun always reads the same, whichever source it came from and
-// whatever decoration its skin prefab carried. Weapons missing from the table
-// keep their cleaned name, so nothing ever disappears from the box.
-//
-// Язык подписи оружия берётся из переключателя в «Опциях»: русский (или
-// короткое имя из таблицы, если русского нет) либо английское имя, как его
-// пишет сама игра в ItemData.m_Name — оно и лежит в колонке `en`.
-
+// Имена оружия — в weapon_name.h (чистая таблица + сопоставление, на них есть
+// хост-тест). Здесь только обёртка: вызов идёт после того, как подпись собрана
+// из любого из трёх источников, и язык берётся тот же, что у остального GUI.
 static bool canonical_weapon_label(char* label, size_t cap) {
-    if (!label || !label[0] || cap < 2) return false;
-    char key[80];
-    weapon_key_normalize(label, key, sizeof(key));
-    if (!key[0]) return false;
-    const WeaponName* best = nullptr;
-    size_t best_len = 0;
-    for (const WeaponName& entry : kWeaponNames) {
-        if (strcmp(key, entry.key) == 0) { best = &entry; break; }
-        size_t len = strlen(entry.key);
-        if (len > best_len && strstr(key, entry.key)) { best = &entry; best_len = len; }
-    }
-    if (!best) return false;
-    const char* pick = (lang::english() || !best->ru) ? best->en : best->ru;
-    if (!pick || !pick[0]) return false;
-    CopyTextUtf8(label, cap, pick);
-    return true;
+    return weaponname::canonicalize(label, cap, lang::english());
 }
 
 // Third-person (networked) held weapon. Defined further down, next to the
@@ -6229,26 +6092,52 @@ static bool weapon_name_from_view(uint64_t weapon_component, char* out, size_t c
     return false;
 }
 
+// Критерий «это не оружие, а предмет в руках» живёт в weapon_name.h рядом с
+// таблицей имён: он нужен и здесь, и хост-тесту.
+static bool weapon_label_is_held_utility(const char* label) {
+    return weaponname::is_held_utility(label);
+}
+
 // Route B: the weapon prefab is parented under the model's weapon holders.
+// Все дети холдера перебираются ДО ВЫБОРА: настоящий предмет может стоять в
+// списке вторым или третьим, а порядок детей — это порядок их появления, то
+// есть устаревший свет/аптечка почти всегда впереди свежего оружия.
 static bool weapon_name_from_model_holders(uint64_t model_info, char* out, size_t cap) {
     const uint64_t holders[2] = {MODELINFO_RIGHT_WEAPON_HOLDER, MODELINFO_LEFT_WEAPON_HOLDER};
-    char raw[48];
+    char utility[48] = {};   // первая «утилитарная» подпись — только если оружия нет
+    bool have_utility = false;
     for (uint64_t holder_offset : holders) {
         uint64_t holder = managed_object_native(rd_ptr(model_info + holder_offset));
         if (!holder) continue;
         uint64_t children[8];
         int count = read_transform_children(holder, children, 8);
         for (int i = 0; i < count; ++i) {
-            if (!read_transform_name(children[i], raw, sizeof(raw))) continue;
-            if (weapon_label_from_object_name(raw, out, cap)) return true;
-            // The holder may add one wrapper node; look one level deeper.
+            // Холдер может добавлять один оборачивающий узел, поэтому помимо
+            // самого ребёнка перебираем и его детей (k < 0 — сам ребёник).
             uint64_t grandchildren[4];
-            int sub = read_transform_children(children[i], grandchildren, 4);
-            for (int k = 0; k < sub; ++k) {
-                if (read_transform_name(grandchildren[k], raw, sizeof(raw)) &&
-                    weapon_label_from_object_name(raw, out, cap)) return true;
+            const int sub = read_transform_children(children[i], grandchildren, 4);
+            for (int k = -1; k < sub; ++k) {
+                const uint64_t node = (k < 0) ? children[i] : grandchildren[k];
+                char raw_name[48];
+                if (!read_transform_name(node, raw_name, sizeof(raw_name))) continue;
+                char candidate[48];
+                if (!weapon_label_from_object_name(raw_name, candidate, sizeof(candidate)))
+                    continue;
+                if (weapon_label_is_held_utility(candidate)) {
+                    if (!have_utility) {
+                        have_utility = true;
+                        snprintf(utility, sizeof(utility), "%s", candidate);
+                    }
+                    continue;   // вдруг дальше настоящее оружие
+                }
+                snprintf(out, cap, "%s", candidate);
+                return true;
             }
         }
+    }
+    if (have_utility) {
+        snprintf(out, cap, "%s", utility);
+        return true;
     }
     return false;
 }
