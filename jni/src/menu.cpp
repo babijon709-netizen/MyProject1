@@ -3,6 +3,7 @@
 #include "Android_touch/TouchHelperA.h"   // Touch_GetActive/BlockRect (фрикам)
 #include "game.h"
 #include "game_offsets_active.h"
+#include "game_internal.h"        // vis_dump_meshes/vis_dump_report: рантайм-дампер мешей
 #include "app_state.h"
 #include "cfg.h"
 #include "theme.h"
@@ -418,8 +419,9 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Видимость"));
         {
             const float visRowH = Layout::RowH;
-            // Три строки: тумблер, состояние меша карты, состояние построек.
-            CardBg(visRowH * 3.f);
+            // Четыре строки: тумблер, состояние меша карты, состояние построек,
+            // рантайм-дампер мешей.
+            CardBg(visRowH * 4.f);
             ToggleRow("##vvis", XS("Видимость"), &g_state.esp_vis, g_state.a_esp_vis, false, true);
             auto pos = ImGui::GetCursorScreenPos();
             const float availW = ImGui::GetContentRegionAvail().x;
@@ -474,6 +476,34 @@ float TabContent(int tab, float dt, float cW) {
                          {pos3.x + availW - Layout::Inset - Layout::PadX - dynTw,
                           pos3.y + visRowH * 0.5f - fs2 * 0.44f},
                          C::UA(C::Acc(), 1.f), dynTxt);
+
+            // Рантайм-дампер мешей: тап запускает один возобновляемый проход по
+            // spawned с небольшим бюджетом, который пишет .obj построек прямо в
+            // каталог префабов (pieces_dir). Несколько тапов добивают реестр;
+            // библиотека подхватит файлы после перезапуска. Справа — живая
+            // сводка: сколько .obj записали и сошлась ли раскладка VBO.
+            const bool dumpPopBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            auto pos4 = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##vvis_dump", {availW, visRowH});
+            char dumpRep[160];
+            vis_dump_report(dumpRep, sizeof(dumpRep));
+            if (WasTappedHere() && !dumpPopBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                const int added = vis_dump_meshes(48, 0.35);
+                vis_dump_report(dumpRep, sizeof(dumpRep));
+                char msg[224];
+                snprintf(msg, sizeof(msg), XS("Дамп мешей: +%d | %s"), added, dumpRep);
+                ShowToast(msg);
+                PlaySound(SND_CLICK);
+                g_input.touchConsumed = true;
+            }
+            const float repW = ImGui::CalcTextSize(dumpRep).x;
+            dl2->AddText(fn2, fs2, {pos4.x + Layout::Inset + Layout::PadX,
+                                    pos4.y + visRowH * 0.5f - fs2 * 0.5f},
+                         C::UA(C::Txt(), 1.f), XS("Дамп мешей"));
+            dl2->AddText(fn2, fs2 * 0.8f,
+                         {pos4.x + availW - Layout::Inset - Layout::PadX - repW,
+                          pos4.y + visRowH * 0.5f - fs2 * 0.4f},
+                         C::UA(C::Dim(), 1.f), dumpRep);
         }
 
         ImGui::Dummy({1.f, 12.f});

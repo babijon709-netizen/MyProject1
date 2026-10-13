@@ -7,13 +7,16 @@
 #include "manes_aim_source.h"
 #include "lang.h"
 #include "vis_check_map.h"   // динамика видимости: библиотека префабов + дерево построек
+#include "mesh_dump.h"       // рантайм-дампер мешей: поиск раскладки VBO + .obj
 #include <algorithm>
 #include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#include <sys/stat.h>
 
 using namespace go_active;
 
@@ -1570,6 +1573,7 @@ void reset_marker_caches() {
     g_farm_blacklist.clear();
     farm_scan_reset();
     vis_dyn_reset();
+    vis_dump_reset();   // мир перезагружен: прежний дедуп мешей и проход не нужны
 }
 
 // Точка головы бота из модели (NPCBrainHumanoid.modelInfo.head) — та же кость,
@@ -2276,4 +2280,236 @@ static void vis_dyn_reset() {
     // «стена», которой больше не существует, гасила бы цели до следующего прохода.
     vis_map::publish_dyn({});
     vis_dyn::set_counts(0, 0, 0);
+}
+
+// ==== Рантайм-дампер мешей ==================================================
+// Пишет .obj геометрии прямо из памяти игры в каталог префабов (pieces_dir),
+// чтобы библиотека видимости подхватила их после перезапуска. Раскладка VBO
+// нативного Mesh заранее неизвестна (нет dump.cs), поэтому первый меш ищется
+// эмпирически (meshdump::DiscoverLayout), а дальше применяется как известная
+// (meshdump::ApplyLayout) — она же и служит признаком «перед нами нативный
+// Mesh». Всё чтение — через rd_buf/rd_ptr (внешний транспорт), никаких вызовов
+// внутри процесса игры.
+namespace {
+
+bool dump_mem_read(void*, uint64_t addr, void* out, size_t n) { return rd_buf(addr, out, n); }
+const meshdump::Reader& dump_reader() {
+    static meshdump::Reader r{dump_mem_read, nullptr};
+    return r;
+}
+
+constexpr int32_t kDumpRegistryLimit = 8192;
+constexpr int     kDumpMaxMeshes     = 400;   // всего .obj за сессию
+constexpr size_t  kDumpSubtreeNodes  = 8;     // детей куска, где ищем MeshFilter
+constexpr double  kDumpDefaultBudget = 1.5;   // сек на один тик кнопки
+
+meshdump::Layout         g_dump_layout{};
+bool                     g_dump_layout_known = false;
+std::unordered_set<uint64_t> g_dump_seen;    // указатели, которые уже пробовали
+int                      g_dump_written = 0;  // сколько .obj записали
+int                      g_dump_scanned = 0;  // сколько GameObject просмотрели
+
+int32_t              g_dump_cursor = -1;       // <0 — проход не начат
+int32_t              g_dump_total  = 0;
+uint64_t             g_dump_identity_class = 0;
+std::vector<uint8_t> g_dump_buffer;
+bool                 g_dump_dir_ready = false;
+
+const char* dump_dir() {
+    if (!g_dump_dir_ready) {
+        ::mkdir(vis_map::pieces_dir(), 0777);   // EEXIST игнорируем
+        g_dump_dir_ready = true;
+    }
+    return vis_map::pieces_dir();
+}
+
+bool dump_write_obj(const std::string& path, const std::string& body) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const size_t w = std::fwrite(body.data(), 1, body.size(), f);
+    std::fclose(f);
+    return w == body.size();
+}
+
+// Имя файла держим ASCII: прочие байты (в т.ч. UTF-8) отбрасываем, пробел -> '_'.
+std::string dump_sanitize(const char* s) {
+    std::string out;
+    for (const char* p = s; p && *p; ++p) {
+        const unsigned char c = (unsigned char)*p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '-' || c == '.')
+            out.push_back((char)c);
+        else if (c == ' ')
+            out.push_back('_');
+    }
+    if (out.empty()) out = "mesh";
+    if (out.size() > 60) out.resize(60);
+    return out;
+}
+
+// Один указатель-кандидат. Пробуем распознать в нём нативный Mesh: сначала
+// известной раскладкой (дёшево), затем полным поиском. Успех -> пишем .obj.
+// Возвращает 1, если записали файл.
+int dump_try_candidate(uint64_t cand, const char* go_name, double deadline) {
+    if (!valid_obj(cand) || g_dump_seen.count(cand)) return 0;
+    if (mono_seconds() > deadline) return 0;
+    g_dump_seen.insert(cand);   // даже провал запоминаем: не перепроверять
+
+    std::vector<vis::Tri> tris;
+    vis::Vec3 center{}, extents{};
+    bool ok = false;
+    if (g_dump_layout_known)
+        ok = meshdump::ApplyLayout(dump_reader(), cand, g_dump_layout, tris, center, extents);
+    if (!ok) {
+        meshdump::Layout lay{};
+        if (meshdump::DiscoverLayout(dump_reader(), cand, lay, tris, center, extents)) {
+            g_dump_layout = lay;
+            g_dump_layout_known = true;
+            ok = true;
+        }
+    }
+    if (!ok || g_dump_written >= kDumpMaxMeshes) return 0;
+
+    const std::string base = (go_name && *go_name)
+        ? dump_sanitize(go_name)
+        : ("mesh_" + std::to_string(g_dump_written + 1));
+    const std::string path = std::string(dump_dir()) + base + ".obj";
+    if (!dump_write_obj(path, meshdump::WriteObj(tris, base.c_str()))) return 0;
+    ++g_dump_written;
+    return 1;
+}
+
+// Просканировать поля нативного компонента (MeshFilter/MeshRenderer). Поле
+// sharedMesh хранит УПРАВЛЯЕМЫЙ Mesh, а нативный лежит по m_CachedPtr, поэтому
+// каждый указатель пробуем и как есть, и через managed_object_native.
+int dump_scan_component(uint64_t native_component, const char* go_name, double deadline, int max_new) {
+    if (!valid_obj(native_component) || max_new <= 0) return 0;
+    int wrote = 0;
+    for (uint32_t off = 8; off + 8 <= meshdump::kScanBytes; off += 8) {
+        if (wrote >= max_new || mono_seconds() > deadline) break;
+        const uint64_t p = rd_ptr(native_component + off);
+        if (!meshdump::looks_like_heap_ptr(p)) continue;
+        wrote += dump_try_candidate(p, go_name, deadline);
+        if (wrote < max_new)
+            wrote += dump_try_candidate(managed_object_native(p), go_name, deadline);
+    }
+    return wrote;
+}
+
+} // namespace
+
+// Один тик дампа по кнопке: продолжает проход по spawned, пока не исчерпан
+// бюджет времени или не записано max_new новых мешей. Проход возобновляется
+// между тиками (снимок реестра читается один раз). Возвращает число новых .obj.
+int vis_dump_meshes(int max_new, double time_budget) {
+    if (max_new <= 0) max_new = 64;
+    if (!(time_budget > 0.0)) time_budget = kDumpDefaultBudget;
+    if (g_dump_written >= kDumpMaxMeshes) return 0;
+
+    const double now = mono_seconds();
+    const double deadline = now + time_budget;
+
+    if (g_dump_cursor < 0) {   // начинаем проход: снимок реестра одним чтением
+        const uint64_t dictionary = resolve_network_client_spawned();
+        if (!dictionary) return 0;
+        g_dump_identity_class = resolve_network_identity_class();
+        int32_t count = 0;
+        if (!rd_exact(dictionary + DICT_COUNT, count) || count <= 0) return 0;
+        const uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+        if (!valid_obj(entries)) return 0;
+        if (count > kDumpRegistryLimit) count = kDumpRegistryLimit;
+        g_dump_buffer.resize((size_t)count * DICT_ENTRY_STRIDE);
+        if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, g_dump_buffer.data(), g_dump_buffer.size()))
+            return 0;
+        g_dump_total = count;
+        g_dump_cursor = 0;
+    }
+
+    int wrote = 0;
+    uint64_t behaviours[8];
+    int32_t i = g_dump_cursor;
+    const int32_t count = g_dump_total;
+    for (; i < count; ++i) {
+        if (wrote >= max_new) break;
+        if (i > g_dump_cursor && mono_seconds() > deadline) break;
+
+        uint64_t identity = 0;
+        memcpy(&identity, g_dump_buffer.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE,
+               sizeof(identity));
+        if (!valid_obj(identity)) continue;
+        if (g_dump_identity_class && rd_ptr(identity) != g_dump_identity_class) continue;
+
+        const uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
+        if (!valid_obj(array)) continue;
+        int32_t bc = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
+        if (bc <= 0) continue;
+        if (bc > 8) bc = 8;
+        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)bc * sizeof(uint64_t)))
+            continue;
+
+        // Нативный GameObject и его Transform (для имени и обхода детей).
+        uint64_t native_go = 0, transform = 0;
+        for (int32_t b = 0; b < bc; ++b) {
+            if (!valid_obj(behaviours[b])) continue;
+            const uint64_t native = managed_object_native(behaviours[b]);
+            if (!native) continue;
+            const uint64_t go = rd_ptr(native + COMPONENT_GAMEOBJECT);
+            const uint64_t t  = native_component_transform(native);
+            if (valid_obj(go) && t) { native_go = go; transform = t; break; }
+        }
+        if (!native_go || !transform) continue;
+
+        char name[48] = {};
+        read_transform_name(transform, name, sizeof(name));
+        ++g_dump_scanned;
+
+        // Меш бывает на самом куске или на LOD-потомке — обходим поддерево.
+        std::vector<uint64_t> nodes;
+        collect_transform_subtree(transform, nodes, kDumpSubtreeNodes);
+        for (size_t n = 0; n < nodes.size() && wrote < max_new; ++n) {
+            char node_name[48] = {};
+            if (n == 0) std::snprintf(node_name, sizeof(node_name), "%s", name);
+            else read_transform_name(nodes[n], node_name, sizeof(node_name));
+            // Transform — тоже Component, его GameObject по тому же +0x20.
+            const uint64_t node_go = rd_ptr(nodes[n] + COMPONENT_GAMEOBJECT);
+            if (!valid_obj(node_go)) continue;
+            const uint64_t mf = gameobject_component_by_class(node_go, "MeshFilter");
+            if (mf) wrote += dump_scan_component(mf, node_name, deadline, max_new - wrote);
+            if (wrote < max_new) {
+                const uint64_t mr = gameobject_component_by_class(node_go, "MeshRenderer");
+                if (mr) wrote += dump_scan_component(mr, node_name, deadline, max_new - wrote);
+            }
+        }
+    }
+
+    g_dump_cursor = (i >= count) ? -1 : i;   // -1 — проход завершён, следующий начнёт новый
+    return wrote;
+}
+
+// Короткая сводка для тоста/меню: сколько записали, просмотрели, сошлась ли
+// раскладка, где лежит проход.
+void vis_dump_report(char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    char lay[64] = "?";
+    if (g_dump_layout_known)
+        std::snprintf(lay, sizeof(lay), "v@0x%X/%u+%u i@0x%X/%u/%u",
+                      g_dump_layout.vbuf_ptr_off, g_dump_layout.vcount_off,
+                      g_dump_layout.vstride_off ? g_dump_layout.vstride_off : g_dump_layout.vstride_fixed,
+                      g_dump_layout.ibuf_ptr_off, g_dump_layout.icount_off,
+                      g_dump_layout.isize_off ? g_dump_layout.isize_off : g_dump_layout.isize_fixed);
+    std::snprintf(out, cap, "obj=%d go=%d layout=%s pass=%d/%d",
+                  g_dump_written, g_dump_scanned, lay,
+                  g_dump_cursor < 0 ? g_dump_total : g_dump_cursor, g_dump_total);
+}
+
+// Сброс при перезагрузке мира: чистим дедуп и счётчики, но раскладку VBO
+// оставляем — она свойство сборки Unity, а не конкретного мира.
+void vis_dump_reset() {
+    g_dump_cursor = -1;
+    g_dump_total = 0;
+    g_dump_buffer.clear();
+    g_dump_identity_class = 0;
+    g_dump_seen.clear();
+    g_dump_written = 0;
+    g_dump_scanned = 0;
 }
