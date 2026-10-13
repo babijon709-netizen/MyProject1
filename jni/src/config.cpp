@@ -170,12 +170,17 @@ static_assert(sizeof(CfgBlob) == 260, "stable cfg blob");
 // keep their layouts; readers that stop at the extension ignore the trailer.
 struct CfgUiTrailer {
     uint32_t magic;          // "CUI1"
-    uint32_t version;        // 1
+    uint32_t version;        // 2
     uint32_t accent_idx;     // 0..8, see app_state.h
     float    accent_rgb[3];
     uint32_t mem_backend;    // EspMemBackend chosen on the mode screen
     float    layout[20];     // -1 = not set
+    // Ручная поправка высоты наведения, градусы (плюс — выше). Поле
+    // добавлено в прицеп, а не в CfgBlob: blob заморожен на 260 байтах
+    // версией 4, и свободных float'ов в его раскладке не осталось.
+    float    aim_trim_deg;   // 0 in every older trailer
 };
+static_assert(sizeof(CfgUiTrailer) == 112, "stable ui trailer");
 static constexpr uint32_t kCfgUiMagic = 0x31495543u;
 
 static void LayoutToArray(float* v) {
@@ -211,7 +216,7 @@ static void LayoutFromArray(const float* v) {
 static void WriteUiTrailer(std::ostream& f) {
     CfgUiTrailer t{};
     t.magic = kCfgUiMagic;
-    t.version = 1;
+    t.version = 2;
     const int idx = g_state.ui_accent_idx;
     t.accent_idx = (uint32_t)((idx >= 0 && idx <= 8) ? idx : 0);
     t.accent_rgb[0] = g_state.ui_accent_rgb.x;
@@ -219,6 +224,7 @@ static void WriteUiTrailer(std::ostream& f) {
     t.accent_rgb[2] = g_state.ui_accent_rgb.z;
     t.mem_backend = (uint32_t)esp_get_mem_backend();
     LayoutToArray(t.layout);
+    t.aim_trim_deg = g_state.aim_trim_deg;
     uint8_t buf[sizeof(t)];
     memcpy(buf, &t, sizeof(t));
     XorBuf(buf, sizeof(buf));
@@ -228,14 +234,23 @@ static void WriteUiTrailer(std::ostream& f) {
 static bool ReadUiTrailer(std::istream& f, CfgUiTrailer& t) {
     memset(&t, 0, sizeof(t));
     for (int i = 0; i < 20; ++i) t.layout[i] = -1.f;
+    t.aim_trim_deg = 0.f;
     uint8_t buf[sizeof(CfgUiTrailer)];
     f.read((char*)buf, sizeof(buf));
     size_t got = (size_t)f.gcount();
-    constexpr size_t kLegacySize = sizeof(CfgUiTrailer) - 2 * sizeof(float);
-    if (got != sizeof(buf) && got != kLegacySize) return false;
+    // Прицеп рос дважды, и каждый раз на одно поле: v0 был на три float
+    // короче нынешнего (без mem_backend и без двух полей раскладки), v1 —
+    // на один (без трима высоты). Читаем столько, сколько в файле есть, и
+    // принимаем все три размера: отвергнуть старый прицеп значило бы
+    // потерять акцент и раскладку конфига, который иначе полностью годен.
+    constexpr size_t kV1Size = sizeof(CfgUiTrailer) - 1 * sizeof(float);
+    constexpr size_t kV0Size = sizeof(CfgUiTrailer) - 3 * sizeof(float);
+    if (got != sizeof(buf) && got != kV1Size && got != kV0Size) return false;
     XorBuf(buf, got);
     memcpy(&t, buf, got);
-    return t.magic == kCfgUiMagic && t.version == 1;
+    if (t.magic != kCfgUiMagic) return false;
+    // Полный прицеп — это v2; укороченные могли прийти только с версией 1.
+    return (got == sizeof(buf)) ? (t.version == 2) : (t.version == 1);
 }
 
 // Единственный источник «текущего» конфига: тот же селектор, что у ConfigLoadLast().
@@ -599,6 +614,15 @@ static void LoadCfgByName(const char* name, bool announce) {
         g_state.ui_accent_idx = idx;
         g_state.ui_accent_rgb = {cl(ui.accent_rgb[0]), cl(ui.accent_rgb[1]), cl(ui.accent_rgb[2]), 1.0f};
         LayoutFromArray(ui.layout);
+        // Трим высоты есть только в прицепе v2; в v0/v1 поле не читалось и
+        // осталось нулём — это и есть «без поправки». Зажимаем, потому что
+        // значение могло быть записано другой сборкой или побито.
+        // Вне диапазона (в том числе NaN — оба сравнения с ним ложны) берём
+        // ноль: побитое или записанное чужой сборкой поле не должно уводить
+        // прицел. Проверка диапазоном, а не std::isfinite: -ffast-math.
+        const float trim = ui.aim_trim_deg;
+        g_state.aim_trim_deg =
+            (trim >= -kAimTrimMaxDeg && trim <= kAimTrimMaxDeg) ? trim : 0.f;
     }
     // Точка пальца аима. В конфигах, где этого поля ещё не было, лежат значения
     // прежних настроек ESP (2.0 и 0.0) — они вне 0..1 и читаются как «не задана».

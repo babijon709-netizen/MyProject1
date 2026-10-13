@@ -202,6 +202,7 @@ static const LangPair kUiEn[] = {
     {"Точка пальца", "Finger point"},
     {"Точка пальца сохранена", "Finger point saved"},
     {"Точка сброшена", "Point reset"},
+    {"Трим высоты", "Height trim"},
     {"Турели", "Turrets"},
     {"Тёмная тема", "Dark theme"},
     {"Удалить", "Delete"},

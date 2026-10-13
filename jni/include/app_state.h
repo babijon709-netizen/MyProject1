@@ -9,6 +9,13 @@
 // Шаг слайдера «Предикт» в миллисекундах (уровень 10 = 150 мс).
 constexpr float kAimPredictStepMs = 15.f;
 
+// Предел ручной поправки высоты наведения (AppState::aim_trim_deg), градусы.
+// Граница одна и для слайдера, и для кода: меню больше не даст, а аим и
+// загрузчик конфига всё равно проверяют — значение приходит не только из
+// слайдера. Три градуса с запасом покрывают любую осмысленную поправку: на
+// 100 м это 5.2 м, дальше на тело уже не навести.
+constexpr float kAimTrimMaxDeg = 3.0f;
+
 struct InputState {
     bool touchConsumed = false;
 };
@@ -89,6 +96,12 @@ struct AppState {
     float aim_lead_ms = 0.f;
     // Предикт: уровень слайдера 0..10, в aim_lead_ms уходит как уровень × 15 мс.
     float aim_predict = 0.f;
+    // Ручная поправка высоты наведения, градусы; плюс — выше, ноль — как
+    // считает игра. Единственная подстройка, которая не зависит от режима:
+    // она сдвигает саму точку прицела до того, как её разобрали по областям.
+    // Хранится в UI-прицепе версии 2 — CfgBlob заморожен на 260 байтах, и
+    // все его float'ы заняты живыми настройками.
+    float aim_trim_deg = 0.f;
     // Автофарм: главный выключатель + какие ресурсы добывать.
     bool  farm_on = false;
     bool  farm_wood = true, farm_stone = false, farm_metal = false, farm_sulfur = false;
@@ -177,6 +190,7 @@ struct AppState {
     SliderAnim sl_gun_str, sl_gun_fov, sl_esp_thick, sl_gun_trig, sl_marker_dist, sl_farm_range, sl_xray, sl_freecam, sl_freecam_look_radius, sl_freecam_joy_size, sl_aim_lead, sl_screen_stretch;
     SliderAnim sl_esp_arrow_ring;
     SliderAnim sl_esp_radar_size, sl_esp_radar_range;
+    SliderAnim sl_aim_trim;
 };
 extern AppState g_state;
 extern std::atomic<bool> main_thread_flag;   // false = выход из main()

@@ -229,13 +229,18 @@ float TabContent(int tab, float dt, float cW) {
         }
 
         SHdr(XS("Наводка"));
-        CardBg(Layout::SliderH * 3);
+        CardBg(Layout::SliderH * 4);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", false, false, g_state.sl_gun_str, dt);
         // Предикт: аим ведёт по точке, куда цель уйдёт за N мс.
         // Уровень 0 = вести по кости; шаг 15 мс, уровень 10 = 150 мс.
         SliderRow("##aldd", XS("Предикт"), &g_state.aim_predict,
-                  0.f, 10.f, "%.0f", true, false, g_state.sl_aim_lead, dt);
+                  0.f, 10.f, "%.0f", false, false, g_state.sl_aim_lead, dt);
+        // Поправка высоты в градусах, плюс — выше. Знак в формате виден
+        // всегда: без него непонятно, в какую сторону крутить.
+        SliderRow("##atrm", XS("Трим высоты"), &g_state.aim_trim_deg,
+                  -kAimTrimMaxDeg, kAimTrimMaxDeg, "%+.2f°", true, false,
+                  g_state.sl_aim_trim, dt);
 
         g_state.aim_predict = std::round(g_state.aim_predict);
         g_state.aim_lead_ms = g_state.aim_predict * kAimPredictStepMs;

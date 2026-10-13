@@ -376,6 +376,21 @@ static unsigned long s_bot_noesp_skipped = 0;
 // Без этого кода кадр «аим активен, прицел есть, записей ноль» нечем
 // прочесть: в логе 17:06 таких было 32 из 92, и что именно не пустило
 // цель — отфильтровали трупа, круг обзора или пустой список — не видно.
+// Экранных пикселей в одном градусе по вертикали. Нужно только тачу: поправка
+// высоты задана в градусах, а тач ведёт палец в экранных пикселях. Берём
+// настоящий FOV камеры — в прицеле он в разы меньше обычного, и постоянный
+// пересчёт дал бы там поправку в несколько раз слабее заданной. Если FOV не
+// прочитался, остаётся база 60°, которую наведение и так предполагает везде
+// (AimFovRadiusPx считает круг FOV от неё же). В диапазоне 5..170° тангенс
+// половины угла конечен и положителен, так что результат не требует проверки.
+static float ScreenPxPerDegree(float sh) {
+    constexpr float kDeg2Rad = (float)M_PI / 180.f;
+    float fov = esp_camera_fov_deg();
+    if (!(fov > 5.f && fov < 170.f)) fov = 60.f;
+    const float focal = (sh * 0.5f) / tanf(fov * 0.5f * kDeg2Rad);
+    return focal * kDeg2Rad;
+}
+
 static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarget& best,
                             int* why = nullptr) {
     if (why) *why = 0;
@@ -422,6 +437,15 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
     const bool cameraAim = g_state.aim_mode == AIM_MODE_MEMORY ||
                            g_state.aim_mode == AIM_MODE_TOUCH;
     const float fovRadiusDeg = manes_aim_source::fov_radius_degrees(cfg::aim::fov);
+    // Поправка высоты берётся один раз на кадр и применяется к каждой цели
+    // до отбора: иначе приоритет считал бы ошибку от непоправленной точки и
+    // выбирал не ту кость/цель, в которую реально полетит пуля.
+    // Вне диапазона (в том числе NaN: оба сравнения с ним ложны) — ноль, то
+    // есть «без поправки». Сборка идёт с -ffast-math, где std::isfinite не
+    // опора, поэтому проверяем именно диапазон.
+    float trimDeg = g_state.aim_trim_deg;
+    if (!(trimDeg >= -kAimTrimMaxDeg && trimDeg <= kAimTrimMaxDeg)) trimDeg = 0.f;
+    const float trimPx = (trimDeg != 0.f) ? trimDeg * ScreenPxPerDegree(sh) : 0.f;
     for (const EspBox& b : boxes) {
         // На союзников аим не работает НИКОГДА, а не только пока в визуалах
         // включён их показ: проверка «g_state.esp_team && b.ally» означала,
@@ -449,6 +473,15 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
             for (int i = 0; i < 3; ++i) {
                 t.world[i] = b.aim_world[usedBone][i];
                 t.world_valid = t.world_valid && std::isfinite(t.world[i]);
+            }
+            // Та же поправка в обеих областях, куда цель уходит дальше:
+            // градусы для «памяти» и экранные пиксели для тача. Экранная Y
+            // растёт вниз, поэтому «выше» — это минус. Сайлент стреляет по
+            // мировой точке и поправку не получает: ему нужен поворот точки
+            // вокруг камеры, а позиции камеры здесь нет.
+            if (trimDeg != 0.f) {
+                t.pitch += trimDeg;
+                t.sy    -= trimPx;
             }
         } else {
             // Do not substitute another joint or a box estimate when the
