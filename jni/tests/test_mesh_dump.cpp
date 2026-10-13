@@ -262,6 +262,82 @@ int main() {
         }
     }
 
+    // ---- 8. Террейн: открытие раскладки и построение сетки ------------------
+    {
+        Arena a;
+        Reader rd = reader_of(a);
+        const uint64_t td = 0x300000;   // TerrainData
+        const uint64_t hp = 0x400000;   // массив высот
+        const int32_t  R  = 65;         // 2^6+1
+        put_u32(a, td + 0x14, (uint32_t)R);            // разрешение
+        put_f32(a, td + 0x30, 512.0f);                 // size.x (метры)
+        put_f32(a, td + 0x34, 200.0f);                 // size.y (масштаб высоты)
+        put_f32(a, td + 0x38, 512.0f);                 // size.z (метры)
+        put_u64(a, td + 0x48, hp);                     // указатель на высоты
+        for (int32_t r = 0; r < R; ++r)
+            for (int32_t c = 0; c < R; ++c)
+                put_f32(a, hp + (uint64_t)(r * R + c) * 4,
+                        0.5f + 0.4f * std::sin(r * 0.2f) * std::cos(c * 0.2f));  // [0.1,0.9]
+
+        TerrainLayout lay;
+        CHECK(DiscoverTerrain(rd, td, lay), "DiscoverTerrain на синтетическом TerrainData");
+        CHECK(lay.valid && lay.res == R, "террейн: разрешение 65");
+        CHECK(lay.res_off == 0x14 && lay.size_off == 0x30 && lay.heights_off == 0x48,
+              "террейн: смещения res/size/heights");
+        vis::Vec3 size{};
+        CHECK(TerrainSize(rd, td, lay, size) &&
+              std::fabs(size.x - 512.f) < 1e-3f && std::fabs(size.y - 200.f) < 1e-3f,
+              "террейн: size читается");
+
+        std::vector<vis::Tri> grid;
+        const uint64_t heights = rd.ptr(td + lay.heights_off);
+        CHECK(BuildTerrainGrid(rd, heights, lay.res, size, grid), "BuildTerrainGrid строит сетку");
+        CHECK(grid.size() == (size_t)(R - 1) * (R - 1) * 2, "террейн: 64*64*2 треугольника");
+        // Локальные координаты в пределах [0,size.x]×[0,size.z], y = h*size.y.
+        bool inrange = !grid.empty();
+        for (const auto& t : grid)
+            for (const vis::Vec3* v : {&t.a, &t.b, &t.c})
+                if (v->x < -1e-3f || v->x > size.x + 1e-3f ||
+                    v->z < -1e-3f || v->z > size.z + 1e-3f ||
+                    v->y < -1e-3f || v->y > size.y + 1e-3f) inrange = false;
+        CHECK(inrange, "террейн: сетка в пределах размера");
+
+        // Запекание в мир и обратное чтение.
+        std::string obj = "# terrain\n";
+        uint32_t vbase = 0;
+        AppendWorldObj(obj, grid, vis::Vec3{1000, 0, 1000}, vis::Quat{0,0,0,1}, 1.0f, vbase);
+        CHECK(vbase == grid.size() * 3, "террейн: vbase = 3*треугольника");
+        const char* path = "/tmp/xvcen_terrain_test.obj";
+        FILE* f = fopen(path, "w");
+        CHECK(f != nullptr, "terrain obj writable");
+        if (f) { fwrite(obj.data(), 1, obj.size(), f); fclose(f); }
+        std::vector<vis::Tri> back;
+        CHECK(vis::LoadObj(path, back) && back.size() == grid.size(), "террейн: round-trip");
+        if (!back.empty())
+            CHECK(std::fabs(back[0].a.x - 1000.f) < 1e-2f, "террейн: сдвинут в мир на 1000");
+
+        // Отрицательные гейты: плоские высоты и неровное разрешение отвергаются.
+        {
+            Arena b;
+            Reader rb = reader_of(b);
+            const uint64_t td2 = 0x300000, hp2 = 0x400000;
+            put_u32(b, td2 + 0x14, 65u);
+            put_f32(b, td2 + 0x30, 512.f); put_f32(b, td2 + 0x34, 200.f); put_f32(b, td2 + 0x38, 512.f);
+            put_u64(b, td2 + 0x48, hp2);
+            for (int32_t i = 0; i < 65 * 65; ++i) put_f32(b, hp2 + (uint64_t)i * 4, 0.5f);  // плоско
+            TerrainLayout l2;
+            CHECK(!DiscoverTerrain(rb, td2, l2), "террейн: плоские высоты отвергнуты");
+        }
+        {
+            Arena c;
+            Reader rc = reader_of(c);
+            const uint64_t td3 = 0x300000;
+            put_u32(c, td3 + 0x14, 64u);   // не 2^n+1
+            TerrainLayout l3;
+            CHECK(!DiscoverTerrain(rc, td3, l3), "террейн: разрешение 64 отвергнуто");
+        }
+    }
+
     if (failures == 0) printf("test_mesh_dump: all checks passed\n");
     else printf("test_mesh_dump: %d failed\n", failures);
     return failures == 0 ? 0 : 1;

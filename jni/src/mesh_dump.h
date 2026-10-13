@@ -472,4 +472,160 @@ inline void AppendWorldObj(std::string& out, const std::vector<vis::Tri>& local,
     }
 }
 
+// ---- Террейн Unity (карта высот) ------------------------------------------
+// Грунт в Unity Terrain — это не MeshFilter, а карта высот в TerrainData.
+// Нативная раскладка неизвестна, ищем эмпирически по СТРОГИМ якорям, чтобы не
+// испортить карту мусором:
+//   res     — int32, ровно 2^n+1 (65/129/257/513/1025/2049);
+//   heights — указатель на res*res float, ВСЕ конечные и в [0,1], с вариацией
+//             (не плоские и не constant);
+//   size    — Vec3: x,z — мировые метры (16..20000), y — масштаб высоты
+//             (2..4000).
+// Случайное совпадение всех трёх якорей практически исключено. Террейн пишется
+// в ОТДЕЛЬНЫЙ terrain.obj, а не в map.obj: если открытие не сойдётся или масштаб
+// окажется неверным, рабочий меш-дамп статики это не заденет.
+struct TerrainLayout {
+    uint32_t res_off     = 0;   // int32 разрешение (2^n+1)
+    uint32_t heights_off = 0;   // -> float[res*res], нормированные 0..1
+    uint32_t size_off    = 0;   // -> Vec3 (x,y,z): x,z мировые метры, y масштаб высоты
+    int32_t  res         = 0;   // найденное разрешение
+    bool     valid       = false;
+};
+
+inline constexpr int32_t kTerrainResSet[] = {65, 129, 257, 513, 1025, 2049};
+inline constexpr size_t  kTerrainResN = sizeof(kTerrainResSet) / sizeof(kTerrainResSet[0]);
+inline constexpr float kTerrainMinWorld        = 16.0f;
+inline constexpr float kTerrainMaxWorld        = 20000.0f;
+inline constexpr float kTerrainMinHeightScale  = 2.0f;
+inline constexpr float kTerrainMaxHeightScale  = 4000.0f;
+inline constexpr float kTerrainMinVar          = 1e-6f;   // карта высот не плоская
+inline constexpr int32_t kTerrainMaxRes        = 2049;
+inline constexpr int32_t kTerrainTargetGrid    = 256;     // целевая сетка (шаг прореживания)
+
+inline bool PlausibleTerrainRes(int32_t r) {
+    for (size_t i = 0; i < kTerrainResN; ++i) if (kTerrainResSet[i] == r) return true;
+    return false;
+}
+
+// Выборочная проверка массива высот: читаем несколько полных строк (не весь
+// массив — res^2 float может быть 16 МБ) и сверяем диапазон [0,1] + вариацию.
+inline bool SampleHeightsPlausible(const Reader& rd, uint64_t hp, int32_t res) {
+    if (!looks_like_heap_ptr(hp) || res < 2 || res > kTerrainMaxRes) return false;
+    std::vector<float> row((size_t)res, 0.0f);
+    const size_t rowBytes = (size_t)res * sizeof(float);
+    int sampled = 0;
+    float mn = 1e9f, mx = -1e9f, sum = 0.0f;
+    // 8 строк с равным шагом + последняя
+    for (int s = 0; s < 9; ++s) {
+        const int32_t r = (s == 8) ? (res - 1) : (int32_t)((int64_t)res * s / 8);
+        if (r < 0 || r >= res) continue;
+        if (!rd.bytes(hp + (uint64_t)r * rowBytes, row.data(), rowBytes)) return false;
+        for (int32_t c = 0; c < res; ++c) {
+            const float h = row[c];
+            if (!std::isfinite(h) || h < -0.001f || h > 1.001f) return false;
+            if (h < mn) mn = h;
+            if (h > mx) mx = h;
+            sum += h; ++sampled;
+        }
+    }
+    if (sampled < 16) return false;
+    const float mean = sum / (float)sampled;
+    float var = 0.0f;
+    // второй проход по той же выборке не делаем: достаточно размаха mx-mn
+    (void)mean; (void)var;
+    return (mx - mn) > kTerrainMinVar;
+}
+
+// Найти раскладку TerrainData: res (2^n+1), size (Vec3), heights (указатель).
+inline bool DiscoverTerrain(const Reader& rd, uint64_t td, TerrainLayout& lay) {
+    if (!looks_like_heap_ptr(td)) return false;
+    // 1) разрешение
+    int32_t res = 0; uint32_t res_off = 0;
+    for (uint32_t off = 0; off + 4 <= kScanBytes; off += 4) {
+        uint32_t u = 0;
+        if (!rd.u32(td + off, u)) continue;
+        if (PlausibleTerrainRes((int32_t)u)) { res = (int32_t)u; res_off = off; break; }
+    }
+    if (!res) return false;
+    // 2) мировой размер (Vec3): x,z — метры, y — масштаб высоты
+    bool have_size = false; uint32_t size_off = 0;
+    for (uint32_t off = 0; off + 12 <= kScanBytes; off += 4) {
+        float v[3];
+        if (!rd.bytes(td + off, v, 12)) continue;
+        if (std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]) &&
+            v[0] >= kTerrainMinWorld && v[0] <= kTerrainMaxWorld &&
+            v[2] >= kTerrainMinWorld && v[2] <= kTerrainMaxWorld &&
+            v[1] >= kTerrainMinHeightScale && v[1] <= kTerrainMaxHeightScale) {
+            size_off = off; have_size = true; break;
+        }
+    }
+    if (!have_size) return false;
+    // 3) указатель на высоты
+    uint32_t heights_off = 0;
+    for (uint32_t off = 0; off + 8 <= kScanBytes; off += 8) {
+        const uint64_t p = rd.ptr(td + off);
+        if (!looks_like_heap_ptr(p)) continue;
+        if (SampleHeightsPlausible(rd, p, res)) { heights_off = off; break; }
+    }
+    if (!heights_off) return false;
+    lay.res_off = res_off; lay.size_off = size_off; lay.heights_off = heights_off;
+    lay.res = res; lay.valid = true;
+    return true;
+}
+
+// Прочитать size (Vec3) по найденному смещению.
+inline bool TerrainSize(const Reader& rd, uint64_t td, const TerrainLayout& lay, vis::Vec3& size) {
+    if (!lay.valid) return false;
+    float v[3];
+    if (!rd.bytes(td + lay.size_off, v, 12)) return false;
+    if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2])) return false;
+    size = vis::Vec3{v[0], v[1], v[2]};
+    return true;
+}
+
+// Построить локальную сетку грунта (треугольники в пространстве TerrainData:
+// x∈[0,size.x], z∈[0,size.z], y = height*size.y). Прореживание: целевая сетка
+// ~kTerrainTargetGrid, чтобы не печь res^2 треугольников. Чтение по строкам
+// (одна строка = один rd.bytes), не по одному float.
+inline bool BuildTerrainGrid(const Reader& rd, uint64_t hp, int32_t res, const vis::Vec3& size,
+                             std::vector<vis::Tri>& tris) {
+    if (!looks_like_heap_ptr(hp) || res < 2 || res > kTerrainMaxRes) return false;
+    if (!(size.x > 0.0f) || !(size.z > 0.0f) || !(size.y > 0.0f)) return false;
+    int32_t step = (res - 1) / kTerrainTargetGrid;
+    if (step < 1) step = 1;
+    std::vector<int32_t> idx;
+    for (int32_t i = 0; i < res; i += step) idx.push_back(i);
+    if (idx.back() != res - 1) idx.push_back(res - 1);
+    const int32_t N = (int32_t)idx.size();
+    if (N < 2) return false;
+
+    const size_t rowBytes = (size_t)res * sizeof(float);
+    std::vector<float> row((size_t)res, 0.0f);
+    std::vector<float> h((size_t)N * N, 0.0f);
+    for (int32_t a = 0; a < N; ++a) {
+        if (!rd.bytes(hp + (uint64_t)idx[a] * rowBytes, row.data(), rowBytes)) return false;
+        for (int32_t b = 0; b < N; ++b) {
+            const float hv = row[idx[b]];
+            if (!std::isfinite(hv) || hv < -0.001f || hv > 1.001f) return false;
+            h[(size_t)a * N + b] = hv;
+        }
+    }
+    tris.clear();
+    tris.reserve((size_t)(N - 1) * (N - 1) * 2);
+    auto vert = [&](int32_t a, int32_t b) -> vis::Vec3 {
+        const float x = (idx[b] / (float)(res - 1)) * size.x;
+        const float z = (idx[a] / (float)(res - 1)) * size.z;
+        const float y = h[(size_t)a * N + b] * size.y;
+        return vis::Vec3{x, y, z};
+    };
+    for (int32_t a = 0; a + 1 < N; ++a)
+        for (int32_t b = 0; b + 1 < N; ++b) {
+            const vis::Vec3 v00 = vert(a, b),     v10 = vert(a + 1, b);
+            const vis::Vec3 v01 = vert(a, b + 1), v11 = vert(a + 1, b + 1);
+            tris.push_back({v00, v10, v01});
+            tris.push_back({v01, v10, v11});
+        }
+    return !tris.empty();
+}
+
 } // namespace meshdump

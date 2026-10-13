@@ -2545,6 +2545,77 @@ size_t   g_static_tris      = 0;      // треугольников запекл
 FILE*    g_static_file      = nullptr;
 std::unordered_map<uint64_t, std::vector<vis::Tri>> g_static_mesh_cache;
 
+// Террейн (грунт): печётся в ОТДЕЛЬНЫЙ terrain.obj, не в map.obj, чтобы слепое
+// открытие раскладки TerrainData (или неверный масштаб) не испортило меш-дамп.
+int      g_static_terrain   = 0;      // сколько террейнов испечено
+std::unordered_set<uint64_t> g_terrain_done;   // уже испечённые TerrainData
+meshdump::TerrainLayout g_terrain_layout{};
+bool     g_terrain_layout_known = false;
+
+// terrain.obj кладём рядом с map.obj (тот же CfgDir).
+std::string terrain_obj_path() {
+    const std::string mp = vis_map::mesh_path();
+    const size_t slash = mp.find_last_of('/');
+    const std::string dir = (slash == std::string::npos) ? std::string() : mp.substr(0, slash + 1);
+    return dir + "terrain.obj";
+}
+
+// Найти TerrainData на нативном компоненте Terrain, открыть раскладку карты
+// высот, построить сетку грунта и испечь её в мир в terrain.obj. Возвращает
+// true, если испекли (или уже пекли этот TerrainData).
+bool dump_terrain(uint64_t native_terrain, uint64_t transform) {
+    if (!valid_obj(native_terrain)) return false;
+    for (uint32_t off = 8; off + 8 <= meshdump::kScanBytes; off += 8) {
+        const uint64_t p = rd_ptr(native_terrain + off);
+        if (!meshdump::looks_like_heap_ptr(p)) continue;
+        // Поле m_TerrainData хранит управляемый TerrainData; нативный — по
+        // m_CachedPtr. Пробуем и сам указатель, и managed_object_native от него.
+        const uint64_t cands[2] = {p, managed_object_native(p)};
+        for (int ci = 0; ci < 2; ++ci) {
+            const uint64_t td = cands[ci];
+            if (!valid_obj(td) || g_terrain_done.count(td)) continue;
+            meshdump::TerrainLayout lay = g_terrain_layout;
+            bool ok;
+            if (g_terrain_layout_known) {
+                // Быстрый путь: прочитать по известным смещениям и проверить.
+                uint32_t u = 0;
+                ok = rd_exact(td + lay.res_off, u) && meshdump::PlausibleTerrainRes((int32_t)u);
+                lay.res = ok ? (int32_t)u : 0;
+                if (ok) {
+                    const uint64_t hp = rd_ptr(td + lay.heights_off);
+                    ok = meshdump::SampleHeightsPlausible(dump_reader(), hp, lay.res);
+                }
+            } else {
+                ok = meshdump::DiscoverTerrain(dump_reader(), td, lay);
+                if (ok) { g_terrain_layout = lay; g_terrain_layout_known = true; }
+            }
+            if (!ok) continue;
+            vis::Vec3 size{};
+            if (!meshdump::TerrainSize(dump_reader(), td, lay, size)) continue;
+            const uint64_t hp = rd_ptr(td + lay.heights_off);
+            std::vector<vis::Tri> grid;
+            if (!meshdump::BuildTerrainGrid(dump_reader(), hp, lay.res, size, grid) || grid.empty())
+                continue;
+            vis::Vec3 pos{}; vis::Quat rot{};
+            if (!piece_world_trs(transform, pos, rot)) continue;
+            std::string body;
+            uint32_t vbase = 0;
+            meshdump::AppendWorldObj(body, grid, pos, rot, 1.0f, vbase);
+            const std::string path = terrain_obj_path();
+            const bool first = g_terrain_done.empty();
+            FILE* f = std::fopen(path.c_str(), first ? "wb" : "ab");
+            if (!f) continue;
+            if (first) std::fputs("# terrain dumped at runtime (Unity Terrain heightmap)\n", f);
+            std::fwrite(body.data(), 1, body.size(), f);
+            std::fclose(f);
+            g_terrain_done.insert(td);
+            ++g_static_terrain;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Один нативный Transform из spawned — якорь для поиска массива иерархии.
 // Достаточно любого объекта в главной сцене; берём первый попавшийся.
 uint64_t dump_anchor_transform() {
@@ -2679,6 +2750,13 @@ int vis_dump_static_meshes(int max_new, double time_budget) {
 
         const uint64_t go = rd_ptr(X + COMPONENT_GAMEOBJECT);
         if (!valid_obj(go)) continue;
+
+        // Грунт (Unity Terrain) — отдельный компонент, печётся в terrain.obj.
+        // Проверяем до MeshFilter: у террейна MeshFilter нет, и `continue` по mf
+        // его бы пропустил.
+        const uint64_t terr = gameobject_component_by_class(go, "Terrain");
+        if (terr) dump_terrain(terr, X);
+
         const uint64_t mf = gameobject_component_by_class(go, "MeshFilter");
         if (!mf) continue;
 
@@ -2715,8 +2793,9 @@ int vis_dump_static_meshes(int max_new, double time_budget) {
 // массив сцены, где курсор.
 void vis_dump_static_report(char* out, size_t cap) {
     if (!out || cap == 0) return;
-    std::snprintf(out, cap, "inst=%d tris=%zu scene=%s k=%d",
-                  g_static_written, g_static_tris, g_scene_ready ? "ok" : "?", g_static_cursor);
+    std::snprintf(out, cap, "inst=%d tris=%zu terr=%d scene=%s k=%d",
+                  g_static_written, g_static_tris, g_static_terrain,
+                  g_scene_ready ? "ok" : "?", g_static_cursor);
 }
 
 // Сброс при перезагрузке мира: закрываем файл, чистим кэш и якорь сцены.
@@ -2731,4 +2810,9 @@ void vis_dump_static_reset() {
     g_static_mesh_cache.clear();
     g_scene_ready = false;
     g_scene_transforms = 0;
+    // Террейн: чистим дедуп и счётчик, чтобы новый мир испёк грунт заново
+    // (terrain.obj перезапишется при первом же террейне). Раскладку TerrainData
+    // (g_terrain_layout) оставляем — она свойство сборки Unity, как и VBO.
+    g_terrain_done.clear();
+    g_static_terrain = 0;
 }
