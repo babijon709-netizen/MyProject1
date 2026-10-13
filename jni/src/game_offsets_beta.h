@@ -1,12 +1,12 @@
 #pragma once
 #include "game_offsets.h"
 
-// Beta profile, snapshot 2026-10-10, build 11957.
-// Source: dumpbeta11957.7z (dump.cs + libil2cpp.so + script.json), 31882 types.
-// Managed layouts used by the reader match release 11949; metadata slots differ.
-// TypeInfo slots taken from the dump's TypeInfoPointers table and cross-checked
-// by the adrp/ldr -> R_AARCH64_RELATIVE addend vote over each class's own
-// methods (see game_offsets.h for the methodology).
+// Beta profile, snapshot 2026-10-13, build 11959.
+// Source: dumpbeta11959.7z (dump.cs + libil2cpp.so + script.json), 31902 types.
+// Shared managed layouts are retained; player/controller, player-loop, delay-
+// promise, and TOD layouts were checked against this dump. TypeInfo slots below
+// come from TypeInfoPointers and are cross-checked against REL addends and the
+// owning methods (see game_offsets.h for the derivation methodology).
 
 namespace game_offsets_beta {
 inline constexpr std::uint64_t CAMERA_PROJECTION_MATRIX = game_offsets::CAMERA_PROJECTION_MATRIX;
@@ -27,8 +27,8 @@ inline constexpr float PLAYER_HEIGHT = game_offsets::PLAYER_HEIGHT;
 inline constexpr float PLAYER_BOX_WIDTH_RATIO = game_offsets::PLAYER_BOX_WIDTH_RATIO;
 inline constexpr float MIN_PLAYER_DISTANCE = game_offsets::MIN_PLAYER_DISTANCE;
 inline constexpr float MAX_PLAYER_DISTANCE = game_offsets::MAX_PLAYER_DISTANCE;
-inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDE48BE0; // beta 11957: outer 0xDAF1AF8, 477 own-method votes
-inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDE48BA8; // beta 11957: outer 0xDAF09B0, 16 votes
+inline constexpr std::uint64_t PLAYER_MANAGER_TYPEINFO_RVA = 0xDE9D8B8; // beta 11959: Oxide.PlayerManager, outer 0xDB463F8
+inline constexpr std::uint64_t PLAYER_LOOP_HELPER_TYPEINFO_RVA = 0xDE9D880; // beta 11959: PlayerLoopHelper, outer 0xDB45250
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_ACTIVE_LIST = game_offsets::PLAYER_MANAGER_STATIC_FIELDS_ACTIVE_LIST;
 inline constexpr std::uint64_t PLAYER_MANAGER_STATIC_FIELDS_LIST = game_offsets::PLAYER_MANAGER_STATIC_FIELDS_LIST;
 inline constexpr std::uint64_t IL2CPP_CLASS_STATIC_FIELDS_OFFSET = game_offsets::IL2CPP_CLASS_STATIC_FIELDS_OFFSET;
@@ -41,15 +41,14 @@ inline constexpr std::uint64_t DELAYPROMISE_INITIAL_FRAME = game_offsets::DELAYP
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_TIMESPAN = game_offsets::DELAYPROMISE_SCALED_TIMESPAN;
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_ELAPSED = game_offsets::DELAYPROMISE_SCALED_ELAPSED;
 inline constexpr std::uint64_t DELAYPROMISE_SCALED_INITIAL_FRAME = game_offsets::DELAYPROMISE_SCALED_INITIAL_FRAME;
-// TypeInfo-слоты промисов, бета 11957: из TypeInfoPointers дампа, подтверждены
-// релокациями из UniTask.DelayPromise.Create (0xC774D44) и
-// DelayIgnoreTimeScalePromise.Create (0xC7746A0) — каждый Create ссылается и на
-// классный слот, и на слот вложенного <>c. Рантайм всё равно сверяет имя класса
-// (см. fast_loot_memory.h), ALT — слот <>c на случай расхождения.
-inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA = 0xDE576B0;     // outer 0xDB7B848
-inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA_ALT = 0xDE593B0; // <>c, outer 0xDB7B8A8
-inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA = 0xDE576A8;      // outer 0xDB7B840
-inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA_ALT = 0xDE593A8;  // <>c, outer 0xDB7B878
+// UniTask delay-promise TypeInfo slots for beta 11959, taken from
+// TypeInfoPointers and verified against their R_AARCH64_RELATIVE addends.
+// The ALT entries are the corresponding nested <>c slots; runtime class-name
+// validation remains in fast_loot_memory.h.
+inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA = 0xDEACC40;     // DelayPromise, outer 0xDBCFCD0
+inline constexpr std::uint64_t FASTLOOT_DELAYPROMISE_TYPEINFO_RVA_ALT = 0xDEAF688; // DelayPromise.<>c, outer 0xDBCFD30
+inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA = 0xDEACC38;      // DelayIgnoreTimeScalePromise, outer 0xDBCFCC8
+inline constexpr std::uint64_t FASTLOOT_IGNOREDELAY_TYPEINFO_RVA_ALT = 0xDEAF680;  // DelayIgnoreTimeScalePromise.<>c, outer 0xDBCFD00
 inline constexpr std::uint64_t FPHITSCAN_CONFIG = game_offsets::FPHITSCAN_CONFIG;
 inline constexpr std::uint64_t FPBOW_PROJECTILE_PREFAB = game_offsets::FPBOW_PROJECTILE_PREFAB;
 inline constexpr std::uint64_t FPCROSSBOW_CONFIG = game_offsets::FPCROSSBOW_CONFIG;
@@ -104,7 +103,7 @@ inline constexpr std::uint64_t RECOILCONFIG_MIN_RECOIL = game_offsets::RECOILCON
 inline constexpr std::uint64_t RECOILCONFIG_MAX_RECOIL = game_offsets::RECOILCONFIG_MAX_RECOIL;
 inline constexpr std::uint64_t RECOILCONFIG_MIN_SIDE = game_offsets::RECOILCONFIG_MIN_SIDE;
 inline constexpr std::uint64_t RECOILCONFIG_MAX_SIDE = game_offsets::RECOILCONFIG_MAX_SIDE;
-inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDE43D38; // beta 11957: outer 0xDAEFD70, 106 own-method votes
+inline constexpr std::uint64_t GAME_CONTROLLER_TYPEINFO_RVA = 0xDE98AF0; // beta 11959: Oxide.GameControllerBase, outer 0xDB44538
 inline constexpr std::uint64_t GAME_CONTROLLER_LOCAL_PLAYER_FIELD = game_offsets::GAME_CONTROLLER_LOCAL_PLAYER_FIELD;
 inline constexpr std::uint64_t GAME_CONTROLLER_CAMERA_MANAGER_FIELD = game_offsets::GAME_CONTROLLER_CAMERA_MANAGER_FIELD;
 inline constexpr std::uint64_t GAME_CONTROLLER_INPUT_HANDLER_FIELD = game_offsets::GAME_CONTROLLER_INPUT_HANDLER_FIELD;
@@ -190,7 +189,7 @@ inline constexpr std::uint64_t MODELINFO_LEFT_WEAPON_HOLDER = game_offsets::MODE
 inline constexpr std::uint64_t MODELINFO_HEAD = game_offsets::MODELINFO_HEAD;
 inline constexpr std::uint64_t NPC_BRAIN_MODEL_INFO = game_offsets::NPC_BRAIN_MODEL_INFO;
 inline constexpr std::uint64_t CHARANIM_PLAYER_MODEL_INFO = game_offsets::CHARANIM_PLAYER_MODEL_INFO;
-inline constexpr std::uint64_t INVDATA_PLAYER_MODEL_INFO = game_offsets::INVDATA_PLAYER_MODEL_INFO; // beta 11957: 0x18, как в релизе (в 11943 было 0x20)
+inline constexpr std::uint64_t INVDATA_PLAYER_MODEL_INFO = game_offsets::INVDATA_PLAYER_MODEL_INFO; // beta 11959: 0x18, как в релизе
 inline constexpr std::uint64_t IL2CPP_CLASS_NAME = game_offsets::IL2CPP_CLASS_NAME;
 inline constexpr std::uint64_t IL2CPP_CLASS_NAMESPACE = game_offsets::IL2CPP_CLASS_NAMESPACE;
 inline constexpr std::uint64_t EVENT_HANDLER_LOOK_DIRECTION = game_offsets::EVENT_HANDLER_LOOK_DIRECTION;
@@ -260,7 +259,7 @@ inline constexpr std::uint64_t GAMEOBJECT_NAME_GUESS = game_offsets::GAMEOBJECT_
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS = game_offsets::IL2CPP_LIST_ITEMS;
 inline constexpr std::uint64_t IL2CPP_LIST_SIZE = game_offsets::IL2CPP_LIST_SIZE;
 inline constexpr std::uint64_t IL2CPP_ARRAY_FIRST_ELEMENT = game_offsets::IL2CPP_ARRAY_FIRST_ELEMENT;
-inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDE47ED8; // beta 11957: outer 0xDAEFDF8, 102 own-method votes
+inline constexpr std::uint64_t NETWORK_CLIENT_TYPEINFO_RVA = 0xDE9CBC8; // beta 11959: Mirror.NetworkClient, outer 0xDB44488
 inline constexpr std::uint64_t NETWORK_CLIENT_SPAWNED = game_offsets::NETWORK_CLIENT_SPAWNED;
 inline constexpr std::uint64_t DICT_ENTRIES = game_offsets::DICT_ENTRIES;
 inline constexpr std::uint64_t DICT_COUNT = game_offsets::DICT_COUNT;
@@ -268,7 +267,7 @@ inline constexpr std::uint64_t DICT_ENTRY_STRIDE = game_offsets::DICT_ENTRY_STRI
 inline constexpr std::uint64_t DICT_ENTRY_VALUE = game_offsets::DICT_ENTRY_VALUE;
 inline constexpr std::uint64_t NETID_NET_ID = game_offsets::NETID_NET_ID;
 inline constexpr std::uint64_t NETID_BEHAVIOURS = game_offsets::NETID_BEHAVIOURS;
-// Oxide.Cupboard: раскладка идентична релизу (сверено по dumpbeta11957 позиционно).
+// Oxide.Cupboard: раскладка совпадает с релизом (позиционно сверена с dumpbeta11959).
 inline constexpr std::uint64_t CUPBOARD_IS_LOOTABLE = game_offsets::CUPBOARD_IS_LOOTABLE;
 inline constexpr std::uint64_t CUPBOARD_AUTHORIZED_PLAYERS = game_offsets::CUPBOARD_AUTHORIZED_PLAYERS;
 inline constexpr std::uint64_t CUPBOARD_PROTECTED_TIME = game_offsets::CUPBOARD_PROTECTED_TIME;
@@ -278,8 +277,8 @@ inline constexpr std::uint64_t PMK_HEALTH = game_offsets::PMK_HEALTH;
 inline constexpr std::uint64_t ARP_LATEST_VALUE = game_offsets::ARP_LATEST_VALUE;
 inline constexpr std::uint64_t HEALTH_VALUE = game_offsets::HEALTH_VALUE;
 inline constexpr std::uint64_t VITALS_MAX_HEALTH = game_offsets::VITALS_MAX_HEALTH;
-inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDE40000;
-inline constexpr std::uint64_t TOD_SCAN_RVA_END = 0xDE60000; // beta 11957: ih (TOD_Sky) self slot 0xDE4E800, outer 0xDAEFC10
+inline constexpr std::uint64_t TOD_SCAN_RVA_BEGIN = 0xDE90000;
+inline constexpr std::uint64_t TOD_SCAN_RVA_END = 0xDEB0000; // beta 11959: rU (TOD_Sky) slot 0xDEA4F50, outer 0xDB44360
 inline constexpr std::uint64_t TOD_SKY_CYCLE = game_offsets::TOD_SKY_CYCLE;
 inline constexpr std::uint64_t TOD_CYCLE_HOUR = game_offsets::TOD_CYCLE_HOUR;
 inline constexpr std::uint64_t TOD_CYCLE_DAY = game_offsets::TOD_CYCLE_DAY;
