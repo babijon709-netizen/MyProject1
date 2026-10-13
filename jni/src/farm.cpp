@@ -20,7 +20,7 @@
 // поэтому бот ведёт взгляд (накопитель MouseLook) точно в крестик: центр экрана
 // и есть точка удара штатного луча игры, так что удар ложится в X сам, а
 // расхождение «точка удара -> крестик» остаётся в сантиметрах — заведомо внутри
-// этих 15 см. Допуск наведения считаем от дистанции (kSpotHitM), а удары
+// этих 15 см. Допуск наведения считаем от дистанции (kSpotAimM), а удары
 // открываем только когда камера уже стоит в нём. Подмены удара нет: игра бьёт
 // своим лучом по своему узлу.
 //
@@ -118,7 +118,7 @@ constexpr float kNoRayCloseTo    = 0.50f;  // м: докуда поджимае�
 // Допуск наведения камеры, градусы. Камера ведёт ту же точку, по которой бьёт:
 // крестик, когда он есть (tgt.look_spot), иначе центр корпуса узла. Корпусу
 // хватает широкого допуска — он большой; крестик это 15 см, которыми игра
-// меряет серию, поэтому допуск по нему считаем от дистанции (kSpotHitM ниже).
+// меряет серию, поэтому допуск по нему считаем от дистанции (kSpotAimM ниже).
 constexpr float kAimBodyStart = 4.00f;
 constexpr float kAimBodyStop  = 1.50f;
 constexpr float kAimWalkStart = 6.00f;   // на подходе правим только заметный увод
@@ -126,27 +126,23 @@ constexpr float kAimWalkStop  = 2.50f;   // (камеру ведём сразу:
                                          //  ждёт доворота, см. фазу WALK)
 constexpr float kPitchDeadWalk = 18.0f;  // и только сильно задранную камеру
 
-// Наведение на крестик: kSpotHitM метров промаха на текущей дистанции,
-// переведённые в градусы. Игра засчитывает серию, если её луч попал не дальше
-// 0.15 м от крестика, поэтому берём 0.09 м — с запасом на шум позы камеры
-// (камера читается из памяти, «покачивание» look-root в расчёт не входит) и на
-// смещение декали от коры. Ниже kSpotTolMin не опускаем: это уже мельче шага
-// записи накопителя (kMemDeadDeg/kMemAckEps), доводиться бессмысленно; выше
-// kSpotTolMax — «по площади», а не по крестику.
-constexpr float kSpotHitM   = 0.09f;     // м: допуск доводки по крестику
-constexpr float kSpotTolMin = 0.30f;     // град
-constexpr float kSpotTolMax = 6.00f;     // град
-// Доводим прицел до ЦЕНТРА крестика, а не «примерно в него»: 2 см промаха на
-// текущей дистанции (не мельче 0.20° — это предел разрешения записи/чтения
-// накопителя). Прежний допуск «в пределах X» на 1.5 м давал до 9 см мимо центра
-// по yaw, а по pitch ошибку до 6° вообще съедала мёртвая зона, и крестик стоял
-// выше/ниже центра экрана.
+// Допуски наведения по крестику — в МЕТРАХ промаха на текущей дистанции, а
+// контроллер переводит их в градусы (см. offset_deg в кадре). Игра засчитывает
+// серию, если её луч попал не дальше 0.15 м от крестика.
+//   kSpotAimM  — докудa доводим прицел: 2 см, то есть ЦЕНТР крестика, а не
+//                «примерно в него». Прежний допуск на 1.5 м давал до 9 см мимо
+//                центра по yaw, а по pitch ошибку до 6° вообще съедала мёртвая
+//                зона — крестик стоял выше/ниже центра экрана.
+//   kSpotSwingM — при каком промахе уже можно бить: 5 см (втрое внутри зоны
+//                серии), чтобы не ждать последних сантиметров доводки.
+// Ниже предела разрешения не опускаемся: мельче kSpotAimMin/kSpotSwingMin не
+// довести — это шаг записи/чтения накопителя (kMemDeadDeg/kMemAckEps). Выше
+// kSpotTolMax — это уже «по площади», а не по крестику.
 constexpr float kSpotAimM    = 0.02f;    // м: докудa доводим прицел
 constexpr float kSpotAimMin  = 0.20f;    // град: предел разрешения доводки
-// Замах открываем чуть раньше идеала: 5 см — заведомо внутри 15 см, которыми
-// игра меряет серию, зато не ждём последних сантиметров доводки.
 constexpr float kSpotSwingM  = 0.05f;    // м: допуск удара по X
 constexpr float kSpotSwingMin= 0.30f;    // град
+constexpr float kSpotTolMax  = 6.00f;    // град: выше — доводка «по площади»
 // Сколько ждём доводку в допуск, прежде чем махнуть рукой на крестик: стоим в
 // упор, а камера не садится (запись в накопитель не проходит). Тогда бьём по
 // корпусу — урон по узлу идёт, серия просто не растёт; иначе watchdog сдал бы
@@ -200,10 +196,19 @@ constexpr float kGiveUpBlind   = 25.f;   // то же, но остаток не 
 // Так шаги не складываются и камера не перелетает узел.
 constexpr float kLookWaitMax   = 0.10f;  // с: дольше ответа не ждём — запись потеряна
 constexpr float kMemAckEps     = 0.10f;  // град: допуск «накопитель = наша запись»
-constexpr float kAimStepWalk   = 0.45f;  // доля остатка ошибки, закрываемая шагом
 constexpr float kMemStepWalk   = 15.0f;  // град: предел одного шага на подходе
 constexpr float kMemStepBody   = 4.0f;   // град: предел шага, когда узел в прицеле
 constexpr float kMemDeadDeg    = 0.05f;  // град: мельче — не шлём
+// Шаг доводки. Следующую запись шлём только после того, как поза камеры показала
+// предыдущую (см. «отклик позы» в кадре ниже): тогда задержка отклика не
+// накапливается и раскачки нет ни при какой доле шага. Крупную ошибку (крестик
+// только появился, камера стояла на корпусе) закрываем ОДНИМ движением — мелкие
+// шаги подряд как раз и выглядели болтанкой «вверх-вниз, потом встал».
+constexpr float kAimStepFine   = 0.60f;  // доля остатка в мелком шаге
+constexpr float kAimJumpGate   = 2.00f;  // град: крупнее — закрываем одним движением
+constexpr float kAimJumpGain   = 1.00f;  // ...во весь остаток
+constexpr float kAimJumpMax    = 10.0f;  // град: предел одного такого движения
+constexpr float kLookRespDeg   = 0.06f;  // град: «поза показала нашу запись»
 constexpr float kPitchDeadSpot = 0.50f;  // град: субградусный pitch в упор не доводим
 
 } // namespace
@@ -519,12 +524,11 @@ static void UpdateFarmInner(float dt) {
     };
     const float aimTol   = offset_deg(kSpotAimM,   kSpotAimMin);    // докудa доводим
     const float swingTol = offset_deg(kSpotSwingM, kSpotSwingMin);  // порог удара
-    // Ошибка наведения. По крестику — расхождение «точка попадания -> X» (по нему
-    // удар садится в центр, см. game_farm.cpp), а пока луч не в узле — обычная
-    // «камера смотрит мимо X»; по корпусу — как раньше.
-    const bool aimByHit = lookSpot && tgt.aim_delta_valid;
-    const float steerYaw   = aimByHit ? tgt.aim_dyaw   : tgt.yaw;
-    const float steerPitch = aimByHit ? tgt.aim_dpitch : tgt.pitch;
+    // Ошибка наведения. Её целиком считает game_farm: «камера смотрит мимо точки
+    // удара» плюс ограниченная поправка по факту попадания живого луча (см.
+    // «Поправка по факту попадания» там же) — контроллеру это одна величина.
+    const float steerYaw   = tgt.yaw;
+    const float steerPitch = tgt.pitch;
     // Мёртвая зона по pitch: по крестику она РАВНА доводке (внутри допуска pitch
     // всё равно не двигаем, но и ошибка там уже в сантиметрах), по корпусу в
     // упор половина градуса, а на подходе правим только сильно задранную камеру.
@@ -580,12 +584,34 @@ static void UpdateFarmInner(float dt) {
         : (fabsf(tgt.yaw) <= kSwingBodyYaw);
 
     // ---- камера: пишем накопитель MouseLook ----------------------------------
+    // Две вещи, без которых камера «моталась» перед тем как встать в крестик:
+    //  1) шаги не накапливаются. После каждой записи ждём, пока ПОЗА камеры её
+    //     покажет (измеренная ошибка изменилась) или истёк таймаут. Раньше
+    //     следующая запись уходила через кадр, пока предыдущая была ещё «в
+    //     полёте»: доля остатка 0.45 при задержке отклика в кадр-два даёт
+    //     затухающую раскачку — 3-4 проскока мимо цели, и только потом центр.
+    //  2) крупная ошибка закрывается одним движением (kAimJump*), мелкая —
+    //     мягко (kAimStepFine), чтобы шум точки попадания не дёргал камеру.
     {
-        const float maxStep = inReach ? kMemStepBody : kMemStepWalk;
         const float wantYaw   = steerYaw;
         const float wantPitch = (fabsf(steerPitch) > pitchDead) ? steerPitch : 0.f;
-        const bool needTurn = haveAcc && (s_camTurn ? (errDeg > stopDeg) : (errDeg > startDeg));
+        const float wantMag   = fmaxf(fabsf(wantYaw), fabsf(wantPitch));
 
+        // Отклик позы: помним ошибку, по которой писали, и ждём, пока измерение
+        // изменится. Тогда шаг всегда считается по СВЕЖЕЙ позе, и задержка
+        // отклика не превращается в перелёт.
+        static float s_lookErrY = 0.f, s_lookErrP = 0.f;
+        static bool  s_lookWait = false;
+        static float s_lookWaitT = 0.f;
+        if (s_lookWait) {
+            s_lookWaitT += dt;
+            const bool responded = fabsf(steerYaw - s_lookErrY) > kLookRespDeg ||
+                                   fabsf(steerPitch - s_lookErrP) > kLookRespDeg;
+            if (responded || s_lookWaitT >= kLookWaitMax) s_lookWait = false;
+        }
+
+        const bool needTurn = haveAcc && !s_lookWait &&
+                              (s_camTurn ? (errDeg > stopDeg) : (errDeg > startDeg));
         if (!needTurn) {
             s_camTurn = false; s_memPend = false; s_memWait = 0.f;
         } else {
@@ -593,10 +619,13 @@ static void UpdateFarmInner(float dt) {
             if (s_memPend && !acked && s_memWait < kLookWaitMax) {
                 s_memWait += dt;                  // ответа ждём, второй шаг не шлём
             } else {
-                float offYaw   = wantYaw   * kAimStepWalk;
-                float offPitch = wantPitch * kAimStepWalk;
-                offYaw   = fminf(fmaxf(offYaw,   -maxStep), maxStep);
-                offPitch = fminf(fmaxf(offPitch, -maxStep), maxStep);
+                const bool coarse = wantMag > kAimJumpGate;
+                const float cap = coarse ? kAimJumpMax
+                                         : (inReach ? kMemStepBody : kMemStepWalk);
+                float offYaw   = wantYaw   * (coarse ? kAimJumpGain : kAimStepFine);
+                float offPitch = wantPitch * (coarse ? kAimJumpGain : kAimStepFine);
+                offYaw   = fminf(fmaxf(offYaw,   -cap), cap);
+                offPitch = fminf(fmaxf(offPitch, -cap), cap);
                 if (!std::isfinite(offYaw))   offYaw = 0.f;
                 if (!std::isfinite(offPitch)) offPitch = 0.f;
                 if (fabsf(offYaw) < kMemDeadDeg && fabsf(offPitch) < kMemDeadDeg) {
@@ -607,6 +636,8 @@ static void UpdateFarmInner(float dt) {
                     if (esp_mem_aim_write_angles(writeX, writeY)) {
                         s_memWX = writeX; s_memWY = writeY;
                         s_memPend = true; s_memWait = 0.f;
+                        s_lookErrY = steerYaw; s_lookErrP = steerPitch;
+                        s_lookWait = true; s_lookWaitT = 0.f;
                     } else {
                         s_memPend = false; s_memWait = 0.f;
                     }

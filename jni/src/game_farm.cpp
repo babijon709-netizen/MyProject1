@@ -704,6 +704,15 @@ static bool farm_ore_anchor_point(const FarmEntity& node, Vec3& out, float& dist
 // kAimDeltaNear — «попал вплотную к крестику, владелец уже не важен».
 constexpr float kAimDeltaMax  = 1.20F;
 constexpr float kAimDeltaNear = 0.60F;
+// Предел поправки «по факту попадания»: она уточняет наведение по камере, но не
+// имеет права рулить камерой сама — иначе необычная геометрия удара (луч в
+// землю под крестиком, попадание в листву) мотала бы прицел из стороны в сторону.
+constexpr float kAimBiasMax = 2.00F;
+// Трим учим только в покое и уже у цели: kAimFixSteadyDeg — насколько угол по
+// камере может дрогнуть между кадрами, чтобы считать камеру стоящей;
+// kAimFixNearDeg — докуда до цели это имеет смысл.
+constexpr float kAimFixSteadyDeg = 0.15F;
+constexpr float kAimFixNearDeg   = 3.00F;
 
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
@@ -1037,60 +1046,6 @@ bool esp_farm_get_target(FarmTarget& out) {
     const bool look_spot = has_spot;
     if (look_spot) look = spot;
 
-    // ---- Наведение ПО ФАКТУ: куда ушёл луч против крестика -------------------
-    // Живой луч прицела игры (GKo.RaycastHit.m_Point) — это буквально та точка,
-    // в которую уйдёт следующий замах. Значит мало вести камеру «на крестик»:
-    // между осью камеры и осью луча могут быть покачивание оружия, отдача и
-    // смещение виртуальной камеры, и тогда крестик «в центре» по нашей мерке, а
-    // удар ложится в стороне. Поэтому ошибкой наведения считаем РАСХОЖДЕНИЕ
-    // «точка попадания -> крестик» и обнуляем именно её: тогда в X садится сам
-    // удар, а не картинка.
-    //
-    // Расхождение сглаживается: по бугристому камню точка попадания дрожит на
-    // сантиметры от кадра к кадру, и камера дёргалась бы вместе с ней. Если луч
-    // надолго ушёл с узла (обход, прицел в землю) — сглаживание начинаем заново.
-    static unsigned long long s_delta_id = 0;
-    static float s_dyaw = 0.f, s_dpitch = 0.f;
-    static int   s_delta_seen = 0;   // 0 — сглаженного значения ещё нет
-    static int   s_delta_gap  = 0;   // кадров подряд без годного расхождения
-    if (s_delta_id != best->identity) {
-        s_delta_id = best->identity; s_delta_seen = 0; s_delta_gap = 0;
-        s_dyaw = 0.f; s_dpitch = 0.f;
-    }
-
-    bool aim_delta_valid = false;
-    float aim_dyaw = 0.f, aim_dpitch = 0.f;
-    if (has_spot && reach.ray_valid && reach.ray_point_valid && reach.ray_distance > 0.05F) {
-        const Vec3 e = {spot.x - reach.ray_point.x, spot.y - reach.ray_point.y,
-                        spot.z - reach.ray_point.z};
-        const float ex = e.x * right.x + e.y * right.y + e.z * right.z;
-        const float eu = e.x * up.x    + e.y * up.y    + e.z * up.z;
-        const float ef = e.x * fwd.x   + e.y * fwd.y   + e.z * fwd.z;
-        const float elen = sqrtf(ex * ex + eu * eu + ef * ef);
-        // Годится и попадание в САМ узел, и попадание вплотную к крестику
-        // (например, луч ушёл в землю под X): расхождение маленькое, значит
-        // правка ведёт именно к X. Дальнее чужое попадание отбрасываем — по
-        // стене/соседнему узлу курс править нельзя.
-        const bool usable = std::isfinite(elen) && elen < kAimDeltaMax &&
-                            (ray_on_node || elen < kAimDeltaNear);
-        if (usable) {
-            const float dy = atan2f(ex, reach.ray_distance) * 57.29577951F;
-            const float dp = atan2f(eu, reach.ray_distance) * 57.29577951F;
-            if (std::isfinite(dy) && std::isfinite(dp)) {
-                if (s_delta_seen == 0) { s_dyaw = dy; s_dpitch = dp; }
-                else { s_dyaw += (dy - s_dyaw) * 0.35F; s_dpitch += (dp - s_dpitch) * 0.35F; }
-                if (s_delta_seen < 60) ++s_delta_seen;
-                s_delta_gap = 0;
-                aim_dyaw = s_dyaw; aim_dpitch = s_dpitch;
-                aim_delta_valid = true;
-            }
-        }
-    }
-    if (!aim_delta_valid && ++s_delta_gap > 30) {
-        s_delta_gap = 0;
-        s_delta_seen = 0;   // сглаженное устарело: следующий годный кадр — заново
-    }
-
     const Vec3 d = {look.x - origin.x, look.y - origin.y, look.z - origin.z};
     const float fx = d.x * fwd.x + d.y * fwd.y + d.z * fwd.z;
     const float rx = d.x * right.x + d.y * right.y + d.z * right.z;
@@ -1100,9 +1055,95 @@ bool esp_farm_get_target(FarmTarget& out) {
         return false;
     }
     constexpr float rad2deg = 57.29577951F;
-    const float yaw   = atan2f(rx, fx) * rad2deg;
-    const float pitch = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
-    if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g_farm_idle_reason = 5; return false; }
+    const float yaw_cam   = atan2f(rx, fx) * rad2deg;
+    const float pitch_cam = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
+    if (!std::isfinite(yaw_cam) || !std::isfinite(pitch_cam)) { g_farm_idle_reason = 5; return false; }
+
+    // ---- Поправка «по факту попадания» ---------------------------------------
+    // Живой луч прицела игры (GKo.RaycastHit.m_Point) — это буквально та точка,
+    // куда уйдёт следующий замах. Мало выровнять камеру по крестику: между осью
+    // камеры и осью удара могут стоять покачивание оружия, отдача и смещение
+    // точки старта луча. Поэтому сравниваем две угловые меры ОДНОГО И ТОГО ЖЕ
+    // крестика:
+    //   • по камере   — только что посчитанные yaw/pitch (угол между осью камеры
+    //     и направлением на X из нашей точки старта);
+    //   • по попаданию — угол между направлением луча (это та же ось камеры, но
+    //     взятая из данных удара) и направлением на X из точки попадания:
+    //     вектор (X - P) в осях камеры, угол = atan2(боковая, продольная), где
+    //     продольная = dot(X - P, fwd) + ray_distance — расстояние до X вдоль
+    //     оси (именно оно, а НЕ ray_distance: луч часто бьёт в близкую
+    //     поверхность, и деление на его длину раздувает поправку в разы).
+    // Разница этих мер и есть поправка к наведению. Она ОГРАНИЧЕНА
+    // (±kAimBiasMax) и сглажена: уточняет наведение, но не может увести камеру
+    // в сторону, если геометрия удара необычная (луч ушёл в землю под X).
+    static unsigned long long s_fix_id = 0;
+    static float s_fix_y = 0.f, s_fix_p = 0.f;
+    static int   s_fix_seen = 0;   // 0 — сглаженного значения ещё нет
+    static int   s_fix_gap  = 0;   // кадров подряд без годного расхождения
+    static float s_fix_prevY = 0.f, s_fix_prevP = 0.f;   // прошлый угол по камере
+    static bool  s_fix_prevOk = false;
+    if (s_fix_id != best->identity) {
+        s_fix_id = best->identity; s_fix_seen = 0; s_fix_gap = 0;
+        s_fix_prevOk = false;
+        s_fix_y = 0.f; s_fix_p = 0.f;
+    }
+
+    // Мерить поправку можно только «в покое»: пока камера едет, поза, из которой
+    // мы считаем yaw_cam/pitch_cam, отстаёт от луча на кадр-два, и разница мер —
+    // это не геометрия удара, а запаздывание. Такая «поправка» подталкивала бы
+    // камеру в сторону движения (лишний проскок). Поэтому трим учим, только
+    // когда камера стоит (ошибка по камере почти не меняется между кадрами) и
+    // уже почти наведена; в остальное время работает последний выученный трим.
+    const bool fix_steady = s_fix_prevOk &&
+                            fabsf(yaw_cam - s_fix_prevY) < kAimFixSteadyDeg &&
+                            fabsf(pitch_cam - s_fix_prevP) < kAimFixSteadyDeg;
+    s_fix_prevY = yaw_cam; s_fix_prevP = pitch_cam; s_fix_prevOk = true;
+
+    bool aim_fix_valid = false;
+    float aim_fix_yaw = 0.f, aim_fix_pitch = 0.f;
+    if (has_spot && fix_steady &&
+        fabsf(yaw_cam) < kAimFixNearDeg && fabsf(pitch_cam) < kAimFixNearDeg &&
+        reach.ray_valid && reach.ray_point_valid) {
+        const Vec3 e = {spot.x - reach.ray_point.x, spot.y - reach.ray_point.y,
+                        spot.z - reach.ray_point.z};
+        const float ex = e.x * right.x + e.y * right.y + e.z * right.z;
+        const float eu = e.x * up.x    + e.y * up.y    + e.z * up.z;
+        const float ef = e.x * fwd.x   + e.y * fwd.y   + e.z * fwd.z;
+        const float elen = sqrtf(ex * ex + eu * eu + ef * ef);
+        const float along = ef + reach.ray_distance;   // расстояние до X по оси
+        // Годится и попадание в САМ узел, и попадание вплотную к крестику
+        // (например, луч ушёл в землю под X): расхождение маленькое, значит
+        // мера ведёт именно к X. Дальнее чужое попадание отбрасываем — по
+        // стене/соседнему узлу курс править нельзя.
+        const bool usable = std::isfinite(along) && along > 0.15F &&
+                            std::isfinite(elen) && elen < kAimDeltaMax &&
+                            (ray_on_node || elen < kAimDeltaNear);
+        if (usable) {
+            float dy = atan2f(ex, along) * 57.29577951F - yaw_cam;
+            float dp = atan2f(eu, along) * 57.29577951F - pitch_cam;
+            if (std::isfinite(dy) && std::isfinite(dp)) {
+                dy = fminf(fmaxf(dy, -kAimBiasMax), kAimBiasMax);
+                dp = fminf(fmaxf(dp, -kAimBiasMax), kAimBiasMax);
+                if (s_fix_seen == 0) { s_fix_y = dy; s_fix_p = dp; }
+                else { s_fix_y += (dy - s_fix_y) * 0.15F; s_fix_p += (dp - s_fix_p) * 0.15F; }
+                if (s_fix_seen < 60) ++s_fix_seen;
+                s_fix_gap = 0;
+                aim_fix_yaw = s_fix_y; aim_fix_pitch = s_fix_p;
+                aim_fix_valid = true;
+            }
+        }
+    }
+    if (!aim_fix_valid && ++s_fix_gap > 30) {
+        s_fix_gap = 0;
+        s_fix_seen = 0;   // сглаженное устарело: следующий годный кадр — заново
+    }
+    // Поправка идёт в те же yaw/pitch, по которым контроллер ведёт камеру: для
+    // него это по-прежнему «одна ошибка наведения», просто уточнённая по удару.
+    const float yaw_fix   = aim_fix_valid ? aim_fix_yaw   : 0.f;
+    const float pitch_fix = aim_fix_valid ? aim_fix_pitch : 0.f;
+
+    const float yaw   = yaw_cam + yaw_fix;
+    const float pitch = pitch_cam + pitch_fix;
 
     // ---- Точка подхода -------------------------------------------------------
     // Встаём ПЕРЕД КРЕСТИКОМ (standoff наружу от оси узла) всегда, когда он
@@ -1267,9 +1308,9 @@ bool esp_farm_get_target(FarmTarget& out) {
     out.at_spot = at_spot;
     out.has_spot = has_spot;
     out.look_spot = look_spot;
-    out.aim_delta_valid = aim_delta_valid;
-    out.aim_dyaw = aim_dyaw;
-    out.aim_dpitch = aim_dpitch;
+    out.aim_fix_valid = aim_fix_valid;
+    out.aim_fix_yaw = aim_fix_yaw;
+    out.aim_fix_pitch = aim_fix_pitch;
     out.spot_front = spot_front;
     out.spot_source = spot_source;
     out.streak = streak;
