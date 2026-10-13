@@ -83,6 +83,12 @@ struct EspBox {
     // кости), и такой кадр считает экран заново текущей матрицей
     // (esp_box_reproject). Матрицы вида у кадра нет — запись не рисуется вовсе:
     // замороженный на экране бокс хуже одной пропавшей.
+    // Цель перекрыта геометрией мира (vis_mesh): ни одна из контрольных точек
+    // (голова, грудь, середина тела) не видна из глаза этого кадра. false —
+    // либо видна, либо геометрия ещё не собрана (незнание — не препятствие).
+    // Считается только при включённом тумблере «Учёт стен», иначе всегда false.
+    bool  occluded = false;
+
     bool  anchor_valid = false;
     float anchor_feet[3] = {};      // позиция ног — то, от чего меряется дистанция
     float anchor_bottom_y = 0.0F;   // низ тела (уже с поправкой выбранного пути позиции)
@@ -261,6 +267,9 @@ int         esp_nearby_bot_count();
 // скелета по первым max_players игрокам. Возврат: 0 — скелеты строятся,
 // 2 — ни у одного игрока, 1 — список игроков пуст, -1 — плохие аргументы.
 int         esp_skeleton_diag(char* out, size_t cap, int max_players);
+// Отчёт подсистемы сбора мешей (`xvcen mesh`): раскладка, статистика сбора,
+// контрольные лучи. Возвращает сколько байт записано, -1 — нет буфера.
+int         esp_vis_mesh_diag(char* out, size_t cap);
 
 // True while the local player is aiming down sights (ADS) with the current
 // weapon. Returns false when the state cannot be read (not attached, no

@@ -27,6 +27,7 @@ LOCAL_SRC_FILES := \
     src/esp_draw.cpp src/aim.cpp src/silent_aim.cpp src/farm.cpp src/farm_joy.cpp \
     src/widgets.cpp src/menu.cpp src/config.cpp src/FakeLag.cpp \
     src/game.cpp src/game_viewmodel.cpp src/game_markers.cpp src/game_farm.cpp \
+    src/vis_mesh.cpp \
     src/lang.cpp \
     src/Android_draw/draw.cpp src/Android_touch/TouchHelperA.cpp \
     src/VidAvatar.cpp \

@@ -15,6 +15,7 @@
 #include "player_motion_prediction.h" // дорисовка сетевых позиций между тиками
 #include "mount_latch.h"           // удержание бокса на транспорте (хост-проверяемый)
 #include "body_clip.h"             // отсечение тела по ближней плоскости (хост-проверяемый)
+#include "vis_mesh.h"             // сбор мешей мира и проверка видимости по ним
 #include "Vector.h"
 #include "lang.h"      // РУ/EN: подписи визуалов (оружие, предметы, животные)
 #include "text_utf8.h"  // копия подписи в буфер без разрезания символа UTF-8
@@ -1150,6 +1151,62 @@ static bool read_transform_hierarchy_arrays(uint64_t matrices, uint64_t indices,
     return true;
 }
 
+// Массивы иерархии трансформов «наружу»: matrices (Matrix34[]), indices
+// (родительские индексы) и index самого трансформа. vis_mesh.cpp обходит по
+// ним дерево сцены, а вызывать resolve_transform_arrays на каждый узел нельзя
+// — там перебор десятков кандидатов со сверкой по камере, то есть десятки
+// чтений на узел вместо одного.
+//
+// Порядок тот же, что у read_transform_hierarchy_position: сначала выученная
+// раскладка, потом самопроба двух известных расположений TransformAccess.
+bool transform_hierarchy_arrays(uint64_t native_transform, uint64_t& matrices,
+                                uint64_t& indices, int32_t& index) {
+    if (!native_transform) return false;
+    if (g_transform_hierarchy_layout_valid) {
+        const TransformHierarchyLayout& L = g_transform_hierarchy_layout;
+        const uint64_t data = rd_ptr(native_transform + L.data_offset);
+        const int32_t idx = rd<int32_t>(native_transform + L.index_offset);
+        uint64_t m = data ? rd_ptr(data + L.matrices_offset) : 0;
+        uint64_t n = data ? rd_ptr(data + L.indices_offset) : 0;
+        if (L.matrices_indirect) m = rd_ptr(m);
+        if (L.indices_indirect) n = rd_ptr(n);
+        if (m && n && idx >= 0 && idx <= 100000) {
+            matrices = m;
+            indices = n;
+            index = idx;
+            return true;
+        }
+    }
+    uint64_t data = rd_ptr(native_transform + 0x38);
+    int32_t idx = rd<int32_t>(native_transform + 0x40);
+    if (!data || idx < 0 || idx > 100000) {
+        data = rd_ptr(native_transform + 0x18);
+        idx = rd<int32_t>(native_transform + 0x20);
+    }
+    if (!data || idx < 0 || idx > 100000) return false;
+    static const uint64_t kPairs[][2] = {{0x18, 0x20}, {0x08, 0x10}};
+    for (const auto& pair : kPairs) {
+        const uint64_t m = rd_ptr(data + pair[0]);
+        const uint64_t n = rd_ptr(data + pair[1]);
+        if (!m || !n) continue;
+        const uint64_t matrix_candidates[2] = {m, rd_ptr(m)};
+        const uint64_t index_candidates[2] = {n, rd_ptr(n)};
+        for (uint64_t mm : matrix_candidates) {
+            for (uint64_t nn : index_candidates) {
+                if (!mm || !nn) continue;
+                Vec3 probe{};
+                if (!read_transform_hierarchy_arrays(mm, nn, idx, probe)) continue;
+                if (!vec3_is_finite(probe)) continue;
+                matrices = mm;
+                indices = nn;
+                index = idx;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformHierarchyLayout& layout, Vec3& position, Vec4* world_rotation) {
     if (!native_transform) return false;
     uint64_t transform_data = rd_ptr(native_transform + layout.data_offset);
@@ -1290,6 +1347,17 @@ static uint64_t camera_transform_of(uint64_t native_cam) {
 }
 
 static uint64_t camera_transform() { return camera_transform_of(g_native_camera); }
+
+// Точка входа в сцену для сбора геометрии (vis_mesh.cpp): трансформ локального
+// игрока — от него поднимаемся к корню и обходим дерево. Камера — запасной
+// путь: она в той же иерархии, но пересоздаётся при смерти и на респавне.
+uint64_t vis_scene_entry_transform() {
+    if (valid_obj(g_local_player)) {
+        const uint64_t transform = resolve_native_transform(rd_ptr(g_local_player + PLAYER_TRANSFORM));
+        if (valid_obj(transform)) return transform;
+    }
+    return camera_transform();
+}
 
 static bool resolve_transform_arrays(uint64_t native_transform, uint64_t& matrices,
                                      uint64_t& indices, int32_t& index,
@@ -8090,6 +8158,9 @@ static void reset_world_caches() {
 void esp_reset() {
     std::lock_guard<std::recursive_mutex> viewmodel_guard(viewmodel_session_mutex());
     silent_aim::clear();
+    // Собранная геометрия и найденная раскладка меша принадлежат прошлому
+    // процессу: у нового другая сцена и другие адреса.
+    vis::reset();
     esp_viewmodel_reset(false); // process lost: never restore to a reused address
     g_mem.unbind();
     g_attach_state = ESP_ATTACH_OK;
@@ -9316,6 +9387,10 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
     local = camera_position;
     has_local_position = true;
+    // Геометрия мира для визибл-чека: покадровый сбор, пока игроки ещё не
+    // разобраны. Список игроков нужен, чтобы их поддеревья не попали в
+    // геометрию — меши тел едут вместе с хозяином и испортили бы сборку.
+    vis::frame_tick(camera_position, vis_scene_entry_transform(), s_transforms, mono_seconds());
     Vec3 projection_camera_right{}, projection_camera_up{}, projection_camera_forward{};
     const bool projection_camera_basis_valid = camera_basis_from_view(
         view, projection_camera_right, projection_camera_up, projection_camera_forward);
@@ -10062,6 +10137,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     }
 
     append_bot_boxes(result);
+    vis::annotate(result, camera_position);
     g_box_frame_transient = false;
     watch_boxes(result, local_entity_index, &skip_reason, 0);
 
@@ -10084,6 +10160,33 @@ int esp_nearby_bot_count() {
 // конвейер (список игроков -> модель -> имя GameObject -> раскладка иерархии
 // -> мировые позиции костей -> проекция) и печатает, на каком шаге он
 // рассыпался. В обычной работе чит этого не делает.
+
+// ---- Диагностика сбора геометрии (xvcen mesh) -----------------------------
+// Тот же принцип, что у skel: короткоживущий процесс, выбранный транспорт,
+// один полный прогон и печать результата. Обычного кадра ESP здесь нет,
+// поэтому глаз берём из трансформа игрока (плюс рост), а список игроков пуст —
+// локальный игрок всё равно исключается внутри.
+int esp_vis_mesh_diag(char* out, size_t cap) {
+    if (!out || cap == 0) return -1;
+    vis::set_enabled(true);
+    const uint64_t entry = vis_scene_entry_transform();
+    Vec3 eye{};
+    if (!valid_obj(entry) || !read_transform_hierarchy_position(entry, eye) ||
+        !vec3_is_finite(eye)) {
+        eye = {};
+    }
+    eye.y += 1.6F;   // уровень глаз
+    const std::vector<uint64_t> no_players;
+    for (int frame = 0; frame < 900; ++frame) {
+        vis::frame_tick(eye, entry, no_players, mono_seconds());
+        const int state = vis::stats().state;
+        if (state == 4 || state == 5 || state == 6) break;
+    }
+    const size_t written = vis::diag(out, cap);
+    vis::set_enabled(false);
+    return (int)written;
+}
+
 int esp_skeleton_diag(char* out, size_t cap, int max_players) {
     if (!out || cap < 128) return -1;
     out[0] = '\0';

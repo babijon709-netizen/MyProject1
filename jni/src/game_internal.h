@@ -212,6 +212,12 @@ std::string read_remote_string(uint64_t address, bool* readable = nullptr);
 bool read_managed_string_ex(uint64_t str_obj, char* out, size_t cap, int32_t max_chars);
 bool read_transform_hierarchy_layout(uint64_t native_transform, const TransformHierarchyLayout& layout,
                                      Vec3& position, Vec4* world_rotation = nullptr);
+// Массивы иерархии трансформов (matrices / indices / index) для обхода дерева
+// сцены — см. комментарий у определения в game.cpp.
+bool transform_hierarchy_arrays(uint64_t native_transform, uint64_t& matrices,
+                                uint64_t& indices, int32_t& index);
+// Трансформ локального игрока: точка входа в сцену для сбора геометрии.
+uint64_t vis_scene_entry_transform();
 uint64_t native_component_transform(uint64_t native_component);
 int class_identity(uint64_t klass, const char* expected_name, const char* expected_ns);
 bool class_looks_alive(uint64_t klass);

@@ -420,6 +420,13 @@ static void ConfigSaveToPath(const std::string& path) {
                            (g_state.esp_backpacks ? 256u : 0u) |
                            (g_state.esp_sleepers ? 512u : 0u) |
                            (g_state.esp_cupboards ? 1024u : 0u);
+        // Бит 12 — «Учёт стен» (сбор мешей мира, vis_mesh). Он за пределами
+        // маски v6, поэтому версию поднимаем ТОЛЬКО когда тумблер включён:
+        // конфиг без него остаётся v6 и читается старыми сборками как раньше.
+        if (g_state.esp_vis_mesh) {
+            extension.flags |= 4096u;
+            extension.version = 7;
+        }
         // v4+: упреждение аима в миллисекундах (0 = выкл).
         extension.aim_lead_ms = g_state.aim_lead_ms;
         uint8_t extra[sizeof(extension)];
@@ -492,7 +499,8 @@ static void LoadCfgByName(const char* name, bool announce) {
         viewmodel::ConfigExtension extension;
         memcpy(&extension, extra, extraGot);   // v3: 32 байта, хвост — дефолты
         if (extension.magic == 0x31574d56u &&
-            (extension.version == 3 || extension.version == 4 || extension.version == 5 || extension.version == 6) &&
+            (extension.version == 3 || extension.version == 4 || extension.version == 5 ||
+             extension.version == 6 || extension.version == 7) &&
             extension.size == extraGot) {
             g_state.esp_turrets = (extension.flags & 128u) != 0;
             g_state.esp_backpacks = (extension.flags & 256u) != 0;
@@ -500,6 +508,9 @@ static void LoadCfgByName(const char* name, bool announce) {
             g_state.esp_cupboards = (extension.flags & 1024u) != 0;
             if (extension.version >= 4)
                 g_state.aim_lead_ms = viewmodel::decode_aim_lead_ms(extra, extraGot);
+            // v7+: «Учёт стен». Старые конфиги держат тут ноль — тумблер выключен,
+            // как и до его появления.
+            g_state.esp_vis_mesh = extension.version >= 7 && (extension.flags & 4096u) != 0;
             g_state.aim_predict = std::round(g_state.aim_lead_ms / kAimPredictStepMs);
         }
     }

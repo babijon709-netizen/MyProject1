@@ -571,6 +571,24 @@ inline constexpr std::uint64_t TRANSFORM_HIERARCHY_INDICES  = 0x20;
 inline constexpr std::uint64_t COMPONENT_GAMEOBJECT       = 0x20; // native Component -> native GameObject*
 inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_ARRAY = 0x20; // native GameObject -> ComponentPair*
 inline constexpr std::uint64_t COMPONENT_PAIR_PTR         = 0x08; // pair[0] + 8 == Transform* (first component)
+
+// ---- Нативный UnityEngine.Mesh (Unity 6000.3.18f1) -------------------------
+// Структура движка: в dump.cs её нет, обфускатор её не трогает, смещения едут
+// только вместе с версией Unity. Всё, что собрано здесь, используется ТОЛЬКО
+// если значение >= 0; при -1 смещения ищутся рантаймом (vis_mesh.cpp): сначала
+// структурный якорь VertexData, потом перебор с проверкой «каждый индекс меньше
+// числа вершин». Найденную раскладку печатает команда  su -c xvcen mesh  —
+// оттуда их и вписывать, когда движок обновится.
+inline constexpr int MESH_VERTEX_COUNT  = -1;  // uint32, сколько вершин в буфере
+inline constexpr int MESH_VERTEX_PTR    = -1;  // указатель на буфер вершин
+inline constexpr int MESH_VERTEX_STRIDE = -1;  // байт на вершину (шаг канала 0)
+inline constexpr int MESH_INDEX_COUNT   = -1;  // uint32, число индексов (кратно 3)
+inline constexpr int MESH_INDEX_PTR     = -1;  // указатель на буфер индексов
+inline constexpr int MESH_INDEX_WIDTH   = -1;  // 16 или 32 — разрядность индекса
+// Смещение PPtr<Mesh> внутри нативного компонента (MeshFilter / MeshCollider).
+// -1 = перебирать слоты 0x28..0x70 и проверять найденное по содержимому.
+inline constexpr int COMPONENT_MESH_PTR = -1;
+
 // GameObject name is a 32-byte core::string (SSO): flags byte at +0x1F,
 // heap pointer at +0x0 when (flags >= 0x40), inline chars otherwise.
 inline constexpr std::uint64_t GAMEOBJECT_NAME             = 0x48;

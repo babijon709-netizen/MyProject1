@@ -13,6 +13,7 @@
 #include "audio.h"
 #include "str.h"
 #include "esp_draw.h"
+#include "vis_mesh.h"
 #include "aim.h"
 #include "media/tab_icons.h"
 #define STB_IMAGE_IMPLEMENTATION
@@ -391,8 +392,13 @@ float TabContent(int tab, float dt, float cW) {
                 // «Союзники»: показывать ли союзников в ESP совсем (выключено —
                 // на них не рисуется ничего); цвет у них свой, чтобы отличать.
                 {"##vtm", XS("Союзники"),   &g_state.esp_team,         &g_state.a_esp_team,         &cfg::esp::ally_col},
+                // Учёт стен: меши мира собираются в рантайме, перекрытая
+                // перекрытием цель аимом не берётся. Сбор занимает несколько
+                // кадров после включения — до этого чек молчит (незнание не
+                // считается препятствием, см. vis_mesh.h).
+                {"##vvm", XS("Учёт стен"),  &g_state.esp_vis_mesh,     &g_state.a_esp_vis_mesh,     nullptr},
             };
-            constexpr int NP = 8;
+            constexpr int NP = 9;
             CardBg(rowH * NP);
             for (int i = 0; i < NP; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NP-1);
@@ -1814,6 +1820,12 @@ void RenderMenu() {
     Tick(g_state.a_aim_mode2,  g_state.aim_mode == AIM_MODE_SILENT, dt);
     Tick(g_state.a_esp_tracer, g_state.esp_tracer,         dt);
     Tick(g_state.a_esp_skeleton, g_state.esp_skeleton,     dt);
+    Tick(g_state.a_esp_vis_mesh, g_state.esp_vis_mesh,     dt);
+    // Тумблер «Учёт стен» сам включает и выключает сбор геометрии. Здесь, а не
+    // в отрисовке вкладки: блок Tick идёт каждый кадр при ЛЮБОЙ вкладке, иначе
+    // конфиг с включённым тумблером остался бы выключенным до первого захода
+    // в «Визуалы».
+    vis::set_enabled(g_state.esp_vis_mesh);
     Tick(g_state.a_ui_dark,    g_state.ui_dark_mode,       dt);
     Tick(g_state.a_farm_on,     g_state.farm_on,     dt);
     Tick(g_state.a_farm_wood,   g_state.farm_wood,   dt);

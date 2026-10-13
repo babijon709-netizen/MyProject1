@@ -290,11 +290,13 @@ static unsigned long s_seen_bots = 0;
 // Боты пропущены, потому что их ЕСП выключено (аим берёт ботов только
 // с включёнными маркерами).
 static unsigned long s_bot_noesp_skipped = 0;
+// Пропущены потому, что перекрыты геометрией мира («Учёт стен», vis_mesh).
+static unsigned long s_occluded_skipped = 0;
 
 // why — причина, по которой цель НЕ выбрана (0 когда цель есть). Коды:
 //   1 боксов нет вовсе      2 все союзники      3 все мёртвые
 //   4 нет скелета           5 кости не легли на экран
-//   6 точка вне экрана      7 точка дальше круга обзора
+//   6 точка вне экрана      7 точка дальше круга обзора      9 перекрыты стеной
 // Без этого кода кадр «аим активен, прицел есть, записей ноль» нечем
 // прочесть: в логе 17:06 таких было 32 из 92, и что именно не пустило
 // цель — отфильтровали трупа, круг обзора или пустой список — не видно.
@@ -305,6 +307,7 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
     const unsigned long was_nosk = s_no_skeleton,  was_noproj = s_bones_not_projected;
     const unsigned long was_off  = s_offscreen_skipped, was_fov = s_out_of_fov;
     const unsigned long was_seen = s_seen_boxes;
+    const unsigned long was_occluded = s_occluded_skipped;
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
 
     // Сводку пропусков печатаем БЕЗ условий и ДО выбора. В сборке 829a1dc
@@ -318,13 +321,13 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         const double now = (double)clock() / CLOCKS_PER_SEC;
         const unsigned long total = s_no_skeleton + s_bones_not_projected + s_dead_skipped +
                                     s_ally_skipped + s_offscreen_skipped + s_out_of_fov +
-                                    s_bot_noesp_skipped;
+                                    s_bot_noesp_skipped + s_occluded_skipped;
         if (now - s_at >= 5.0 && (total || s_seen_boxes)) {
             s_at = now;
             s_seen_boxes = 0; s_seen_bots = 0; s_bot_noesp_skipped = 0;
             s_ally_skipped = 0; s_dead_skipped = 0;
             s_no_skeleton = 0; s_bones_not_projected = 0;
-            s_offscreen_skipped = 0; s_out_of_fov = 0;
+            s_offscreen_skipped = 0; s_out_of_fov = 0; s_occluded_skipped = 0;
         }
     }
 
@@ -359,6 +362,10 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
         // Мёртвых не берём: труп ещё несколько секунд остаётся в списке
         // игроков с корректным скелетом, и прицел уезжал на него (19.09).
         if (b.dead) { ++s_dead_skipped; continue; }
+        // «Учёт стен»: цель за геометрией мира аим не берёт вовсе. Стену не
+        // прострелить, а прицел, упершийся в неё, выглядит как «аим сломался».
+        // Пока геометрия не собрана (b.occluded всегда false) фильтр молчит.
+        if (g_state.esp_vis_mesh && b.occluded) { ++s_occluded_skipped; continue; }
         AimTarget t;
         const int usedBone = aim_control::configured_bone_slot(wantBone, b.aim_valid);
         if (usedBone >= 0) {
@@ -439,12 +446,14 @@ static bool AimSelectTarget(float sw, float sh, float dt, AimPick& pick, AimTarg
                 s_seen_boxes - was_seen, s_ally_skipped - was_ally,
                 s_dead_skipped - was_dead, s_no_skeleton - was_nosk,
                 s_bones_not_projected - was_noproj, s_offscreen_skipped - was_off,
-                s_out_of_fov - was_fov
+                s_out_of_fov - was_fov, s_occluded_skipped - was_occluded
             };
             // «Боксов нет» — только когда на выбор не пришёл НИ ОДИН игрок;
             // иначе причина та, которой отсеяно больше всего.
+            // Код 8 занят в AimBegin («экран не того размера»), поэтому
+            // «перекрыты стеной» — 9; коды этой функции свои.
             int code = 1; unsigned long top = 0;
-            for (int i = 1; i < 7; ++i) if (d[i] > top) { top = d[i]; code = i + 1; }
+            for (int i = 1; i < 8; ++i) if (d[i] > top) { top = d[i]; code = (i == 7) ? 9 : i + 1; }
             if (d[0] > 0 && top == 0) code = 1;
             if (d[0] == 0) code = 1;
             *why = code;

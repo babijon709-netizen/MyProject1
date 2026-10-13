@@ -255,6 +255,15 @@ inline constexpr std::uint64_t TRANSFORM_HIERARCHY_INDICES = game_offsets::TRANS
 inline constexpr std::uint64_t COMPONENT_GAMEOBJECT = game_offsets::COMPONENT_GAMEOBJECT;
 inline constexpr std::uint64_t GAMEOBJECT_COMPONENT_ARRAY = game_offsets::GAMEOBJECT_COMPONENT_ARRAY;
 inline constexpr std::uint64_t COMPONENT_PAIR_PTR = game_offsets::COMPONENT_PAIR_PTR;
+// Нативный UnityEngine.Mesh: те же поля, что в релизе (см. комментарии в
+// game_offsets.h). -1 = искать рантаймом.
+inline constexpr int MESH_VERTEX_COUNT = game_offsets::MESH_VERTEX_COUNT;
+inline constexpr int MESH_VERTEX_PTR = game_offsets::MESH_VERTEX_PTR;
+inline constexpr int MESH_VERTEX_STRIDE = game_offsets::MESH_VERTEX_STRIDE;
+inline constexpr int MESH_INDEX_COUNT = game_offsets::MESH_INDEX_COUNT;
+inline constexpr int MESH_INDEX_PTR = game_offsets::MESH_INDEX_PTR;
+inline constexpr int MESH_INDEX_WIDTH = game_offsets::MESH_INDEX_WIDTH;
+inline constexpr int COMPONENT_MESH_PTR = game_offsets::COMPONENT_MESH_PTR;
 inline constexpr std::uint64_t GAMEOBJECT_NAME = game_offsets::GAMEOBJECT_NAME;
 inline constexpr std::uint64_t GAMEOBJECT_NAME_GUESS = game_offsets::GAMEOBJECT_NAME_GUESS;
 inline constexpr std::uint64_t IL2CPP_LIST_ITEMS = game_offsets::IL2CPP_LIST_ITEMS;

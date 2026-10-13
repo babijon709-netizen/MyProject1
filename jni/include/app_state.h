@@ -33,6 +33,10 @@ struct AppState {
     int   aim_priority = 0;
     bool  esp_box = false, esp_name = false, esp_wall = false, esp_chams = false;
     bool  esp_weapon = false, esp_tracer = false, esp_skeleton = false;
+    // Учёт стен: собирать меши мира в рантайме и не считать перекрытую цель
+    // видимой (визибл чек для аима). Отдельный проход по памяти сцены, поэтому
+    // выключен по умолчанию — включается в «Визуалы → Игроки».
+    bool  esp_vis_mesh = false;
     bool  esp_ore = false, esp_animal = false, esp_loot = false, esp_team = false;
     // Типы руды: какие именно камни показывать. «Руда» выше — общий
     // выключатель меток руды, эти три — отбор внутри него (камень / железо /
@@ -135,7 +139,7 @@ struct AppState {
     // Сессионное: бинарный CfgBlob заморожен версией (config.cpp).
     float screen_stretch_x = 1.0f;
     float a_esp_box = 0, a_esp_name = 0, a_esp_wall = 0, a_esp_chams = 0;
-    float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0;
+    float a_esp_weapon = 0, a_esp_tracer = 0, a_esp_skeleton = 0, a_esp_vis_mesh = 0;
     float a_esp_ore = 0, a_esp_animal = 0, a_esp_loot = 0, a_esp_team = 0, a_esp_pickup = 0;
     float a_esp_ore_stone = 1, a_esp_ore_iron = 1, a_esp_ore_sulfur = 1;
     float a_esp_bots = 0, a_esp_vehicles = 0, a_esp_scrap = 0, a_esp_house_boxes = 0;
