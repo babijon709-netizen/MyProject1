@@ -15,6 +15,8 @@
 #include "esp_draw.h"            // FrameBoxes, AimFovRadiusPx
 #include "manes_aim_source.h"
 #include "aim_control.h"
+#include "trigger_fire.h"     // автоогонь: машина времени без памяти игры
+#include "farm_joy.h"         // farmjoy::attack — защёлка кнопки атаки
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -205,13 +207,159 @@ static AimPick s_touchPick;
 // AimMemDiag.inactive:
 //   1 disabled              2 game process detached
 //   4 zone calibration      6 freecam enabled
-//   7 scope-only without ADS                               8 invalid screen
+//   7 scope-only without ADS  8 invalid screen   9 fire-only without shots
 // ADS state and its source are retained because the inactive path clears the
 // rest of the diagnostics.
 static int  s_adsState  = -1;   // 1 в прицеле, 0 нет, -1 режим выключен
 static int  s_adsSource = 0;    // 1 Aim, 2 isAiming, 0 не подтвердилась
 static bool s_adsDebounced = false;
 static int s_adsOnStreak = 0, s_adsOffStreak = 0;
+
+// ---- «Только при стрельбе» --------------------------------------------------
+// Аим ведёт камеру ровно пока из ствола летят выстрелы: прицел не уезжает на
+// цель заранее и не досаживает после того, как игрок отпустил огонь.
+//
+// Признак — отметка выстрела игры (PlayerEventHandler.LastHitTime,
+// esp_mem_aim_last_shot): FPHitscan пишет её ПОСЛЕ КАЖДОГО выстрела, то есть
+// промах она тоже отмечает. Значение — Time.time игры, и сравнивать его с
+// своими часами нельзя, поэтому считаем не значение, а ЕГО ИЗМЕНЕНИЕ: изменилось
+// — выстрел был между этими двумя кадрами.
+//
+// «Стреляет» держится kFireHoldSeconds после последнего засчитанного выстрела.
+// Столько нужно, чтобы аим не бросал цель между патронами очереди (при темпе
+// 0.1 с наш кадр чтения легко попадает в паузу между выстрелами) и чтобы
+// полуавтомат с редкими тапами не гасил аим на каждом интервале. Больше 0.5 с
+// ставить нельзя: аим начнёт дотягивать прицел уже после того, как игрок
+// кончил стрелять.
+//
+// Отдельно: собственная защёлка автоогня (s_triggerFiring) тоже считается
+// выстрелом. Иначе связка «триггер + только при стрельбе» не работала бы вовсе:
+// триггер нажимает кнопку, аим ждёт выстрела, выстрел зависит от аима.
+//
+// Читается раз на кадр в UpdateAim и для всех трёх режимов сразу: у тач-аима
+// свой вход (он не проходит AimBegin), а состояние общее.
+static constexpr double kFireHoldSeconds = 0.30;
+static double s_shotAt = -1e9;
+static float  s_shotMark = 0.f;
+static bool   s_shotMarkSeen = false;
+static int    s_fireState = -1;      // 1 стреляет, 0 нет, -1 режим выключен
+static bool   s_fireGateAllow = true;
+static bool   s_triggerFiring = false;
+
+static void AimFireGateUpdate(double now) {
+    if (!g_state.aim_fire_only) {
+        s_fireGateAllow = true;
+        s_fireState = -1;
+        s_shotMarkSeen = false;
+        s_shotAt = -1e9;
+        return;
+    }
+    float mark = 0.f;
+    if (esp_mem_aim_last_shot(mark)) {
+        if (!s_shotMarkSeen) {
+            // Первая удачная читка только задаёт точку отсчёта: «значение
+            // изменилось» без предыдущего значения ничего не значит.
+            s_shotMarkSeen = true;
+            s_shotMark = mark;
+        } else if (mark != s_shotMark) {
+            s_shotMark = mark;
+            s_shotAt = now;
+        }
+    }
+    const double since_shot = now - s_shotAt;
+    const bool firing = s_triggerFiring ||
+                        (since_shot >= 0.0 && since_shot <= kFireHoldSeconds);
+    s_fireState = firing ? 1 : 0;
+    s_fireGateAllow = firing;
+}
+
+static bool AimScreenSize(float& sw, float& sh) {
+    sw = (float)native_window_screen_x;
+    sh = (float)native_window_screen_y;
+    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
+        sw = (float)displayInfo.width;  sh = (float)displayInfo.height;
+    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
+        sw = (float)displayInfo.height;  sh = (float)displayInfo.width;
+    }
+    return sw >= 100.f && sh >= 100.f;
+}
+
+// ============================ Автоогонь (триггер) ============================
+//
+// Кнопку атаки триггер держит через ту же защёлку, что и автофарм
+// (farmjoy::attack → PlayerInputHandler+0x68): пока она равна 1, игра САМА
+// зовёт TryAttackContinuously() каждый кадр, а темп режет кулдаун ствола.
+// Своей частоты «тапов» здесь нет намеренно — она только ломала бы родной темп
+// оружия (и давала очередь быстрее, чем позволяет ствол).
+//
+// Пока работает автофарм, байт принадлежит ему: фарм отпускает защёлку по своим
+// фазам, и два владельца на одном бите только дёргали бы её туда-сюда. Поэтому
+// при farm_on триггер отпускает кнопку и молчит.
+//
+// Проверки «простреливается ли цель» нет: решение принимает луч самой игры, а
+// экранное попадание крестика в бокс — ровно то же условие, что видит игрок.
+// Выстрел через стену стоит патрон, но не палит в противника.
+
+static triggerfire::Machine s_trigger;
+
+// Что ЗАПИСАНО в защёлку (не что мы хотим): расхождение значит, что запись
+// сорвалась, и её надо повторить следующим кадром — иначе зажатая кнопка
+// осталась бы висеть после выключения тумблера.
+static bool s_triggerLatched = false;
+
+static bool TriggerEngaged(float sw, float sh, float radius) {
+    const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
+    const float cx = sw * 0.5f, cy = sh * 0.5f;
+    int wantBone = g_state.aim_bone;
+    if (wantBone < 0 || wantBone > 2) wantBone = 1;
+    for (const EspBox& b : boxes) {
+        // По своим не стреляем никогда — тот же порядок, что у выбора цели.
+        if (b.ally) continue;
+        if (b.dead) continue;
+        if (b.is_bot && !g_state.esp_bots) continue;
+        if (b.aim_valid[wantBone] &&
+            triggerfire::point_within(cx, cy, b.aim_pts[wantBone][0],
+                                      b.aim_pts[wantBone][1], radius))
+            return true;
+        // Костной точки нет (скелет не прочитался) — крестик внутри бокса.
+        // Раздув — половина радиуса: на дальних дистанциях бокс в пару
+        // пикселей, и без запаса триггер не срабатывал бы вовсе.
+        if (triggerfire::rect_contains(cx, cy, b.x1, b.y1, b.x2, b.y2, radius * 0.5f))
+            return true;
+    }
+    return false;
+}
+
+void AimReleaseTriggerLatch() {
+    if (!s_triggerLatched) return;
+    if (farmjoy::attack(false)) s_triggerLatched = false;
+}
+
+static void UpdateAimTrigger(float dt) {
+    const bool want = g_state.aim_trigger && g_esp_attached && !g_state.farm_on &&
+                      g_calibMode == 0 && !g_state.freecam_on;
+    bool engaged = false;
+    if (want) {
+        float sw = 0.f, sh = 0.f;
+        if (AimScreenSize(sw, sh)) {
+            const float short_side = sw < sh ? sw : sh;
+            const float radius = triggerfire::radius_px(short_side,
+                                                        g_state.aim_trigger_radius);
+            engaged = TriggerEngaged(sw, sh, radius);
+        }
+    }
+    triggerfire::Machine::Config cfg;
+    cfg.arm_delay = (g_state.gun_trigger_delay >= 0.f && g_state.gun_trigger_delay <= 1.f)
+                        ? g_state.gun_trigger_delay : 0.f;
+    cfg.release_grace = 0.12f;   // кадр без бокса (transient) — не «новая цель»
+
+    const bool firing = want && s_trigger.step(engaged, dt, cfg);
+    if (!want) s_trigger.reset();
+    s_triggerFiring = firing;
+    if (firing != s_triggerLatched) {
+        if (farmjoy::attack(firing)) s_triggerLatched = firing;
+    }
+}
 
 static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     g_aimActive = false;
@@ -241,6 +389,9 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
         s_adsDebounced = false;
         s_adsOnStreak = s_adsOffStreak = 0;
     }
+    // «Только при стрельбе»: состояние посчитано в UpdateAim (оно общее для
+    // всех трёх режимов); без выстрелов аим не ведёт.
+    if (active && !s_fireGateAllow) active = false;
     if (!active) {
         // Причину пишем по первому же невыполненному условию: в логе 15:57
         // «объект=0» шёл в 219 кадрах из 319, и без расшифровки это выглядело
@@ -250,6 +401,7 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
             else if (!g_esp_attached)                *why = 2;
             else if (g_calibMode != 0)               *why = 4;
             else if (g_state.freecam_on)             *why = 6;
+            else if (!s_fireGateAllow)               *why = 9;
             else                                     *why = 7;
         }
         return false;
@@ -258,14 +410,7 @@ static bool AimBegin(float& dt, float& sw, float& sh, int* why = nullptr) {
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
 
-    sw = (float) native_window_screen_x;
-    sh = (float) native_window_screen_y;
-    if (displayInfo.width > displayInfo.height && displayInfo.width >= 100 && displayInfo.height >= 100) {
-        sw = (float) displayInfo.width;  sh = (float) displayInfo.height;
-    } else if (displayInfo.height > displayInfo.width && displayInfo.height >= 100 && displayInfo.width >= 100) {
-        sw = (float) displayInfo.height; sh = (float) displayInfo.width;
-    }
-    if (sw < 100.f || sh < 100.f) {
+    if (!AimScreenSize(sw, sh)) {
         if (why) *why = 8;
         return false;
     }
@@ -506,6 +651,8 @@ static void UpdateAimTouch(float dt) {
                   g_calibMode == 0 && !g_state.freecam_on;
     if (active && g_state.aim_scope_only && !esp_local_player_is_aiming())
         active = false;
+    if (active && !s_fireGateAllow)   // «Только при стрельбе» (см. AimFireGateUpdate)
+        active = false;
 
     if (dt <= 0.f || !std::isfinite(dt)) dt = 1.f / 60.f;
     if (dt > 0.1f) dt = 0.1f;
@@ -655,11 +802,13 @@ static void UpdateAimMemory(float dt) {
         s_memDiag = AimMemDiag{};
         s_memDiag.inactive = why;   // печатается в той же строке «объект=…»
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
+        s_memDiag.fire = s_fireState; s_memDiag.trigger_firing = s_triggerFiring;
         pick.reset(); s_missFrames = 0; s_haveLast = false; s_haveLastWrite = false;
         return;
     }
     s_memDiag.inactive = 0;
     s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
+    s_memDiag.fire = s_fireState; s_memDiag.trigger_firing = s_triggerFiring;
 
     // MouseLook нужен не ради чувствительности (накопитель уже в градусах), а
     // как проверка «объект тот»: m_Sensitivity в правдоподобных пределах —
@@ -801,12 +950,29 @@ void AimEndFrame() {
     const bool keep = g_state.aim_touch && g_state.aim_mode == AIM_MODE_SILENT &&
                       g_aimActive && !g_state.freecam_on;
     if (!keep) silent_aim::clear();
+    // Конец кадра — то же право на последний шанс у автоогня: тумблер могли
+    // снять в меню ПОСЛЕ UpdateAim, и защёлка осталась бы зажатой до
+    // следующего кадра (а при выходе из оверлея — и навсегда).
+    if (s_triggerLatched && (!g_state.aim_trigger || g_state.farm_on ||
+                             g_calibMode != 0 || g_state.freecam_on ||
+                             !g_esp_attached)) {
+        if (farmjoy::attack(false)) s_triggerLatched = false;
+    }
 }
 
 // Диспетчер: какой режим ведёт камеру в этом кадре.
 void UpdateAim(float dt) {
     ++s_frames;
     const int mode = g_state.aim_mode;
+    // Порядок кадра: триггер решает, жмём ли кнопку; потом по этому решению и
+    // по отметке выстрела считается гейт «только при стрельбе»; и только потом
+    // аим ведёт камеру/ось. Переставить местами — значит один кадр стрелять
+    // вслепую или, наоборот, пропускать выстрел после наведения.
+    float trigger_dt = dt;
+    if (trigger_dt <= 0.f || !std::isfinite(trigger_dt)) trigger_dt = 1.f / 60.f;
+    if (trigger_dt > 0.1f) trigger_dt = 0.1f;
+    UpdateAimTrigger(trigger_dt);
+    AimFireGateUpdate(MonoNow());
     static int previousMode = -1;
     if (mode != previousMode) {
         if (previousMode == AIM_MODE_TOUCH) {

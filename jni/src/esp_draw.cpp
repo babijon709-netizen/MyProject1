@@ -5,6 +5,7 @@
 #include "cfg.h"
 #include "process.h"           // g_esp_attached
 #include "ui_util.h"           // ColU32
+#include "theme.h"              // C::U(C::Acc()) — подсветка цели аима на кольце
 #include "game_offsets_active.h" // go_active::PLAYER_BOX_WIDTH_RATIO
 #include "lang.h"                // lang::visual: подпись оружия
 #include "esp_box_hold.h"        // состав боксов/маркеров на кадр
@@ -67,6 +68,10 @@ const std::vector<EspBox>& FrameBoxes(float sw, float sh) {
             return s_out;
         }
         esp_set_skeleton_enabled(g_state.esp_skeleton);
+        // Пеленги 360° стоят слойу памяти лишних чтений (группа игрока, флаг
+        // respawn у тех, кто отсеян по экрану), поэтому они нужны ровно пока
+        // рисуются стрелки.
+        esp_set_bearings_enabled(g_state.esp_arrows || g_state.esp_radar);
         // Кости нужны аиму в обоих режимах: и касание, и память считают ошибку
         // по точке на шее, взятой из костей. Раньше запрос включался только от
         // касания, и в режиме «память» при выключенном скелете в ESP кости не
@@ -180,7 +185,7 @@ void DrawEspOverlay() {
     // Список обязан совпадать с тем, что ниже рисуется: шкафы (esp_cupboards)
     // в нём отсутствовали, и с одним включённым тумблером «Шкафы» функция
     // выходила здесь — тумблер не делал ничего, пока не включишь ещё и горшки.
-    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes && !g_state.esp_cupboards) return;
+    if (!g_state.esp_box && !g_state.esp_chams && !g_state.esp_wall && !g_state.esp_tracer && !g_state.esp_skeleton && !g_state.esp_name && !g_state.esp_weapon && !g_state.esp_ore && !g_state.esp_animal && !g_state.esp_loot && !g_state.esp_pickup && !g_state.esp_bots && !g_state.esp_vehicles && !g_state.esp_scrap && !g_state.esp_turrets && !g_state.esp_backpacks && !g_state.esp_sleepers && !g_state.esp_house_boxes && !g_state.esp_cupboards && !g_state.esp_arrows && !g_state.esp_radar) return;
 
     const std::vector<EspBox>& boxes = FrameBoxes(sw, sh);
     constexpr int BOX_EDGES[][2] = {
@@ -492,6 +497,139 @@ void DrawEspOverlay() {
             snprintf(label, sizeof(label), "%.0fm", marker.distance);
             EspPill(marker.x, marker.y + PillH(marker.name, kMarkerScale) + 2.f, label,
                     ColU32(cfg::esp::distance_col), kMarkerScale);
+        }
+    }
+
+    // ---- Стрелки 360° ------------------------------------------------------
+    // Кольцо вокруг центра экрана: по стрелке на противника, включая тех, кого
+    // в кадре нет вовсе (за спиной, из-за угла). Источник — пеленги слоя памяти
+    // (esp_get_bearings), угол компасный: 0 = прямо перед камерой, дальше по
+    // часовой, ±180 за спиной.
+    //
+    // Именно кольцо, а не «прижатая к кромке точка проекции»: проецирование
+    // отказывает, когда цель проходит за камерой (w <= 0), и у экранного
+    // варианта стрелка прыгала бы с левого края на правый ровно в этот момент.
+    // Компасный угол идёт непрерывно все 360°, поэтому обход за спиной — это
+    // плавное движение по кругу. Наклон (pitch) не участвует намеренно: на
+    // кольце «вверху» значит «впереди», а не «на крыше».
+    // Цель, которую аим держит сейчас: подсвечивается акцентом и на кольце
+    // стрелок, и на радаре. Окно холда — те же 0.2 с, что у «дыхания» рамки.
+    unsigned long long held = 0;
+    if (g_state.aim_touch && (g_state.esp_arrows || g_state.esp_radar)) {
+        const double hold_age = mono_now() - g_aim_hold_at.load(std::memory_order_relaxed);
+        if (hold_age >= 0.0 && hold_age <= 0.20)
+            held = g_aim_pulse_target.load(std::memory_order_relaxed);
+    }
+
+    if (g_state.esp_arrows) {
+        const std::vector<EspBearing>& bearings = esp_get_bearings();
+        const float short_side = sw < sh ? sw : sh;
+        float ring_pct = g_state.esp_arrow_ring;
+        if (!(ring_pct >= 8.f && ring_pct <= 60.f)) ring_pct = 30.f;
+        const float radius = short_side * 0.5f * (ring_pct * 0.01f);
+        const float ccx = sw * 0.5f, ccy = sh * 0.5f;
+        // Длина стрелки привязана к радиусу кольца: на маленьком кольце
+        // соседние цели иначе слипались бы в одно пятно.
+        const float size = radius * 0.16f;
+        if (radius > 8.f && !bearings.empty()) {
+            // Сам круг — тонкий и полупрозрачный: он нужен, чтобы стрелки
+            // читались как кольцо, а не как россыпь значков вокруг прицела.
+            dl->AddCircle(ImVec2(ccx, ccy), radius, IM_COL32(255, 255, 255, 36), 96, 1.f);
+
+            for (const EspBearing& b : bearings) {
+                if (b.dead) continue;
+                // Союзники на кольце — только когда включён их показ (тот же
+                // тумблер, что у визуалов); мёртвых и выключенных ботов нет.
+                if (b.ally && !g_state.esp_team) continue;
+                if (b.is_bot && !g_state.esp_bots) continue;
+                if (g_state.esp_arrows_offscreen && b.on_screen) continue;
+                if (!std::isfinite(b.yaw)) continue;
+
+                const float a = b.yaw * ((float)M_PI / 180.f);
+                const float dx = sinf(a), dy = -cosf(a);   // наружу от центра
+                const float px = -dy, py = dx;              // перпендикуляр
+                const ImVec2 tip  = {ccx + dx * (radius + size), ccy + dy * (radius + size)};
+                const ImVec2 base = {ccx + dx * (radius - size * 0.35f),
+                                     ccy + dy * (radius - size * 0.35f)};
+                const float half = size * 0.62f;
+                const ImVec2 c1 = {base.x + px * half, base.y + py * half};
+                const ImVec2 c2 = {base.x - px * half, base.y - py * half};
+
+                ImU32 col = ColU32(b.ally ? cfg::esp::ally_col : cfg::esp::arrow_col);
+                if (b.is_bot) col = ColU32(cfg::esp::bot_col);
+                if (held != 0 && b.id == held) col = C::U(C::Acc());
+
+                dl->AddTriangle(tip, c1, c2, kVisOutline, thick + 0.6f);
+                dl->AddTriangleFilled(tip, c1, c2, col);
+
+                if (g_state.esp_arrows_dist && b.distance >= 0.0f) {
+                    char label[24];
+                    snprintf(label, sizeof(label), "%.0fm", b.distance);
+                    constexpr float kArrowScale = 0.8f;
+                    const float h = PillH(label, kArrowScale);
+                    // Подпись — продолжение луча стрелки; у краёв экрана её не
+                    // режет: кольцо вместе с хвостом заведомо внутри короткой
+                    // стороны (радиус клампится 60% половины стороны).
+                    EspPill(ccx + dx * (radius + size * 2.6f),
+                            ccy + dy * (radius + size * 2.6f) - h * 0.5f,
+                            label, col, kArrowScale);
+                }
+            }
+        }
+    }
+
+    // ---- Радар 360° в углу -------------------------------------------------
+    // Те же пеленги, что у стрелок (esp_get_bearings), но точка лежит на круге
+    // радара пропорционально дистанции: кольцу стрелок безразлично, кто в 5 м,
+    // а кто в 90 — радар отвечает ровно на это. Верх = «передо мной», как на
+    // кольце: один и тот же компасный угол на обоих визуалах, иначе они
+    // расходились бы при каждом повороте камеры.
+    if (g_state.esp_radar) {
+        const std::vector<EspBearing>& bearings = esp_get_bearings();
+        float size = g_state.esp_radar_size;
+        if (!(size >= 90.f && size <= 360.f)) size = 170.f;
+        float range = g_state.esp_radar_range;
+        if (!(range >= 10.f && range <= 400.f)) range = 100.f;
+        const float R = size * 0.5f;
+        // Верхний правый угол: счётчик игроков живёт сверху по центру, органы
+        // управления фрикама/FakeLag — по центру справа, радар их не закрывает.
+        const float margin = 18.f;
+        const ImVec2 rc = {sw - R - margin, R + margin};
+
+        dl->AddCircleFilled(rc, R, IM_COL32(12, 14, 22, 150), 96);
+        dl->AddCircle(rc, R, IM_COL32(255, 255, 255, 60), 96, 1.f);
+        // Полукруг дальности + оси: по ним читается масштаб, а не только «кто».
+        dl->AddCircle(rc, R * 0.5f, IM_COL32(255, 255, 255, 26), 64, 1.f);
+        dl->AddLine(ImVec2(rc.x, rc.y - R), ImVec2(rc.x, rc.y + R), IM_COL32(255, 255, 255, 22), 1.f);
+        dl->AddLine(ImVec2(rc.x - R, rc.y), ImVec2(rc.x + R, rc.y), IM_COL32(255, 255, 255, 22), 1.f);
+        // Мы — в центре, и всегда: радар привязан к нам, а не к миру.
+        dl->AddCircleFilled(rc, 2.8f, IM_COL32(255, 255, 255, 220), 12);
+
+        for (const EspBearing& b : bearings) {
+            if (b.dead) continue;
+            if (b.ally && !g_state.esp_team) continue;
+            if (b.is_bot && !g_state.esp_bots) continue;
+            if (!std::isfinite(b.yaw)) continue;
+            // Дальше дальности — к кромку, но не за неё: «там кто-то есть»
+            // должно оставаться видимым, а не исчезать с радиуса.
+            const float dist = b.distance >= 0.0f ? b.distance : range;
+            const float frac = dist >= range ? 0.94f : (dist / range) * 0.94f;
+            const float rr = R * frac;
+            const float a = b.yaw * ((float)M_PI / 180.f);
+            const ImVec2 p = {rc.x + sinf(a) * rr, rc.y - cosf(a) * rr};
+            ImU32 col = ColU32(b.ally ? cfg::esp::ally_col : cfg::esp::box_col);
+            if (b.is_bot) col = ColU32(cfg::esp::bot_col);
+            if (held != 0 && b.id == held) col = C::U(C::Acc());
+            const float dot = R * 0.028f + 1.6f;
+            dl->AddCircleFilled(p, dot + 1.2f, kVisOutline, 12);
+            dl->AddCircleFilled(p, dot, col, 10);
+        }
+
+        if (!bearings.empty()) {
+            char label[24];
+            snprintf(label, sizeof(label), "%.0fm", range);
+            constexpr float kRadarScale = 0.72f;
+            EspPill(rc.x, rc.y + R + 5.f, label, ColU32(cfg::esp::distance_col), kRadarScale);
         }
     }
 }

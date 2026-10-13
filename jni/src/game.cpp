@@ -8022,6 +8022,11 @@ bool esp_local_eye_position(float& x, float& y, float& z) {
 // on screen). Feeds the enemy-counter pill in the overlay.
 static int      g_frame_player_count = 0;
 static int      g_frame_bot_count = 0;
+// ---- Пеленги 360° (стрелки оверлея и радара) --------------------------------
+// Публикуются в проходе игроков ДО экранной геометрии — см. EspBearing в game.h.
+static bool g_bearings_requested = false;
+static std::vector<EspBearing> g_frame_bearings;
+
 static int      g_frame_transforms_empty_streak = 0;
 // Frames in a row esp_get_boxes() gave up before publishing this frame's
 // camera / local position (see the watchdog at the top of it).
@@ -8031,6 +8036,37 @@ static int      g_frame_publish_fail_streak = 0;
 // an empty frame. A readable empty player registry is not transient.
 static bool     g_box_frame_transient = true;
 bool esp_box_frame_transient() { return g_box_frame_transient; }
+
+// Пеленги живут ровно один кадр: их отдаёт оверлею последний опубликованный
+// кадр ESP (см. g_frame_bearings.clear() в esp_get_boxes).
+void esp_set_bearings_enabled(bool enabled) { g_bearings_requested = enabled; }
+const std::vector<EspBearing>& esp_get_bearings() { return g_frame_bearings; }
+
+// Горизонтальный пеленг от точки камеры к мировой точке. fwd/right проецируются
+// на мировую горизонталь (в Unity вверх = Y) и ортогонализуются друг к другу,
+// поэтому угол зависит только от рысканья камеры. Отказ (false) — камера
+// смотрит вертикально (горизонтальной составляющей направления нет) или базис
+// разъехался: кадр без стрелок лучше кадра, где они показывают не туда.
+static bool bearing_yaw(const Vec3& to, const Vec3& cam_pos, const Vec3& cam_fwd,
+                        const Vec3& cam_right, float& yaw_deg) {
+    Vec3 f = {cam_fwd.x, 0.0F, cam_fwd.z};
+    const float fl = sqrtf(f.x * f.x + f.z * f.z);
+    if (!std::isfinite(fl) || !(fl > 0.05F)) return false;
+    f.x /= fl; f.z /= fl;
+    Vec3 r = {cam_right.x, 0.0F, cam_right.z};
+    const float along = r.x * f.x + r.z * f.z;
+    r.x -= along * f.x; r.z -= along * f.z;
+    const float rl = sqrtf(r.x * r.x + r.z * r.z);
+    if (!std::isfinite(rl) || !(rl > 0.05F)) return false;
+    r.x /= rl; r.z /= rl;
+    const float dx = to.x - cam_pos.x, dz = to.z - cam_pos.z;
+    const float forward_along = dx * f.x + dz * f.z;
+    const float right_along = dx * r.x + dz * r.z;
+    if (!std::isfinite(forward_along) || !std::isfinite(right_along)) return false;
+    yaw_deg = atan2f(right_along, forward_along) * 57.29577951F;
+    return std::isfinite(yaw_deg);
+}
+
 // Independent from camera/marker publication: successful ore frames must not
 // conceal a dead player list or position pipeline.
 static PlayerEspWatchdog g_player_esp_watchdog;
@@ -8326,6 +8362,21 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
         float dy = feet.y - g_frame_local_pos.y;
         float dz = feet.z - g_frame_local_pos.z;
         box.distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        // Боты на кольце — по тем же правилам, что и игроки, и считаются до
+        // экранных отсевов ниже (w2s отказывает на всём, что за спиной, а
+        // стрелка обязана быть и на боте, сидящем в тылу).
+        int bearing_index = -1;
+        if (g_bearings_requested && g_frame_cam_basis_valid) {
+            EspBearing bearing{};
+            bearing.id = src.id;
+            bearing.is_bot = true;
+            bearing.distance = box.distance;
+            if (bearing_yaw(feet, g_frame_cam_pos, g_frame_cam_fwd, g_frame_cam_right,
+                            bearing.yaw)) {
+                bearing_index = (int)g_frame_bearings.size();
+                g_frame_bearings.push_back(bearing);
+            }
+        }
         // Упреждение — по скорости САМОГО бота. Раньше здесь оставался
         // g_aim_lead последнего обработанного игрока кадра (в мемори-режиме не
         // меньше 50 мс), и бегущий игрок уводил прицел на бота в свою сторону.
@@ -8372,6 +8423,7 @@ static void append_bot_boxes(std::vector<EspBox>& out) {
         box.x1 = cx - w * 0.5F; box.x2 = cx + w * 0.5F;
         box.y1 = s_feet.y < s_top.y ? s_feet.y : s_top.y;
         box.y2 = s_feet.y < s_top.y ? s_top.y : s_feet.y;
+        if (bearing_index >= 0) g_frame_bearings[bearing_index].on_screen = true;
         out.push_back(box);
         ++g_frame_bot_count;
     }
@@ -9164,6 +9216,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     g_frame_local_valid = false;
     g_frame_cam_basis_valid = false;
     g_frame_player_count = 0;
+    // Пеленги живут ровно один кадр: ранний выход обязан оставить пустой
+    // список, иначе оверлей дорисовал бы прошлогодние стрелки новой камерой.
+    g_frame_bearings.clear();
 
     if (g_pid <= 0 || !g_il2cpp_base) {
             return result;
@@ -9610,6 +9665,34 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // players behind us too (360 degrees), not only the ones on screen.
         ++g_frame_player_count;
 
+        // Пеленг 360° — здесь, а не вместе с боксом: экранной геометрии у
+        // игрока за спиной нет вовсе. Признаки «свой» и «труп» считаются тоже
+        // отсюда: у отсеянного по экрану кадра блоки группы и здоровья ниже не
+        // выполняются, и без этого стрелка показывала бы тиммейта противником,
+        // а труп — живой целью.
+        int bearing_index = -1;
+        if (g_bearings_requested) {
+            EspBearing bearing{};
+            bearing.id = s_transforms[i];
+            bearing.distance = distance;
+            float yaw = 0.0F;
+            if (bearing_yaw(feet, diagnostic_camera_position, diagnostic_camera_forward,
+                            diagnostic_camera_right, yaw)) {
+                bearing.yaw = yaw;
+                if (local_group_valid) {
+                    PlayerGroup group;
+                    read_player_group(s_transforms[i], group);
+                    bearing.ally = groups_are_allied(local_group, group);
+                }
+                uint8_t respawning = 0;
+                bearing.dead = (rd_exact(s_transforms[i] + PLAYER_MANAGER_RESPAWNING,
+                                         respawning) && respawning != 0) ||
+                               player_track_is_corpse(s_transforms[i]);
+                bearing_index = (int)g_frame_bearings.size();
+                g_frame_bearings.push_back(bearing);
+            }
+        }
+
         // Crouch-aware body height from the character controller.
         PlayerAux& aux = player_aux(s_transforms[i]);
         const bool crouched = player_is_crouched(aux);
@@ -10019,6 +10102,9 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         if (box.dead) {
             mark_skip('X');
             if (g_frame_player_count > 0) --g_frame_player_count;
+            // Смерть, подтверждённая этим кадром (respawning/здоровье/поза),
+            // точнее флага, прочитанного на шаге пеленга, — решение за ней.
+            if (bearing_index >= 0) g_frame_bearings[bearing_index].dead = true;
             // Метка для подавления дубликатов выше: этот объект — труп, uid он
             // не удерживает, и свежий объект игрока получает бокс.
             auto corpse_track = g_player_track.find(s_transforms[i]);
@@ -10052,6 +10138,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
         result.push_back(box);
+        // Бокс дорисован: стрелка этого игрока на кольце — «в кадре» (при
+        // режиме «только вне экрана» она гаснет, и противника в поле зрения
+        // выдают обычные визуалы, а не дублирующая стрелка).
+        if (bearing_index >= 0) {
+            EspBearing& bearing = g_frame_bearings[bearing_index];
+            bearing.on_screen = true;
+            bearing.ally = box.ally;
+            bearing.dead = box.dead;
+        }
         s_box_seen_at[s_transforms[i]] = mono_seconds();
         if (s_box_seen_at.size() > 256) s_box_seen_at.clear();
         auto live_track = g_player_track.find(s_transforms[i]);

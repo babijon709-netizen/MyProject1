@@ -88,14 +88,24 @@ float TabContent(int tab, float dt, float cW) {
         cfg::aim::smoothness = g_state.gun_str;
         cfg::aim::bone       = g_state.aim_bone;
         cfg::aim::trigger_delay  = g_state.gun_trigger_delay;
+        cfg::aim::fire_only      = g_state.aim_fire_only;
+        cfg::aim::trigger_bot    = g_state.aim_trigger;
 
         SHdr(XS("Аим"));
-        CardBg(Layout::RowH * 3);
+        CardBg(Layout::RowH * 5);
         const bool aimWasOn = g_state.aim_touch;
         ToggleRow("##ta1", XS("Аим"),          &g_state.aim_touch,   g_state.a_aim_touch, false, true);
         if (aimWasOn != g_state.aim_touch)
             ;
         ToggleRow("##ta6", XS("Только в прицеле"), &g_state.aim_scope_only, g_state.a_aim_scope, false);
+        // Аим ведёт, только пока из ствола реально летят выстрелы (отметка
+        // выстрела игры). Пара к предыдущему: тот смотрит на прицел, этот — на
+        // огонь. С «Автоогнем» ниже работает в связке: триггер стреляет, аим
+        // подводит прицел под его выстрелы.
+        ToggleRow("##ta7", XS("Только при стрельбе"), &g_state.aim_fire_only, g_state.a_aim_fire, false);
+        // Держит кнопку атаки, пока крестик на противнике; работает и с
+        // выключенным аимом. Темп — у оружия, не отсюда.
+        ToggleRow("##ta8", XS("Автоогонь при наведении"), &g_state.aim_trigger, g_state.a_aim_trigger, false);
         ToggleRow("##ta3", XS("Круг FOV"),         &g_state.aim_special, g_state.a_aim_spec,  true, false, &cfg::aim::fov_col);
 
         // ---- Режим: чем именно аим крутит прицел ---------------------------
@@ -224,13 +234,22 @@ float TabContent(int tab, float dt, float cW) {
         }
 
         SHdr(XS("Наводка"));
-        CardBg(Layout::SliderH * 3);
+        CardBg(Layout::SliderH * 5);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", false, false, g_state.sl_gun_str, dt);
         // Предикт: аим ведёт по точке, куда цель уйдёт за N мс.
         // Уровень 0 = вести по кости; шаг 15 мс, уровень 10 = 150 мс.
         SliderRow("##aldd", XS("Предикт"), &g_state.aim_predict,
-                  0.f, 10.f, "%.0f", true, false, g_state.sl_aim_lead, dt);
+                  0.f, 10.f, "%.0f", false, false, g_state.sl_aim_lead, dt);
+        // Автоогонь: насколько широко считать «крестик на противнике» —
+        // проценты короткой стороны (в пикселях телефон и планшет стреляли бы
+        // по-разному). 0% = ровно по кости выбранной точки.
+        SliderRow("##atrr", XS("Радиус автоогня"), &g_state.aim_trigger_radius,
+                  0.f, 8.f, XS("%.1f%"), false, false, g_state.sl_aim_trig_radius, dt);
+        // Пауза между «цель на прицеле» и нажатием кнопки: не давать выстрел
+        // на каждом кадре, где противник только мелькнул из-за угла.
+        SliderRow("##atrd", XS("Задержка"), &g_state.gun_trigger_delay,
+                  0.f, 0.3f, XS("%.2f с"), true, false, g_state.sl_gun_trig, dt);
         g_state.aim_predict = std::round(g_state.aim_predict);
         g_state.aim_lead_ms = g_state.aim_predict * kAimPredictStepMs;
 
@@ -396,6 +415,34 @@ float TabContent(int tab, float dt, float cW) {
             CardBg(rowH * NP);
             for (int i = 0; i < NP; i++)
                 EspToggleColorRow(rows[i].id, rows[i].lbl, rows[i].v, rows[i].a, rows[i].col, i == NP-1);
+        }
+
+        // ---- Стрелки и радар 360° ------------------------------------------
+        // Оба визуала читают один снимок пеленгов (esp_get_bearings): кто где,
+        // включая тех, кого в кадре нет вовсе (за спиной, из-за угла). Кольцо
+        // отвечает на «где», радар — на «где и насколько близко». Угол компасный
+        // (0 = прямо перед камерой), поэтому обход за спиной идёт по кругу
+        // плавно, без прыжка с края на край, как это было бы с проекцией точки.
+        ImGui::Dummy({1.f, 12.f});
+        SHdr(XS("Стрелки и радар 360°"));
+        {
+            CardBg(rowH * 4 + Layout::SliderH * 3);
+            EspToggleColorRow("##va360",  XS("Стрелки 360°"), &g_state.esp_arrows,
+                              &g_state.a_esp_arrows, &cfg::esp::arrow_col, false);
+            EspToggleColorRow("##va360o", XS("Только вне экрана"), &g_state.esp_arrows_offscreen,
+                              &g_state.a_esp_arrows_off, nullptr, false);
+            EspToggleColorRow("##va360d", XS("Дистанция"), &g_state.esp_arrows_dist,
+                              &g_state.a_esp_arrows_dist, nullptr, false);
+            EspToggleColorRow("##vrd",    XS("Радар 360°"), &g_state.esp_radar,
+                              &g_state.a_esp_radar, nullptr, false);
+            SliderRow("##va360r", XS("Радиус кольца"), &g_state.esp_arrow_ring,
+                      8.f, 60.f, XS("%.0f%%"), false, true, g_state.sl_esp_arrow_ring, dt);
+            SliderRow("##vrd1", XS("Размер радара"), &g_state.esp_radar_size,
+                      90.f, 360.f, XS("%.0f px"), false, false, g_state.sl_esp_radar_size, dt);
+            // Точки дальше дальности прижимаются к кромку круга: «там кто-то
+            // есть» обязано оставаться видимым, а не исчезать.
+            SliderRow("##vrd2", XS("Дальность радара"), &g_state.esp_radar_range,
+                      10.f, 400.f, XS("%.0f м"), true, false, g_state.sl_esp_radar_range, dt);
         }
 
         ImGui::Dummy({1.f, 12.f});
@@ -1784,6 +1831,8 @@ void RenderMenu() {
     Tick(g_state.a_aim_pelvis, g_state.aim_bone == 2,      dt);
     Tick(g_state.a_aim_spec,   g_state.aim_special,        dt);
     Tick(g_state.a_aim_scope,  g_state.aim_scope_only,     dt);
+    Tick(g_state.a_aim_fire,   g_state.aim_fire_only,      dt);
+    Tick(g_state.a_aim_trigger, g_state.aim_trigger,       dt);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
     Tick(g_state.a_esp_wall,   g_state.esp_wall,           dt);
@@ -1797,6 +1846,10 @@ void RenderMenu() {
     Tick(g_state.a_esp_loot,   g_state.esp_loot,           dt);
     Tick(g_state.a_esp_pickup, g_state.esp_pickup,         dt);
     Tick(g_state.a_esp_bots,   g_state.esp_bots,           dt);
+    Tick(g_state.a_esp_arrows, g_state.esp_arrows,         dt);
+    Tick(g_state.a_esp_radar,  g_state.esp_radar,          dt);
+    Tick(g_state.a_esp_arrows_off, g_state.esp_arrows_offscreen, dt);
+    Tick(g_state.a_esp_arrows_dist, g_state.esp_arrows_dist, dt);
     Tick(g_state.a_esp_vehicles, g_state.esp_vehicles,     dt);
     Tick(g_state.a_esp_scrap,  g_state.esp_scrap,          dt);
     Tick(g_state.a_esp_house_boxes, g_state.esp_house_boxes, dt);

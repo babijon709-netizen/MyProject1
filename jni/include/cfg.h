@@ -26,6 +26,8 @@ namespace cfg { namespace esp {
     inline ImVec4 ore_metal_col     = {1.00f, 0.55f, 0.16f, 1.f};
     inline ImVec4 ore_sulfur_col    = {1.00f, 0.88f, 0.20f, 1.f};
     inline ImVec4 farm_spot_col     = {0.31f, 1.00f, 0.47f, 1.f};
+    // Стрелки 360° (пеленги на кольце вокруг центра экрана).
+    inline ImVec4 arrow_col         = {1.00f, 0.35f, 0.30f, 1.f};
     inline ImVec4 farm_body_col     = {1.00f, 0.78f, 0.24f, 1.f};
     inline ImVec4 hud_col           = {1.00f, 1.00f, 1.00f, 1.f};
     // Tracers drawn to a team mate are always green, no matter what colour the
@@ -65,6 +67,7 @@ namespace cfg { namespace aim {
     inline bool  vis_check         = false;
     inline bool  draw_fov          = false;
     inline bool  scope_only        = false;   // aim only while ADS (прицел)
+    inline bool  fire_only         = false;   // aim only while the weapon fires
     inline float fov               = 80.f;
     inline float smoothness        = 5.f;
     inline int   bone              = 0;
