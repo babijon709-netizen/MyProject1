@@ -191,6 +191,77 @@ int main() {
         CHECK(!DecodeValid(empty, c, e), "empty mesh invalid");
     }
 
+    // ---- 7. Перечисление сцены и запекание в мир ----------------------------
+    {
+        Arena a;
+        Reader rd = reader_of(a);
+        const uint64_t indexOff = 0x10;              // стенд для TRANSFORM_HIERARCHY_INDEX
+        // 5 трансформов: у каждого по indexOff лежит его собственный индекс.
+        uint64_t X[5];
+        for (int32_t k = 0; k < 5; ++k) {
+            X[k] = 0x10000 + (uint64_t)k * 0x100;   // >= 0x10000: проходит looks_like_heap_ptr
+            put_u32(a, X[k] + indexOff, (uint32_t)k);
+        }
+        // transforms[]: TA[k*8] == X[k].
+        const uint64_t TA = 0x100000;
+        for (int32_t k = 0; k < 5; ++k) put_u64(a, TA + (uint64_t)k * 8, X[k]);
+        // data: декой-поле и настоящее поле-указатель на TA.
+        const uint64_t D = 0x200000;
+        put_u64(a, D + 0x08, 0x300000);              // декой: не совпадёт с якорем
+        put_u64(a, D + 0x28, TA);                    // настоящее поле
+        const int32_t anchorI = 2;
+        const uint64_t anchorT = X[2];
+
+        uint64_t found = 0;
+        CHECK(FindTransformsArray(rd, D, anchorT, anchorI, found) && found == TA,
+              "FindTransformsArray: прямой массив найден по якорю");
+        CHECK(CountTransforms(rd, TA, indexOff, 100, 2) == 5,
+              "CountTransforms: 5 связных трансформов");
+        CHECK(SceneArraysLookValid(rd, TA, indexOff, anchorI, 1),
+              "SceneArraysLookValid: якорь самопроверяется");
+
+        // Косвенный вариант: data -> структура -> массив.
+        const uint64_t D2 = 0x210000, S = 0x220000;
+        put_u64(a, S + 0x00, TA);                    // S[0] = TA (массив)
+        put_u64(a, D2 + 0x40, S);                    // data-поле -> S
+        uint64_t found2 = 0;
+        CHECK(FindTransformsArray(rd, D2, anchorT, anchorI, found2) && found2 == TA,
+              "FindTransformsArray: один уровень косвенности");
+
+        // Мусорный якорь: массив не находится.
+        uint64_t nope = 0;
+        CHECK(!FindTransformsArray(rd, D, 0xDEADBEEF, anchorI, nope),
+              "FindTransformsArray: чужой якорь не совпадает");
+
+        // Запекание в мир: сдвиг + масштаб, сквозной счётчик вершин.
+        std::vector<vis::Tri> local = { vis::Tri{ {0,0,0}, {1,0,0}, {0,1,0} } };
+        std::string obj = "# static map\n";
+        uint32_t vbase = 0;
+        const vis::Vec3 pos{10, 20, 30};
+        const vis::Quat ident{0, 0, 0, 1};
+        AppendWorldObj(obj, local, pos, ident, 1.0f, vbase);
+        CHECK(vbase == 3, "AppendWorldObj: vbase вырос на 3");
+        CHECK(obj.find("v 10.00000 20.00000 30.00000") != std::string::npos, "вершина сдвинута в мир");
+        CHECK(obj.find("f 1 2 3") != std::string::npos, "грань ссылается на свои вершины");
+        // Второй инстанс: тот же меш, другая позиция, scale=2, сквозная индексация.
+        AppendWorldObj(obj, local, vis::Vec3{0,0,0}, ident, 2.0f, vbase);
+        CHECK(vbase == 6, "AppendWorldObj: второй инстанс -> vbase 6");
+        CHECK(obj.find("f 4 5 6") != std::string::npos, "вторая грань со сдвигом");
+        CHECK(obj.find("v 2.00000 0.00000 0.00000") != std::string::npos, "scale=2 применён");
+        // Обратное чтение тем же парсером, что грузит map.obj на устройстве.
+        const char* path = "/tmp/xvcen_static_test.obj";
+        FILE* f = fopen(path, "w");
+        CHECK(f != nullptr, "static obj writable");
+        if (f) { fwrite(obj.data(), 1, obj.size(), f); fclose(f); }
+        std::vector<vis::Tri> back;
+        CHECK(vis::LoadObj(path, back) && back.size() == 2, "world obj round-trips to 2 tris");
+        if (back.size() == 2) {
+            CHECK(std::fabs(back[0].a.x - 10.f) < 1e-3f && std::fabs(back[0].a.z - 30.f) < 1e-3f,
+                  "первый инстанс в мире на (10,20,30)");
+            CHECK(std::fabs(back[1].b.x - 2.f) < 1e-3f, "второй инстанс масштабирован x2");
+        }
+    }
+
     if (failures == 0) printf("test_mesh_dump: all checks passed\n");
     else printf("test_mesh_dump: %d failed\n", failures);
     return failures == 0 ? 0 : 1;

@@ -1574,6 +1574,7 @@ void reset_marker_caches() {
     farm_scan_reset();
     vis_dyn_reset();
     vis_dump_reset();   // мир перезагружен: прежний дедуп мешей и проход не нужны
+    vis_dump_static_reset();   // и проход по статике/якорь сцены тоже
 }
 
 // Точка головы бота из модели (NPCBrainHumanoid.modelInfo.head) — та же кость,
@@ -2512,4 +2513,222 @@ void vis_dump_reset() {
     g_dump_seen.clear();
     g_dump_written = 0;
     g_dump_scanned = 0;
+}
+
+// ==== Рантайм-дампер СТАТИКИ (вся сцена, не только spawned) =================
+// Постройки игроков берутся из сетевого реестра spawned, но статическая карта
+// (террейн-меши, скалы, деревья, статические здания) там не лежит. Она вся в
+// общей иерархии трансформов сцены: из любого нативного Transform достаются
+// data (структура иерархии) и индекс этого трансформа; внутри data лежит массив
+// указателей на трансформы, пронумерованный тем же индексом. Его смещение
+// заранее неизвестно, но якорь самопроверяемый: transforms[наш_индекс] == наш
+// Transform (meshdump::FindTransformsArray). Дальше перечисляем сцену по индексу
+// и для каждого трансформа с MeshFilter печём меш СРАЗУ В МИР (матрица иерархии)
+// и дописываем в map.obj — у статики нет второго прохода инстансинга, vis_map
+// грузит map.obj как есть. Всё чтение через rd_buf/rd_ptr, без вызовов в игре.
+namespace {
+
+constexpr int32_t kStaticMaxInstances = 20000;     // потолок инстансов за проход
+constexpr size_t  kStaticMaxTris      = 1000000;   // потолок треугольников (файл/память)
+constexpr float   kStaticMinExtent    = 0.4f;      // метры: мелкий декор не печём
+constexpr int32_t kStaticTolerance    = 256;       // «дырок» подряд терпим до конца массива
+constexpr double  kStaticDefaultBudget = 2.0;      // сек на один тик кнопки
+constexpr size_t  kStaticCacheMeshes  = 4096;      // кэш локальных три по нативному мешу
+
+uint64_t g_scene_transforms = 0;      // найденный массив index->Transform*
+bool     g_scene_ready      = false;
+int32_t  g_static_cursor    = -1;     // <0 — проход не начат
+int32_t  g_static_misses    = 0;
+uint32_t g_static_vbase     = 0;      // сквозной счётчик вершин map.obj
+int      g_static_written   = 0;      // инстансов записали
+size_t   g_static_tris      = 0;      // треугольников запекли
+FILE*    g_static_file      = nullptr;
+std::unordered_map<uint64_t, std::vector<vis::Tri>> g_static_mesh_cache;
+
+// Один нативный Transform из spawned — якорь для поиска массива иерархии.
+// Достаточно любого объекта в главной сцене; берём первый попавшийся.
+uint64_t dump_anchor_transform() {
+    const uint64_t dictionary = resolve_network_client_spawned();
+    if (!dictionary) return 0;
+    const uint64_t idclass = resolve_network_identity_class();
+    int32_t count = 0;
+    if (!rd_exact(dictionary + DICT_COUNT, count) || count <= 0) return 0;
+    const uint64_t entries = rd_ptr(dictionary + DICT_ENTRIES);
+    if (!valid_obj(entries)) return 0;
+    if (count > 64) count = 64;   // первых хватит
+    std::vector<uint8_t> buf((size_t)count * DICT_ENTRY_STRIDE);
+    if (!rd_buf(entries + IL2CPP_ARRAY_FIRST_ELEMENT, buf.data(), buf.size())) return 0;
+    uint64_t behaviours[8];
+    for (int32_t i = 0; i < count; ++i) {
+        uint64_t identity = 0;
+        memcpy(&identity, buf.data() + (size_t)i * DICT_ENTRY_STRIDE + DICT_ENTRY_VALUE, sizeof(identity));
+        if (!valid_obj(identity)) continue;
+        if (idclass && rd_ptr(identity) != idclass) continue;
+        const uint64_t array = rd_ptr(identity + NETID_BEHAVIOURS);
+        if (!valid_obj(array)) continue;
+        int32_t bc = rd<int32_t>(array + IL2CPP_ARRAY_LENGTH);
+        if (bc <= 0) continue;
+        if (bc > 8) bc = 8;
+        if (!rd_buf(array + IL2CPP_ARRAY_FIRST_ELEMENT, behaviours, (size_t)bc * sizeof(uint64_t))) continue;
+        for (int32_t b = 0; b < bc; ++b) {
+            if (!valid_obj(behaviours[b])) continue;
+            const uint64_t native = managed_object_native(behaviours[b]);
+            if (!native) continue;
+            const uint64_t t = native_component_transform(native);
+            if (t) return t;
+        }
+    }
+    return 0;
+}
+
+// Декод нативного Mesh-кандидата в ЛОКАЛЬНЫЕ треугольники (без записи), с кэшем
+// по указателю: один меш переиспользуется сотнями инстансов (скала, дерево).
+bool dump_decode_local(uint64_t cand, std::vector<vis::Tri>& tris) {
+    if (!valid_obj(cand)) return false;
+    auto it = g_static_mesh_cache.find(cand);
+    if (it != g_static_mesh_cache.end()) { tris = it->second; return !tris.empty(); }
+    vis::Vec3 c{}, e{};
+    bool ok = false;
+    if (g_dump_layout_known)
+        ok = meshdump::ApplyLayout(dump_reader(), cand, g_dump_layout, tris, c, e);
+    if (!ok) {
+        meshdump::Layout lay{};
+        if (meshdump::DiscoverLayout(dump_reader(), cand, lay, tris, c, e)) {
+            g_dump_layout = lay; g_dump_layout_known = true; ok = true;
+        }
+    }
+    if (ok && !tris.empty() && g_static_mesh_cache.size() < kStaticCacheMeshes)
+        g_static_mesh_cache.emplace(cand, tris);
+    return ok && !tris.empty();
+}
+
+// Найти меш на компоненте (MeshFilter) и вернуть его локальные треугольники.
+// Поле sharedMesh хранит УПРАВЛЯЕМЫЙ Mesh, нативный лежит по m_CachedPtr,
+// поэтому каждый указатель пробуем и как есть, и через managed_object_native.
+bool dump_component_mesh(uint64_t native_component, std::vector<vis::Tri>& tris) {
+    if (!valid_obj(native_component)) return false;
+    for (uint32_t off = 8; off + 8 <= meshdump::kScanBytes; off += 8) {
+        const uint64_t p = rd_ptr(native_component + off);
+        if (!meshdump::looks_like_heap_ptr(p)) continue;
+        if (dump_decode_local(p, tris)) return true;
+        const uint64_t nat = managed_object_native(p);
+        if (nat && nat != p && dump_decode_local(nat, tris)) return true;
+    }
+    return false;
+}
+
+// Найти и закэшировать массив index->Transform* общей иерархии сцены.
+bool scene_ensure_arrays() {
+    if (g_scene_ready) return g_scene_transforms != 0;
+    const uint64_t T = dump_anchor_transform();
+    if (!T) return false;                       // нет якоря в этом тике — повторим
+    const int32_t I = (int32_t)rd<uint32_t>(T + TRANSFORM_HIERARCHY_INDEX);
+    const uint64_t data = rd_ptr(T + TRANSFORM_HIERARCHY_DATA);
+    if (I < 0 || !valid_obj(data)) return false;
+    uint64_t tr = 0;
+    if (!meshdump::FindTransformsArray(dump_reader(), data, T, I, tr)) return false;
+    if (!meshdump::SceneArraysLookValid(dump_reader(), tr, TRANSFORM_HIERARCHY_INDEX, I, 2)) return false;
+    g_scene_transforms = tr;
+    g_scene_ready = true;
+    return true;
+}
+
+} // namespace
+
+// Один тик дампа статики по кнопке: продолжает перечисление иерархии сцены,
+// печёт меши в мир и дописывает в map.obj, пока не исчерпан бюджет или лимит.
+// Возвращает число записанных за тик инстансов.
+int vis_dump_static_meshes(int max_new, double time_budget) {
+    if (!g_skeleton_layout_valid) return 0;      // мировые TRS не прочитать — смысла нет
+    if (max_new <= 0) max_new = 256;
+    if (!(time_budget > 0.0)) time_budget = kStaticDefaultBudget;
+    if (!scene_ensure_arrays()) return 0;
+    if (g_static_written >= kStaticMaxInstances || g_static_tris >= kStaticMaxTris) return 0;
+
+    const double now = mono_seconds();
+    const double deadline = now + time_budget;
+
+    // Открываем map.obj: truncate в начале прохода, append при продолжении.
+    if (!g_static_file) {
+        const bool fresh = (g_static_cursor < 0);
+        g_static_file = std::fopen(vis_map::mesh_path(), fresh ? "wb" : "ab");
+        if (!g_static_file) { g_static_cursor = -1; return 0; }
+        if (fresh) {
+            g_static_cursor = 0; g_static_misses = 0; g_static_vbase = 0;
+            g_static_written = 0; g_static_tris = 0;
+            std::fputs("# static map dumped at runtime (scene hierarchy walk)\n", g_static_file);
+        }
+    }
+
+    int wrote = 0;
+    int32_t k = g_static_cursor;
+    bool done = false;
+    for (; !done; ++k) {
+        if (wrote >= max_new) break;
+        if (k > g_static_cursor && mono_seconds() > deadline) break;
+        if (g_static_written >= kStaticMaxInstances || g_static_tris >= kStaticMaxTris) { done = true; break; }
+
+        const uint64_t X = rd_ptr(g_scene_transforms + (uint64_t)k * 8);
+        uint32_t idx = 0xFFFFFFFFu;
+        const bool slot_ok = valid_obj(X) && rd_exact(X + TRANSFORM_HIERARCHY_INDEX, idx) && (int32_t)idx == k;
+        if (!slot_ok) {
+            if (++g_static_misses > kStaticTolerance) { done = true; break; }   // конец массива
+            continue;
+        }
+        g_static_misses = 0;
+
+        const uint64_t go = rd_ptr(X + COMPONENT_GAMEOBJECT);
+        if (!valid_obj(go)) continue;
+        const uint64_t mf = gameobject_component_by_class(go, "MeshFilter");
+        if (!mf) continue;
+
+        std::vector<vis::Tri> local;
+        if (!dump_component_mesh(mf, local) || local.empty()) continue;
+
+        // Мелкий декор не печём: обзор он не закрывает, а файл раздувает.
+        vis::Vec3 c{}, e{};
+        if (!vis::LocalBounds(local.data(), local.size(), c, e)) continue;
+        const float maxaxis = std::max(std::max(e.x, e.y), e.z) * 2.0f;
+        if (!(maxaxis >= kStaticMinExtent)) continue;
+
+        vis::Vec3 pos{}; vis::Quat rot{};
+        if (!piece_world_trs(X, pos, rot)) continue;
+
+        std::string buf;
+        meshdump::AppendWorldObj(buf, local, pos, rot, 1.0f, g_static_vbase);
+        std::fwrite(buf.data(), 1, buf.size(), g_static_file);
+        ++g_static_written; ++wrote;
+        g_static_tris += local.size();
+    }
+
+    if (g_static_file) std::fflush(g_static_file);
+    if (done) {
+        if (g_static_file) { std::fclose(g_static_file); g_static_file = nullptr; }
+        g_static_cursor = -1;   // проход завершён, следующий начнёт новый
+    } else {
+        g_static_cursor = k;
+    }
+    return wrote;
+}
+
+// Сводка для тоста/меню: сколько инстансов/треугольников запечено, найден ли
+// массив сцены, где курсор.
+void vis_dump_static_report(char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    std::snprintf(out, cap, "inst=%d tris=%zu scene=%s k=%d",
+                  g_static_written, g_static_tris, g_scene_ready ? "ok" : "?", g_static_cursor);
+}
+
+// Сброс при перезагрузке мира: закрываем файл, чистим кэш и якорь сцены.
+// Раскладку VBO (g_dump_layout) оставляем — она свойство сборки Unity.
+void vis_dump_static_reset() {
+    if (g_static_file) { std::fclose(g_static_file); g_static_file = nullptr; }
+    g_static_cursor = -1;
+    g_static_misses = 0;
+    g_static_vbase = 0;
+    g_static_written = 0;
+    g_static_tris = 0;
+    g_static_mesh_cache.clear();
+    g_scene_ready = false;
+    g_scene_transforms = 0;
 }

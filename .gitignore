@@ -13,3 +13,7 @@ google_drive/
 
 # local analysis environment
 .venv/
+
+# Python артефакты (on-device скрипты в tools/)
+__pycache__/
+*.pyc

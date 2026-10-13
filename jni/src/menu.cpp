@@ -419,9 +419,9 @@ float TabContent(int tab, float dt, float cW) {
         SHdr(XS("Видимость"));
         {
             const float visRowH = Layout::RowH;
-            // Четыре строки: тумблер, состояние меша карты, состояние построек,
-            // рантайм-дампер мешей.
-            CardBg(visRowH * 4.f);
+            // Пять строк: тумблер, состояние меша карты, состояние построек,
+            // рантайм-дампер мешей (постройки), рантайм-дампер статики (сцена).
+            CardBg(visRowH * 5.f);
             ToggleRow("##vvis", XS("Видимость"), &g_state.esp_vis, g_state.a_esp_vis, false, true);
             auto pos = ImGui::GetCursorScreenPos();
             const float availW = ImGui::GetContentRegionAvail().x;
@@ -504,6 +504,33 @@ float TabContent(int tab, float dt, float cW) {
                          {pos4.x + availW - Layout::Inset - Layout::PadX - repW,
                           pos4.y + visRowH * 0.5f - fs2 * 0.4f},
                          C::UA(C::Dim(), 1.f), dumpRep);
+
+            // Рантайм-дампер СТАТИКИ: тап запускает один возобновляемый проход
+            // по общей иерархии сцены (не только spawned) и печёт меши сразу в
+            // мир, дописывая в map.obj. Несколько тапов добивают сцену; результат
+            // vis_map подхватит после перезапуска. Справа — живая сводка.
+            const bool staticPopBlk = (g_pop.visible && !g_pop.closing) || g_sheet.visible;
+            auto pos5 = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##vvis_static", {availW, visRowH});
+            char staticRep[160];
+            vis_dump_static_report(staticRep, sizeof(staticRep));
+            if (WasTappedHere() && !staticPopBlk && !IsScrollDragging() && !g_input.touchConsumed) {
+                const int added = vis_dump_static_meshes(256, 0.35);
+                vis_dump_static_report(staticRep, sizeof(staticRep));
+                char msg[224];
+                snprintf(msg, sizeof(msg), XS("Дамп статики: +%d | %s"), added, staticRep);
+                ShowToast(msg);
+                PlaySound(SND_CLICK);
+                g_input.touchConsumed = true;
+            }
+            const float sRepW = ImGui::CalcTextSize(staticRep).x;
+            dl2->AddText(fn2, fs2, {pos5.x + Layout::Inset + Layout::PadX,
+                                    pos5.y + visRowH * 0.5f - fs2 * 0.5f},
+                         C::UA(C::Txt(), 1.f), XS("Дамп статики"));
+            dl2->AddText(fn2, fs2 * 0.8f,
+                         {pos5.x + availW - Layout::Inset - Layout::PadX - sRepW,
+                          pos5.y + visRowH * 0.5f - fs2 * 0.4f},
+                         C::UA(C::Dim(), 1.f), staticRep);
         }
 
         ImGui::Dummy({1.f, 12.f});

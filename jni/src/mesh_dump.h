@@ -393,4 +393,83 @@ inline std::string DedupKey(uint64_t native_mesh, uint32_t vcount, uint32_t icou
     return std::string(b);
 }
 
+// ---- Перечисление всей сцены (статика) ------------------------------------
+// Иерархия трансформов Unity общая на сцену: из любого нативного Transform
+// достаются data (структура иерархии) и index этого трансформа в ней. Внутри
+// data лежит массив указателей на трансформы, пронумерованный тем же индексом.
+// Его смещение заранее неизвестно (нет dump.cs), но якорь самопроверяемый:
+// transforms[index_нашего] == наш_transform. Ищем поле-указатель в data, у
+// которого slot[index] совпал с известным трансформом (прямо или через один
+// уровень косвенности — как matrices/indices в некоторых сборках).
+inline bool FindTransformsArray(const Reader& rd, uint64_t data, uint64_t anchorT,
+                                int32_t anchorI, uint64_t& out) {
+    if (!looks_like_heap_ptr(data) || !looks_like_heap_ptr(anchorT)) return false;
+    if (anchorI < 0 || anchorI > 1000000) return false;
+    const uint64_t slot = (uint64_t)anchorI * 8u;
+    for (uint32_t off = 0; off + 8 <= kScanBytes; off += 8) {
+        const uint64_t p = rd.ptr(data + off);
+        if (!looks_like_heap_ptr(p)) continue;
+        if (rd.ptr(p + slot) == anchorT) { out = p; return true; }        // массив напрямую
+        const uint64_t p2 = rd.ptr(p);                                     // один уровень косвенности
+        if (looks_like_heap_ptr(p2) && rd.ptr(p2 + slot) == anchorT) { out = p2; return true; }
+    }
+    return false;
+}
+
+// Число трансформов в иерархии: идём по transforms[] и сверяем, что у каждого
+// указателя его собственный индекс (по indexOff) равен позиции k. Это строгий
+// якорь: случайный мусор не даст index==k. «Дырки» (освобождённые слоты)
+// терпим в пределах tolerance подряд. Возвращает наибольший связный индекс +1.
+inline int32_t CountTransforms(const Reader& rd, uint64_t transforms, uint64_t indexOff,
+                               int32_t cap, int32_t tolerance) {
+    if (!looks_like_heap_ptr(transforms) || cap <= 0) return 0;
+    if (tolerance < 0) tolerance = 0;
+    int32_t n = 0, misses = 0;
+    for (int32_t k = 0; k < cap; ++k) {
+        const uint64_t x = rd.ptr(transforms + (uint64_t)k * 8u);
+        uint32_t idx = 0xFFFFFFFFu;
+        const bool ok = looks_like_heap_ptr(x) && rd.u32(x + indexOff, idx) && (int32_t)idx == k;
+        if (ok) { n = k + 1; misses = 0; }
+        else if (++misses > tolerance) break;
+    }
+    return n;
+}
+
+// Дешёвая самопроверка найденного массива: вокруг якоря каждый слот должен быть
+// указателем на трансформ с собственным индексом == позиции. Не требует O(N).
+inline bool SceneArraysLookValid(const Reader& rd, uint64_t transforms, uint64_t indexOff,
+                                 int32_t anchorI, int32_t window) {
+    if (!looks_like_heap_ptr(transforms) || anchorI < 0) return false;
+    if (window < 1) window = 1;
+    int good = 0;
+    for (int32_t k = anchorI - window; k <= anchorI + window; ++k) {
+        if (k < 0) continue;
+        const uint64_t x = rd.ptr(transforms + (uint64_t)k * 8u);
+        uint32_t idx = 0xFFFFFFFFu;
+        if (looks_like_heap_ptr(x) && rd.u32(x + indexOff, idx) && (int32_t)idx == k) ++good;
+    }
+    return good > 0;   // хотя бы сам якорь сошёлся
+}
+
+// Запекание локальных треугольников меша в мировые и дописка в .obj. В отличие
+// от WriteObj (локальные координаты для инстансинга vis_dyn), статика пишется
+// сразу в мир: у карты нет второго прохода инстансинга, vis_map грузит map.obj
+// как есть. vbase — сквозной счётчик вершин файла (растёт на 3 с треугольником),
+// чтобы грани всех инстансов ссылались на свои вершины.
+inline void AppendWorldObj(std::string& out, const std::vector<vis::Tri>& local,
+                           const vis::Vec3& pos, const vis::Quat& rot, float scale,
+                           uint32_t& vbase) {
+    char buf[96];
+    for (const auto& t : local) {
+        const vis::Tri w = vis::TransformTri(t, pos, rot, scale);
+        for (const vis::Vec3* v : {&w.a, &w.b, &w.c}) {
+            std::snprintf(buf, sizeof(buf), "v %.5f %.5f %.5f\n", v->x, v->y, v->z);
+            out += buf;
+        }
+        std::snprintf(buf, sizeof(buf), "f %u %u %u\n", vbase + 1, vbase + 2, vbase + 3);
+        out += buf;
+        vbase += 3;
+    }
+}
+
 } // namespace meshdump
