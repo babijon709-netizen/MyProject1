@@ -247,18 +247,18 @@ static float  s_hitMark = 0.f;
 static bool   s_hitMarkSeen = false;
 static int    s_fireState = -1;      // 1 стреляем, 0 нет, -1 режим выключен
 static bool   s_fireGateAllow = true;
-// Кнопка огня держится прямо сейчас. Признак считается ВСЕГДА, а не только под
-// гейтом «только при стрельбе»: гейт решает, вести ли камеру, а компенсация
-// отдачи обязана видеть очередь и тогда, когда аим ведёт постоянно.
-static bool   s_triggerHeld = false;
 
-// Признак огня общий: нажатие хендлера ввода плюс хвост отметки попадания
-// (полуавтомат успевает отпустить кнопку между нашими кадрами чтения).
-static void AimTriggerUpdate(double now) {
+static void AimFireGateUpdate(double now) {
+    if (!g_state.aim_fire_only) {
+        s_fireGateAllow = true;
+        s_fireState = -1;
+        s_hitMarkSeen = false;
+        s_fireUntil = -1e9;
+        return;
+    }
     if (g_state.farm_on) {
-        // Автофарм держит кнопку сам и камерой рулит сам: два писателя в одну
-        // ось дают маятник, поэтому на фарме не живут ни гейт, ни компенсация.
-        s_triggerHeld = false;
+        s_fireGateAllow = false;
+        s_fireState = -1;
         return;
     }
     bool held = false;
@@ -278,69 +278,10 @@ static void AimTriggerUpdate(double now) {
             if (now + kFireHoldSeconds > s_fireUntil) s_fireUntil = now + kFireHoldSeconds;
         }
     }
-    // Окно живёт kFireHoldSeconds и само истекает по времени, поэтому переключение
-    // гейта «только при стрельбе» в середине сессии не открывает его задним
-    // числом: устаревшая отметка уже в прошлом.
-    s_triggerHeld = now <= s_fireUntil;
+    const bool firing = now <= s_fireUntil;
+    s_fireState = firing ? 1 : 0;
+    s_fireGateAllow = firing;
 }
-
-static void AimFireGateUpdate(double now) {
-    AimTriggerUpdate(now);
-    if (!g_state.aim_fire_only) {
-        s_fireGateAllow = true;
-        s_fireState = -1;
-        return;
-    }
-    if (g_state.farm_on) {
-        s_fireGateAllow = false;
-        s_fireState = -1;
-        return;
-    }
-    s_fireState = s_triggerHeld ? 1 : 0;
-    s_fireGateAllow = s_triggerHeld;
-}
-
-// ---- Компенсация отдачи -----------------------------------------------------
-//
-// Живёт только там, где камера наша: тач и память (сайлент камеру не двигает
-// вовсе, он держит ось выстрела). И только пока игру свою отдачу не погасили —
-// «Без отдачи» зануляет амплитуду в том же RecoilConfig, и вторая компенсация
-// поверх первой уронила бы прицел ниже кости. Математика и обоснование —
-// aim_control::RecoilControl; здесь признаки и масштабы областей.
-static aim_control::RecoilControl s_rcsTouch;
-static aim_control::RecoilControl s_rcsMemory;
-// Прошлая команда тач-петли упёрлась в ограничение скорости: анти-виндап.
-static bool s_rcsTouchSaturated = false;
-
-// Тач: пиксели пальца. Отдача — поворот камеры, поэтому в пикселях она от
-// дистанции не зависит. Полоса «прицел сел» — 2.5% высоты экрана: на 1080p это
-// ~27 px, а при запасном коэффициенте 0.10 град/px (kAimGainAtRef) ~2.7 градуса.
-// Остаток от подъёма ствола внутри полосы с запасом, а наведение на новую цель
-// (радиус FOV до 180 град) — заведомо снаружи, так что интеграл на нём не
-// наматывается. Потолок члена — 2% (~22 px/так, то есть 2.2 град/так при 0.10
-// град/px и 1.1 при вдвое более тугой чувствительности): реальный подъём
-// очереди — 0.3..1.5 град на выстрел, при 10 выстр/с и нашем такте 12 Гц это
-// 0.25..1.25 град/так, запас есть, а унести прицел потолок не даст. Палец при
-// очень длинной очереди дойдёт до края зоны и переустановится — штатный путь
-// тач-петли (~7 с непрерывного автомата), а не аварийный.
-static constexpr float kRcsBandTouchFrac  = 0.025f;
-static constexpr float kRcsLimitTouchFrac = 0.02f;
-// Память: градусы, здесь команда абсолютная и коэффициент растения равен 1, так
-// что член в установившемся режиме равен самому подъёму за такт. Полоса 2 градуса
-// — тот же запас над 1.25 град/так; потолок 2.5 градуса — вдвое выше подъёма
-// любого ствола и заметно ниже того, что уже выглядело бы брошенным прицелом.
-static constexpr float kRcsBandMemoryDeg  = 2.0f;
-static constexpr float kRcsLimitMemoryDeg = 2.5f;
-
-static bool AimRecoilActive() {
-    return g_state.aim_rcs && s_triggerHeld && !g_state.viewmodel.no_recoil_button;
-}
-
-// Диагностика режимов объявлена здесь, выше обоих контроллеров: член компенсации
-// отдачи печатается и тач-петлёй тоже, а она идёт по файлу раньше «памяти».
-static AimMemDiag s_memDiag;
-
-const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
 
 static bool AimScreenSize(float& sw, float& sh) {
     sw = (float)native_window_screen_x;
@@ -653,7 +594,6 @@ static void UpdateAimTouch(float dt) {
         AimReleaseFinger(s_fingerDown);
         g_aimActive = false;
         s_touchPick.reset();
-        s_rcsTouch.reset();
         return;
     }
 
@@ -670,7 +610,6 @@ static void UpdateAimTouch(float dt) {
         AimReleaseFinger(s_fingerDown);
         g_aimActive = false;
         s_touchPick.reset();
-        s_rcsTouch.reset();
         return;
     }
 
@@ -680,31 +619,13 @@ static void UpdateAimTouch(float dt) {
     if (!AimSelectTarget(sw, sh, dt, s_touchPick, best)) {
         g_aimActive = false;
         s_touchPick.reset();
-        s_rcsTouch.reset();
         AimReleaseFinger(s_fingerDown);
         return;
     }
 
     const float crossX = sw * 0.5f, crossY = sh * 0.5f;
     const float ex = best.sx - crossX, ey = best.sy - crossY;
-    // Член компенсации считается ДО раннего выхода: интеграл заряжается именно
-    // на севшем прицеле, где остаток ошибки и есть подъём ствола. Выйти раньше —
-    // значит никогда его не зарядить.
-    float rcs = 0.f;
-    if (AimRecoilActive()) {
-        rcs = s_rcsTouch.update(ey, true, dt, kRcsBandTouchFrac * sh,
-                                kRcsLimitTouchFrac * sh, s_rcsTouchSaturated);
-    } else {
-        s_rcsTouch.reset();
-        s_rcsTouchSaturated = false;
-    }
-    s_memDiag.rcs_term = rcs;
-    // С компенсацией выходим только когда и ошибка мала, и держать нечем:
-    // иначе ствол поднимет камеру сразу после возврата в мёртвую зону.
-    if (fabsf(ex) < 2.5f && fabsf(ey) < 2.5f && fabsf(rcs) < 0.5f) {
-        s_rcsTouchSaturated = false;   // шага не было — и насыщения не было
-        return;
-    }
+    if (fabsf(ex) < 2.5f && fabsf(ey) < 2.5f) return;
 
     if (!s_fingerDown) {
         s_fx = ptX;
@@ -722,16 +643,11 @@ static void UpdateAimTouch(float dt) {
 
     float maxStep = (2500.f + (sm - 1.f) * 500.f) * dt;
     if (maxStep > 150.f) maxStep = 150.f;
-    // Член отдачи входит в команду пальца в тех же пикселях и с тем же знаком,
-    // что и пропорциональное звено: положительный dy тянет палец вниз, камера
-    // идёт вниз, подъём ствола гасится.
-    const float dyRaw = ey * k + rcs;
-    float dx = ex * k, dy = dyRaw;
+    float dx = ex * k, dy = ey * k;
     if (dx > maxStep) dx = maxStep;
     if (dx < -maxStep) dx = -maxStep;
     if (dy > maxStep) dy = maxStep;
     if (dy < -maxStep) dy = -maxStep;
-    s_rcsTouchSaturated = (dy != dyRaw);
 
     // Shift the archived touch zone with the configured base point.
     const float xOffset = ptX - 0.72f * sw;
@@ -794,6 +710,10 @@ static void AimLogTick(float dt) {
 // приняла значение. Это только диагностика отклика в меню.
 static constexpr float kMemAckEps = 0.10f;
 
+static AimMemDiag s_memDiag;
+
+const AimMemDiag& AimMemoryDiag() { return s_memDiag; }
+
 // Convert remaining error into a smooth lock step. Use a small deadband near
 // the bone; farther away, acquisition speed depends on sensitivity and range.
 static float mem_axis_step(float err, float dt, float range) {
@@ -817,7 +737,6 @@ static void UpdateAimMemory(float dt) {
         s_memDiag.ads = s_adsState; s_memDiag.ads_source = s_adsSource;
         s_memDiag.fire = s_fireState;
         pick.reset(); s_missFrames = 0; s_haveLast = false; s_haveLastWrite = false;
-        s_rcsMemory.reset();
         return;
     }
     s_memDiag.inactive = 0;
@@ -831,7 +750,7 @@ static void UpdateAimMemory(float dt) {
     const bool haveParams = esp_mem_aim_look_params(sens, invert, gyro);
     s_memDiag.params = haveParams;
     if (!haveParams) {
-        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; s_rcsMemory.reset(); }
+        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; }
         s_haveLastWrite = false;
         return;
     }
@@ -845,7 +764,7 @@ static void UpdateAimMemory(float dt) {
         // Самый молчаливый путь: цель есть, писать нечем, а ни один счётчик
         // не растёт. Без отметки здесь кадр не отличить от «цели не было».
         ++s_memDiag.read_fail;
-        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; s_rcsMemory.reset(); }
+        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; }
         s_haveLastWrite = false;
         return;
     }
@@ -854,7 +773,7 @@ static void UpdateAimMemory(float dt) {
     int noTgtWhy = 0;
     if (!AimSelectTarget(sw, sh, dt, pick, best, &noTgtWhy)) {
         s_memDiag.no_target = noTgtWhy;
-        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; s_rcsMemory.reset(); }
+        if (++s_missFrames > 6) { pick.reset(); s_haveLast = false; }
         s_haveLastWrite = false;
         return;
     }
@@ -900,20 +819,7 @@ static void UpdateAimMemory(float dt) {
 
     // ---- плавный жёсткий лок --------------------------------------------------
     const float offYaw   = mem_axis_step(best.yaw, dt, best.world_dist);
-    float offPitch = mem_axis_step(best.pitch, dt, best.world_dist);
-    // Компенсация отдачи входит в ту же команду и в том же знаке: положительный
-    // шаг доворачивает прицел вверх, поэтому заряжается член отрицательным
-    // остатком — когда ствол уже поднял камеру и кость оказалась ниже прицела.
-    // Насыщения тут не бывает: потолок шага 120 + 48*скорость град/с, то есть
-    // десятки градусов за такт, а член ограничен kRcsLimitMemoryDeg — флаг
-    // анти-виндапа не нужен.
-    if (AimRecoilActive()) {
-        offPitch += s_rcsMemory.update(best.pitch, true, dt, kRcsBandMemoryDeg,
-                                       kRcsLimitMemoryDeg, false);
-    } else {
-        s_rcsMemory.reset();
-    }
-    s_memDiag.rcs_term = s_rcsMemory.term();
+    const float offPitch = mem_axis_step(best.pitch, dt, best.world_dist);
     if (offYaw == 0.f && offPitch == 0.f) {
         s_haveLastWrite = false;   // подтверждения больше нет — записи нет
         ++s_memDiag.on_target;
@@ -994,10 +900,6 @@ void UpdateAim(float dt) {
             g_aimActive = false;
         }
         s_touchPick.reset();
-        // Заряд отдачи принадлежит очереди прошлого режима: в новом петля другая
-        // (пиксели против градусов), и перенесённый член толкнул бы её не туда.
-        s_rcsTouch.reset();
-        s_rcsMemory.reset();
         previousMode = mode;
     }
     AimLogTick(dt);

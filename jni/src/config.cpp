@@ -146,15 +146,15 @@ struct CfgBlob {
     //       here, i.e. the button stays visible, as before), bit 5 scrap ESP,
     //       bit 6 fast fire, bit 7 fast reload, bit 8 house boxes HIDDEN
     //       (inverted like bit 4: old configs hold 0, i.e. visible, as before).
-    //       Bit 9 — компенсация отдачи в петле наводки (aim_rcs). Слот был
-    //       зарезервирован за убранной опцией; старые конфиги держат тут 0,
-    //       то есть компенсация выключена — дефолт фичи.
+    //       Bit 9 belongs to a retired option: it is never written and is
+    //       deliberately ignored on load so older profiles keep their other
+    //       packed settings.
     //       bit 12 aim "только при стрельбе", bit 13 стрелки 360°,
     //       bit 14 стрелки ВЕЗДЕ (инвертировано, как 4 и 8: старые конфиги
     //              держат 0, то есть «только вне экрана» — как дефолт фичи),
     //       bit 15 дистанция у стрелок, bit 17 радар 360°.
     //       Bit 16 belongs to the removed auto-fire option: never written and
-    //       deliberately ignored on load, so it stays reserved.
+    //       deliberately ignored on load, so it stays reserved like bit 9.
     //   y = marker draw distance (m),
     //   z = aim priority + 1 (so an old config's 1.0 still means "default"),
     //   w = pickup colour packed as r*65536 + g*256 + b (exact in a float,
@@ -401,7 +401,6 @@ static void ConfigSaveToPath(const std::string& path) {
                           // Инвертировано, как бит 4: старые конфиги держат 0,
                           // то есть ящики в домах видны — как до разделения.
                           (g_state.esp_house_boxes ? 0 : 256) |
-                          (g_state.aim_rcs ? 512 : 0) |
                           (g_state.fakelag_btn_show ? 0 : 1024) |
                           (g_state.xray_btn_show ? 0 : 2048) |
                           (g_state.aim_fire_only ? 4096 : 0) |
@@ -554,7 +553,6 @@ static void LoadCfgByName(const char* name, bool announce) {
         g_state.fast_fire = (flags & 64) != 0;
         g_state.fast_reload = (flags & 128) != 0;
         g_state.esp_house_boxes = (flags & 256) == 0;
-        g_state.aim_rcs = (flags & 512) != 0;
         g_state.fakelag_btn_show = (flags & 1024) == 0;
         g_state.xray_btn_show = (flags & 2048) == 0;
         // Биты 12..17 — тумблеры новых фич (16 вырезан, см. шапку). Конфиги,
