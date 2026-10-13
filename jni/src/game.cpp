@@ -14,6 +14,7 @@
 #include "position_filter.h"       // временной фильтр позиций игрока (хост-проверяемый)
 #include "player_motion_prediction.h" // дорисовка сетевых позиций между тиками
 #include "mount_latch.h"           // удержание бокса на транспорте (хост-проверяемый)
+#include "player_life.h"           // надёжные признаки смерти (хост-проверяемые)
 #include "body_clip.h"             // отсечение тела по ближней плоскости (хост-проверяемый)
 #include "weapon_name.h"            // имена оружия в подписях (хост-проверяемые)
 #include "Vector.h"
@@ -662,12 +663,19 @@ struct PlayerTextCache {
     int  revalidate = 30; // first sighting resolves immediately
 };
 static std::unordered_map<uint64_t, PlayerTextCache> g_player_text;
+// Sorted membership snapshot shared by cache pruning, duplicate checks, and
+// frame-population diagnostics. The original transform vector keeps its order.
+static std::vector<uint64_t> g_frame_transforms_sorted;
 
-static void prune_player_text(const std::vector<uint64_t>& players) {
+static bool sorted_player_contains(const std::vector<uint64_t>& sorted_players,
+                                   uint64_t player) {
+    return std::binary_search(sorted_players.begin(), sorted_players.end(), player);
+}
+
+static void prune_player_text(const std::vector<uint64_t>& sorted_players) {
     for (auto it = g_player_text.begin(); it != g_player_text.end();) {
-        bool present = false;
-        for (uint64_t player : players) if (player == it->first) { present = true; break; }
-        if (!present) it = g_player_text.erase(it); else ++it;
+        if (!sorted_player_contains(sorted_players, it->first)) it = g_player_text.erase(it);
+        else ++it;
     }
 }
 
@@ -779,18 +787,6 @@ static bool validate_player_list(uint64_t list, uint64_t player_class) {
         if (++checked >= 2) break;
     }
     return checked > 0;
-}
-
-static bool player_list_contains(uint64_t list, uint64_t player) {
-    if (!list || !player) return false;
-    uint64_t items = rd_ptr(list + IL2CPP_LIST_ITEMS);
-    int32_t count = rd<int32_t>(list + IL2CPP_LIST_SIZE);
-    if (!items || count <= 0 || count > 512) return false;
-    for (int32_t index = 0; index < count; ++index) {
-        if (rd_ptr(items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t)) == player)
-            return true;
-    }
-    return false;
 }
 
 static constexpr uint64_t IL2CPP_CLASS_STATIC_FIELDS = 0xB8;
@@ -4167,21 +4163,7 @@ static std::vector<uint64_t> read_configured_player_transforms(bool* player_list
     int list_count = resolve_player_lists(lists);
     if (list_count == 0) return transforms;
 
-    uint64_t local_player = resolve_local_player();
-    if (local_player) {
-        bool contained = false;
-        bool any_nonempty = false;
-        for (int i = 0; i < list_count; ++i) {
-            contained |= player_list_contains(lists[i], local_player);
-            const int32_t count = rd<int32_t>(lists[i] + IL2CPP_LIST_SIZE);
-            any_nonempty |= count > 0 && count <= 512;
-        }
-        if (!contained && any_nonempty) {
-            if (local_player == g_local_player) g_local_player = 0;
-            local_player = 0;
-        }
-    }
-    const uint64_t local_source = local_player;
+    const uint64_t local_candidate = resolve_local_player();
 
     for (int attempt = 0; attempt < 3; ++attempt) {
         if (attempt > 0) {
@@ -4191,9 +4173,27 @@ static std::vector<uint64_t> read_configured_player_transforms(bool* player_list
 
         std::vector<uint64_t> snapshot;
         snapshot.reserve(32);
-        if (local_source) snapshot.push_back(local_source);
+        // Preserve registry order without an O(n^2) duplicate scan when two
+        // validated player lists overlap. At most 1025 entries are possible.
+        uint64_t seen_players[2048]{};
+        auto first_occurrence = [&seen_players](uint64_t player) {
+            uint64_t hash = player;
+            hash ^= hash >> 33;
+            hash *= 0xff51afd7ed558ccdULL;
+            hash ^= hash >> 33;
+            size_t slot = (size_t)hash & 2047u;
+            for (size_t probe = 0; probe < 2048; ++probe) {
+                uint64_t& entry = seen_players[slot];
+                if (entry == player) return false;
+                if (entry == 0) { entry = player; return true; }
+                slot = (slot + 1u) & 2047u;
+            }
+            return false;
+        };
         bool stable = true;
         bool healthy = false;
+        bool local_seen = false;
+        bool any_nonempty = false;
 
         for (int list_index = 0; list_index < list_count; ++list_index) {
             const uint64_t list = lists[list_index];
@@ -4205,17 +4205,26 @@ static std::vector<uint64_t> read_configured_player_transforms(bool* player_list
             }
             healthy = true;
 
+            // A list's element references are contiguous. Read them as one
+            // block to avoid a remote-memory operation for every player; keep
+            // the old per-entry path as a fallback for a transient/partial read.
+            uint64_t player_entries[512];
+            const uint64_t entries_address = items + IL2CPP_ARRAY_FIRST_ELEMENT;
+            const bool entries_read = count == 0 ||
+                rd_buf(entries_address, player_entries,
+                       (size_t)count * sizeof(uint64_t));
             for (int32_t index = 0; index < count; ++index) {
-                const uint64_t player = rd_ptr(
-                    items + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)index * sizeof(uint64_t));
-                if (!player || player == local_source) continue;
+                const uint64_t entry_address = entries_address + (uint64_t)index * sizeof(uint64_t);
+                const uint64_t raw_player = entries_read ? player_entries[(size_t)index]
+                                                         : rd_ptr(entry_address);
+                const uint64_t player = memio::untag(raw_player);
+                if (!player) continue;
+                if (player == local_candidate) { local_seen = true; continue; }
                 // The containing registry is already validated and its
                 // pointer/count are rechecked below. A failed class read must
                 // not make one live player disappear from an otherwise stable
                 // snapshot.
-                bool duplicate = false;
-                for (uint64_t known : snapshot) duplicate |= known == player;
-                if (!duplicate) snapshot.push_back(player);
+                if (first_occurrence(player)) snapshot.push_back(player);
             }
 
             const uint64_t confirmed_items = rd_ptr(list + IL2CPP_LIST_ITEMS);
@@ -4227,6 +4236,16 @@ static std::vector<uint64_t> read_configured_player_transforms(bool* player_list
         }
 
         if (healthy && stable) {
+            // Fold local-player membership into the batched list read instead
+            // of scanning every pointer once here and then reading the same
+            // arrays again for the snapshot.
+            if (local_candidate) {
+                if (!local_seen && any_nonempty) {
+                    if (local_candidate == g_local_player) g_local_player = 0;
+                } else {
+                    snapshot.insert(snapshot.begin(), local_candidate);
+                }
+            }
             if (player_list_ok) *player_list_ok = true;
             return snapshot;
         }
@@ -4316,10 +4335,13 @@ static LocalAimState g_aim_state{};
 // crouch-aware boxes and as the aim target when rig bones are unavailable.
 struct PlayerAux {
     uint64_t kcc = 0;
+    uint64_t death_handler = 0; // cached PlayerDeathHandler target
+    uint8_t  death_handler_retry = 0;
     uint64_t head_native = 0;   // native Transform of KCC.head
     uint64_t head_hitbox_transform = 0; // native Transform of the Head HitBox
     Vec3     head_hitbox_center{};      // HitBox.center (local to that transform)
     bool     head_hitbox_valid = false;
+    bool     head_hitbox_probed = false; // resolve only while aim requests the hit volume
     float    normal_height = 1.8F;
     float    crouch_height = 1.1F;
     int      retry_cooldown = 0;
@@ -5358,13 +5380,9 @@ static int skeleton_local_walk(const Matrix34* matrices, const int32_t* parents,
     return 1;
 }
 
-static void prune_skeleton_cache(const std::vector<uint64_t>& players) {
+static void prune_skeleton_cache(const std::vector<uint64_t>& sorted_players) {
     for (auto it = g_skeletons.begin(); it != g_skeletons.end();) {
-        bool present = false;
-        for (uint64_t player : players) {
-            if (player == it->first) { present = true; break; }
-        }
-        if (!present) it = g_skeletons.erase(it);
+        if (!sorted_player_contains(sorted_players, it->first)) it = g_skeletons.erase(it);
         else ++it;
     }
 }
@@ -5393,38 +5411,98 @@ static PlayerAux& player_aux(uint64_t player) {
         aux.head_native = head ? rd_ptr(head + MANAGED_CACHED_PTR) : 0;
         if (aux.head_native && (aux.head_native < 0x10000 || aux.head_native >= 0x0001000000000000ULL))
             aux.head_native = 0;
-        // Head hit volume (what the server actually tests shots against).
-        aux.head_hitbox_valid = false;
-        uint64_t hb_root = rd_ptr(kcc + KCC_HITBOX_ROOT);
-        uint64_t hb_array = hb_root ? rd_ptr(hb_root + HITBOX_ROOT_ARRAY) : 0;
-        int32_t hb_count = hb_array ? rd<int32_t>(hb_array + IL2CPP_ARRAY_LENGTH) : 0;
-        if (hb_count > 0 && hb_count <= 64) {
-            for (int32_t i = 0; i < hb_count; ++i) {
-                uint64_t hb = rd_ptr(hb_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
-                if (!hb || rd<int32_t>(hb + HITBOX_AREA) != 0) continue;
-                Vec3 center = rd_v3(hb + HITBOX_CENTER);
-                Vec3 size = rd_v3(hb + HITBOX_SIZE);
-                if (!vec3_is_finite(center) || !vec3_is_finite(size)) continue;
-                if (fabsf(center.x) > 1.0F || fabsf(center.y) > 1.0F || fabsf(center.z) > 1.0F) continue;
-                if (!(size.x > 0.02F && size.x < 1.0F && size.y > 0.02F && size.y < 1.0F)) continue;
-                uint64_t transform = native_component_transform(managed_object_native(hb));
-                if (!skeleton_transform_ptr_valid(transform)) continue;
-                aux.head_hitbox_transform = transform;
-                aux.head_hitbox_center = center;
-                aux.head_hitbox_valid = true;
-                break;
-            }
-        }
     }
     return aux;
 }
 
+static uint64_t ensure_player_death_handler(PlayerAux& aux, uint64_t player) {
+    if (aux.death_handler_retry > 0) --aux.death_handler_retry;
+    if (aux.death_handler_retry == 0) {
+        const uint64_t reference = rd_ptr(player + go_active::PLAYER_DEATH_HANDLER);
+        const uint64_t handler = reference >= 0x10000
+            ? rd_ptr(reference + go_active::DEATH_HANDLER_REF_TARGET) : 0;
+        aux.death_handler = handler >= 0x10000 ? handler : 0;
+        // Valid chains are refreshed periodically; missing chains are retried
+        // sooner without adding three pointer reads on every live player/frame.
+        aux.death_handler_retry = aux.death_handler ? 8 : 2;
+    }
+    return aux.death_handler;
+}
+
+// Head-hitbox discovery walks up to 64 managed hitboxes. Most frames do not
+// need it (aim is normally disabled), so defer that one-time scan until the
+// aim path actually requests the hit-volume correction.
+static void ensure_player_head_hitbox(PlayerAux& aux) {
+    if (aux.head_hitbox_probed || !aux.kcc) return;
+    aux.head_hitbox_probed = true;
+    aux.head_hitbox_valid = false;
+    const uint64_t hb_root = rd_ptr(aux.kcc + KCC_HITBOX_ROOT);
+    const uint64_t hb_array = hb_root ? rd_ptr(hb_root + HITBOX_ROOT_ARRAY) : 0;
+    const int32_t hb_count = hb_array ? rd<int32_t>(hb_array + IL2CPP_ARRAY_LENGTH) : 0;
+    if (hb_count <= 0 || hb_count > 64) return;
+    for (int32_t i = 0; i < hb_count; ++i) {
+        const uint64_t hb = rd_ptr(hb_array + IL2CPP_ARRAY_FIRST_ELEMENT + (uint64_t)i * 8);
+        if (!hb || rd<int32_t>(hb + HITBOX_AREA) != 0) continue;
+        const Vec3 center = rd_v3(hb + HITBOX_CENTER);
+        const Vec3 size = rd_v3(hb + HITBOX_SIZE);
+        if (!vec3_is_finite(center) || !vec3_is_finite(size)) continue;
+        if (fabsf(center.x) > 1.0F || fabsf(center.y) > 1.0F || fabsf(center.z) > 1.0F) continue;
+        if (!(size.x > 0.02F && size.x < 1.0F && size.y > 0.02F && size.y < 1.0F)) continue;
+        const uint64_t transform = native_component_transform(managed_object_native(hb));
+        if (!skeleton_transform_ptr_valid(transform)) continue;
+        aux.head_hitbox_transform = transform;
+        aux.head_hitbox_center = center;
+        aux.head_hitbox_valid = true;
+        break;
+    }
+}
+
 // Pose from KCC.Move: true when crouched (Pose == Crouch or State == CROUCHING).
-static bool player_is_crouched(const PlayerAux& aux) {
-    if (!aux.kcc) return false;
-    int32_t state = rd<int32_t>(aux.kcc + KCC_MOVE + 0x00);
-    int32_t pose  = rd<int32_t>(aux.kcc + KCC_MOVE + 0x04);
-    return pose == 1 || state == 3;
+static bool player_is_crouched(const PlayerAux& aux, int32_t* move_state_out = nullptr,
+                                bool* move_state_valid_out = nullptr) {
+    if (!aux.kcc) {
+        if (move_state_out) *move_state_out = -1;
+        if (move_state_valid_out) *move_state_valid_out = false;
+        return false;
+    }
+    int32_t state = 0, pose = 0;
+    const bool state_valid = rd_exact(aux.kcc + KCC_MOVE + 0x00, state);
+    const bool pose_valid = rd_exact(aux.kcc + KCC_MOVE + 0x04, pose);
+    if (move_state_out) *move_state_out = state_valid ? state : -1;
+    if (move_state_valid_out) *move_state_valid_out = state_valid;
+    return (pose_valid && pose == 1) || (state_valid && state == 3);
+}
+
+struct PlayerLifeState {
+    bool respawning = false;
+    bool respawning_known = false;
+    int death_flag = -1;
+    bool dead = false;
+};
+
+static PlayerLifeState read_player_life_state(uint64_t player, PlayerAux& aux,
+                                               int32_t move_state) {
+    PlayerLifeState life{};
+    uint8_t respawning = 0;
+    life.respawning_known = rd_exact(player + PLAYER_MANAGER_RESPAWNING, respawning);
+    if (life.respawning_known) life.respawning = respawning != 0;
+    if (playerlife::confirmed_dead(life.respawning, -1, move_state,
+                                   KCC_MOVE_STATE_DEAD)) {
+        life.dead = true;
+        // Death/respawn may replace the handler on a pooled PlayerManager.
+        aux.death_handler_retry = 0;
+        return life;
+    }
+    const uint64_t death_handler = ensure_player_death_handler(aux, player);
+    uint8_t death_flag = 0;
+    if (death_handler &&
+        rd_exact(death_handler + go_active::DEATH_HANDLER_DEATH, death_flag) &&
+        death_flag <= 1) {
+        life.death_flag = (int)death_flag;
+    }
+    life.dead = playerlife::confirmed_dead(life.respawning, life.death_flag,
+                                           move_state, KCC_MOVE_STATE_DEAD);
+    return life;
 }
 
 static bool player_head_world(const PlayerAux& aux, Vec3& out) {
@@ -5448,11 +5526,10 @@ static bool player_head_hitbox_world(const PlayerAux& aux, Vec3& out) {
     return vec3_is_finite(out);
 }
 
-static void prune_player_aux(const std::vector<uint64_t>& players) {
+static void prune_player_aux(const std::vector<uint64_t>& sorted_players) {
     for (auto it = g_player_aux.begin(); it != g_player_aux.end();) {
-        bool present = false;
-        for (uint64_t player : players) if (player == it->first) { present = true; break; }
-        if (!present) it = g_player_aux.erase(it); else ++it;
+        if (!sorted_player_contains(sorted_players, it->first)) it = g_player_aux.erase(it);
+        else ++it;
     }
 }
 
@@ -5475,6 +5552,7 @@ struct PlayerTrack {
     // подавлялся как duplicate-uid, и живой игрок оставался без бокса. В логе
     // 11:52:50 так пропал игрок на 0.5 с, а в 11:53:32 — игрок на 7.6 м.
     bool corpse = false;
+    bool corpse_authoritative = false; // respawning/death-handler/KCC, not a pose guess
     double corpse_at = 0.0;
     Vec3 last{};
     bool has_last = false;
@@ -5510,11 +5588,10 @@ static int g_position_fallback_rejected_logged = 0;
 // uid -> the object we drew last time, so a tie does not flip between copies.
 static std::unordered_map<std::string, uint64_t> g_player_track_pick;
 
-static void prune_player_track(const std::vector<uint64_t>& players) {
+static void prune_player_track(const std::vector<uint64_t>& sorted_players) {
     for (auto it = g_player_track.begin(); it != g_player_track.end();) {
-        bool present = false;
-        for (uint64_t player : players) if (player == it->first) { present = true; break; }
-        if (!present) it = g_player_track.erase(it); else ++it;
+        if (!sorted_player_contains(sorted_players, it->first)) it = g_player_track.erase(it);
+        else ++it;
     }
     if (g_player_track_pick.size() > 256) g_player_track_pick.clear();
 }
@@ -5700,15 +5777,14 @@ static void apply_mounted_position(uint64_t player, Vec3& feet) {
 
 }
 
-static void prune_mount_latch(const std::vector<uint64_t>& players) {
+static void prune_mount_latch(const std::vector<uint64_t>& sorted_players) {
     for (auto it = g_mount_latch.begin(); it != g_mount_latch.end();) {
-        bool present = false;
-        for (uint64_t player : players) if (player == it->first) { present = true; break; }
-        if (!present) it = g_mount_latch.erase(it); else ++it;
+        if (!sorted_player_contains(sorted_players, it->first)) it = g_mount_latch.erase(it);
+        else ++it;
     }
 }
 
-static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
+static PlayerTrack& track_player(uint64_t player, const Vec3& position, double now) {
     PlayerTrack& track = g_player_track[player];
     if (--track.uid_recheck <= 0) {
         char uid[40] = {};
@@ -5717,6 +5793,17 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
         // объекта (копия после посадки в транспорт, остаток респауна)
         // переставали подавляться: второй бокс вспыхивал в стороне и пропадал.
         if (read_managed_string_ex(rd_ptr(player + PLAYER_USER_ID), uid, sizeof(uid), 39)) {
+            if (track.uid[0] && uid[0] && strncmp(track.uid, uid, sizeof(track.uid)) != 0) {
+                // PlayerManager addresses are pooled. A new userID means every
+                // per-player cache (including a corpse/death-handler pointer)
+                // belongs to the previous occupant.
+                g_player_track_pick.erase(std::string(track.uid));
+                track = PlayerTrack{};
+                g_player_aux.erase(player);
+                g_player_text.erase(player);
+                g_mount_latch.erase(player);
+                g_skeletons.erase(player);
+            }
             memcpy(track.uid, uid, sizeof(track.uid));
             track.uid_recheck = 120; // ~2 s: pooled objects change owner
         } else {
@@ -5728,7 +5815,6 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
     // A remote player's position only arrives on the network tick, so most
     // frames repeat the previous one; differencing those would read zero.
     {
-        const double now = mono_seconds();
         if (!track.have_vel_ref) {
             track.vel_ref = position; track.vel_ref_t = now; track.have_vel_ref = true;
         } else {
@@ -5767,10 +5853,20 @@ static PlayerTrack& track_player(uint64_t player, const Vec3& position) {
 // Объект в прошлом кадре признали мёртвым. Решение живёт один кадр, поэтому
 // staleness ограничиваем секундой: объекты пула меняют владельца, и вчерашний
 // труп не должен распоряжаться uid сегодня.
-static bool player_track_is_corpse(uint64_t player) {
+static bool player_track_is_corpse(uint64_t player, double now) {
     auto it = g_player_track.find(player);
     if (it == g_player_track.end() || !it->second.corpse) return false;
-    return mono_seconds() - it->second.corpse_at < 1.0;
+    return now >= it->second.corpse_at && now - it->second.corpse_at < 1.0;
+}
+
+static void mark_player_corpse(uint64_t player, double now, bool authoritative) {
+    auto it = g_player_track.find(player);
+    if (it == g_player_track.end()) return;
+    PlayerTrack& track = it->second;
+    if (!track.corpse) track.uid_recheck = 0; // verify pooled-object identity next frame
+    track.corpse = true;
+    track.corpse_authoritative = authoritative;
+    track.corpse_at = now;
 }
 
 // ---- Временной фильтр позиции ------------------------------------------------
@@ -8032,7 +8128,9 @@ void esp_reset() {
     g_camera_manager_cached = 0;
     g_xray_cam = 0; g_xray_saved_valid = false; // процесс ушёл — восстанавливать нечего
     g_day_tod = 0; g_day_retry = 0; g_day_cycle_addr.store(0);
-    g_frame_transforms.clear(); g_frame_transforms_empty_streak = 0;
+    g_frame_transforms.clear();
+    g_frame_transforms_sorted.clear();
+    g_frame_transforms_empty_streak = 0;
     g_frame_publish_fail_streak = 0;
     g_player_esp_watchdog.reset();
     g_local_position_fail_streak = 0; g_world_change_streak = 0;
@@ -8550,16 +8648,18 @@ static void watch_boxes(const std::vector<EspBox>& result, size_t local_index,
         int added = 0, gone = 0;
         uint64_t added_first = 0, gone_first = 0;
         for (uint64_t p : g_frame_transforms) {
-            bool had = false;
-            for (uint64_t q : s_watch_pop) if (q == p) { had = true; break; }
-            if (!had) { ++added; if (!added_first) added_first = p; }
+            if (!sorted_player_contains(s_watch_pop, p)) {
+                ++added;
+                if (!added_first) added_first = p;
+            }
         }
         for (uint64_t q : s_watch_pop) {
-            bool has = false;
-            for (uint64_t p : g_frame_transforms) if (p == q) { has = true; break; }
-            if (!has) { ++gone; if (!gone_first) gone_first = q; }
+            if (!sorted_player_contains(g_frame_transforms_sorted, q)) {
+                ++gone;
+                if (!gone_first) gone_first = q;
+            }
         }
-        s_watch_pop = g_frame_transforms;
+        s_watch_pop = g_frame_transforms_sorted;
         if ((added || gone) && watch_allow()) {
             auto uid_of = [](uint64_t addr) -> const char* {
                 auto it = g_player_track.find(addr);
@@ -9146,16 +9246,24 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     if (player_list_ok) {
         for (uint64_t player : refreshed) g_frame_transforms_lost.erase(player);
 
+        g_frame_transforms_sorted.assign(refreshed.begin(), refreshed.end());
+        std::sort(g_frame_transforms_sorted.begin(), g_frame_transforms_sorted.end());
+        g_frame_transforms_sorted.erase(
+            std::unique(g_frame_transforms_sorted.begin(), g_frame_transforms_sorted.end()),
+            g_frame_transforms_sorted.end());
+        const size_t refreshed_unique_count = g_frame_transforms_sorted.size();
+
         for (uint64_t previous : s_transforms) {
-            bool present = false;
-            for (uint64_t player : refreshed) {
-                if (player == previous) { present = true; break; }
-            }
-            if (present) continue;
+            // Search only the sorted, freshly-read prefix. Grace-retained
+            // entries are appended and merged once after reconciliation.
+            if (std::binary_search(g_frame_transforms_sorted.begin(),
+                                   g_frame_transforms_sorted.begin() + refreshed_unique_count,
+                                   previous)) continue;
 
             int& missing_snapshots = g_frame_transforms_lost[previous];
             if (++missing_snapshots < 2) {
                 refreshed.push_back(previous);
+                g_frame_transforms_sorted.push_back(previous);
                 continue;
             }
 
@@ -9165,6 +9273,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             g_mount_latch.erase(previous);
             g_skeletons.erase(previous);
             g_frame_transforms_lost.erase(previous);
+        }
+        if (g_frame_transforms_sorted.size() > refreshed_unique_count) {
+            std::sort(g_frame_transforms_sorted.begin(), g_frame_transforms_sorted.end());
+            g_frame_transforms_sorted.erase(
+                std::unique(g_frame_transforms_sorted.begin(), g_frame_transforms_sorted.end()),
+                g_frame_transforms_sorted.end());
         }
         s_transforms = std::move(refreshed);
         g_frame_transforms_empty_streak = s_transforms.empty()
@@ -9196,11 +9310,11 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
 
     if (g_body_caches_dirty) { g_body_caches_dirty = false; g_player_aux.clear(); g_skeletons.clear(); }
     const bool want_bones = g_skeleton_enabled || g_aim_bones_requested;
-    prune_player_aux(s_transforms);
-    prune_player_text(s_transforms);
-    prune_player_track(s_transforms);
-    prune_mount_latch(s_transforms);
-    if (want_bones) prune_skeleton_cache(s_transforms);
+    prune_player_aux(g_frame_transforms_sorted);
+    prune_player_text(g_frame_transforms_sorted);
+    prune_player_track(g_frame_transforms_sorted);
+    prune_mount_latch(g_frame_transforms_sorted);
+    if (want_bones) prune_skeleton_cache(g_frame_transforms_sorted);
     else if (!g_skeletons.empty()) g_skeletons.clear();
     g_skeleton_builds_this_frame = 0;
 
@@ -9252,11 +9366,23 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
     size_t local_entity_index = s_transforms.size();
     // Positions are read once per frame here and reused below: the box loop
     // must see exactly the same values the local player was picked with.
-    std::vector<Vec3> positions(s_transforms.size());
-    std::vector<char> position_ok(s_transforms.size(), 0);
-    std::vector<char> position_source(s_transforms.size(), 0);
-    std::vector<unsigned short> position_read_flags(s_transforms.size(), 0);
-    std::vector<char> skip_reason(s_transforms.size(), 0); // наблюдатель мерцаний: код пропуска
+    // Reuse per-frame scratch capacity; these arrays are rebuilt every frame,
+    // so repeated allocation/free churn adds latency without preserving state.
+    static std::vector<Vec3> positions;
+    static std::vector<char> position_ok;
+    static std::vector<char> position_source;
+    static std::vector<unsigned short> position_read_flags;
+    static std::vector<char> skip_reason; // наблюдатель мерцаний: код пропуска
+    positions.resize(s_transforms.size());
+    position_ok.resize(s_transforms.size());
+    position_source.resize(s_transforms.size());
+    position_read_flags.resize(s_transforms.size());
+    skip_reason.resize(s_transforms.size());
+    std::fill(positions.begin(), positions.end(), Vec3{});
+    std::fill(position_ok.begin(), position_ok.end(), 0);
+    std::fill(position_source.begin(), position_source.end(), 0);
+    std::fill(position_read_flags.begin(), position_read_flags.end(), 0);
+    std::fill(skip_reason.begin(), skip_reason.end(), 0);
     size_t live_player_positions = 0;
     s_direct_dead_players = 0;
     s_direct_dead_count = 0;
@@ -9266,6 +9392,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         append_bot_boxes(result);
         return transient_return(8);
     }
+    const double frame_now = mono_seconds();
     local = camera_position;
     has_local_position = true;
     Vec3 projection_camera_right{}, projection_camera_up{}, projection_camera_forward{};
@@ -9337,7 +9464,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             source = 'C';
         } else {
             ++live_player_positions;
-            PlayerTrack& track = track_player(player, candidate);
+            PlayerTrack& track = track_player(player, candidate, frame_now);
             tracked = g_player_track.find(player);
 
             // lastSavedPosition у удалённых игроков обновляется сетевыми тиками,
@@ -9353,7 +9480,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                 !player_is_mounted(player) && !player_mount_engaged(player) &&
                 track.have_vel_ref) {
                 candidate = playermotion::predict(candidate, track.vel,
-                                                  track.vel_ref_t, mono_seconds(),
+                                                  track.vel_ref_t, frame_now,
                                                   playermotion::kDrawnPredictionMaxDistance);
             }
         }
@@ -9364,7 +9491,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         position_source[index] = source;
         if (tracked != g_player_track.end()) {
             tracked->second.filt.drawn = candidate;
-            tracked->second.filt.drawn_t = mono_seconds();
+            tracked->second.filt.drawn_t = frame_now;
             tracked->second.filt.has_drawn = true;
         }
     }
@@ -9541,13 +9668,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (track_it != g_player_track.end() && track_it->second.uid[0]) {
                 uint64_t& pick = g_player_track_pick[track_it->second.uid];
                 if (pick && pick != s_transforms[i]) {
-                    bool pick_alive = false;
-                    for (uint64_t p : s_transforms) if (p == pick) { pick_alive = true; break; }
+                    const bool pick_alive = sorted_player_contains(g_frame_transforms_sorted, pick);
                     // Труп в реестре uid не удерживает: игрок уже респавнился, и
                     // показывать надо свежий объект. Две копии трупа между собой
                     // по-прежнему не меняются — выбор не дёргается зря.
-                    const bool pick_corpse = pick_alive && player_track_is_corpse(pick);
-                    const bool candidate_corpse = player_track_is_corpse(s_transforms[i]);
+                    const bool pick_corpse = pick_alive && player_track_is_corpse(pick, frame_now);
+                    const bool candidate_corpse = player_track_is_corpse(s_transforms[i], frame_now);
                     if (pick_alive && !(pick_corpse && !candidate_corpse)) {
                         diagnostic.duplicate_of = pick;
                         mark_skip('S');
@@ -9558,15 +9684,51 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
         }
 
-        // Counted before any screen-space checks: the pill counter must see
-        // players behind us too (360 degrees), not only the ones on screen.
+        // Resolve the compact, authoritative life-state signals before count,
+        // bearing, or any projection early-out. The pose heuristic below stays
+        // late because it requires an on-screen skeleton and is not safe to
+        // apply to players whose bodies were never sampled.
+        PlayerAux& aux = player_aux(s_transforms[i]);
+        int32_t move_state = -1;
+        bool move_state_valid = false;
+        const bool crouched = player_is_crouched(aux, &move_state, &move_state_valid);
+        const PlayerLifeState life = read_player_life_state(s_transforms[i], aux, move_state);
+
+        bool cached_authoritative_dead = false;
+        auto cached_track = g_player_track.find(s_transforms[i]);
+        if (cached_track != g_player_track.end() &&
+            cached_track->second.corpse_authoritative &&
+            player_track_is_corpse(s_transforms[i], frame_now)) {
+            const bool confirmed_alive = life.respawning_known && !life.respawning &&
+                life.death_flag == 0 && move_state_valid &&
+                move_state != KCC_MOVE_STATE_DEAD;
+            if (confirmed_alive) {
+                cached_track->second.corpse = false;
+                cached_track->second.corpse_authoritative = false;
+                cached_track->second.corpse_at = 0.0;
+            } else {
+                cached_authoritative_dead = true;
+            }
+        }
+        if (life.dead) {
+            mark_player_corpse(s_transforms[i], frame_now, true);
+            mark_skip('X');
+            continue;
+        }
+        if (cached_authoritative_dead) {
+            mark_skip('X');
+            continue;
+        }
+        const bool prior_corpse = player_track_is_corpse(s_transforms[i], frame_now);
+
+        // Count before screen-space checks: all known-live players remain in
+        // the 360-degree count, including players behind the camera.
         ++g_frame_player_count;
 
         // Пеленг 360° — здесь, а не вместе с боксом: экранной геометрии у
-        // игрока за спиной нет вовсе. Признаки «свой» и «труп» считаются тоже
-        // отсюда: у отсеянного по экрану кадра блоки группы и здоровья ниже не
-        // выполняются, и без этого стрелка показывала бы тиммейта противником,
-        // а труп — живой целью.
+        // игрока за спиной нет вовсе. Группу и кешированную позу трупа тоже
+        // записываем до экранных отсевов, чтобы стрелка не показывала союзника
+        // противником или уже известный труп живой целью.
         int bearing_index = -1;
         if (g_bearings_requested) {
             EspBearing bearing{};
@@ -9581,18 +9743,13 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
                     read_player_group(s_transforms[i], group);
                     bearing.ally = groups_are_allied(local_group, group);
                 }
-                uint8_t respawning = 0;
-                bearing.dead = (rd_exact(s_transforms[i] + PLAYER_MANAGER_RESPAWNING,
-                                         respawning) && respawning != 0) ||
-                               player_track_is_corpse(s_transforms[i]);
+                bearing.dead = prior_corpse;
                 bearing_index = (int)g_frame_bearings.size();
                 g_frame_bearings.push_back(bearing);
             }
         }
 
-        // Crouch-aware body height from the character controller.
-        PlayerAux& aux = player_aux(s_transforms[i]);
-        const bool crouched = player_is_crouched(aux);
+        // Crouch-aware body height from the same KCC sample used above.
         float body_height = crouched ? aux.crouch_height : aux.normal_height;
         if (!(body_height > 0.6F && body_height < 2.6F)) body_height = PLAYER_HEIGHT;
         diagnostic.body_height = body_height;
@@ -9665,7 +9822,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // стоял точно на пороге.
         const float edge_enter = std::max(sw, sh) * 0.25F;
         const float edge_hold = edge_enter + std::min(sw, sh) * 0.25F;
-        const double edge_now = mono_seconds();
+        const double edge_now = frame_now;
         auto box_seen = s_box_seen_at.find(s_transforms[i]);
         const bool box_was_visible = box_seen != s_box_seen_at.end() &&
                                      (edge_now - box_seen->second) <= 0.35;
@@ -9693,7 +9850,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             auto vt = g_player_track.find(s_transforms[i]);
             if (vt != g_player_track.end() && vt->second.have_vel_ref) {
                 const Vec3 velocity = vt->second.vel;
-                const double age = mono_seconds() - vt->second.vel_ref_t;
+                const double age = frame_now - vt->second.vel_ref_t;
                 if (age >= 0.0 && age <= 0.35 && aim_ballistics::finite(velocity)) {
                     g_aim_velocity = velocity;
                     g_aim_lead.x = velocity.x * g_aim_lead_seconds;
@@ -9710,91 +9867,14 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         }
         box.id = s_transforms[i];
         box.crouched = crouched;
-        // Мёртвый игрок. Два независимых признака: health <= 0 и respawning.
-        // Оба кладём в бокс, чтобы по логу было видно, который из них живой.
-        // Почему здоровье нельзя читать «как получится». rd<float>() при
-        // неудачном чтении возвращает НОЛЬ (game_internal.h: «T v{}» — значение
-        // просто остаётся нулевым), а ноль проходил проверку «здоровье в
-        // диапазоне». То есть любой сбойный syscall помечал игрока мёртвым, и
-        // сборка 829a1dc перестала брать цели ВООБЩЕ: мёртвыми оказывались все
-        // подряд, а строка «мёртвых N» печаталась только из ветки «кости не
-        // нашлись» — в логе не было ни одной строки, и причину жалобы 19.09
-        // «аим вообще не нацеливается на игроков» стало нечем подтвердить.
-        // Теперь: результат чтения проверяется (rd_exact), неудача — не
-        // приговор, а признаку «здоровье = 0» мы верим, только если хотя бы
-        // раз видели живое здоровье. Если смещение не то и всем читается ноль,
-        // фильтр молча выключается: аим продолжает работать, а срез памяти
-        // vitals в логе показывает, где здоровье лежит на самом деле.
-        static float g_hp_max_seen = -1.f;   // максимум здоровья за всё время
-        box.respawning = false;
-        {
-            uint8_t flag = 0;
-            if (rd_exact(s_transforms[i] + PLAYER_MANAGER_RESPAWNING, flag))
-                box.respawning = flag != 0;
-        }
-        box.health = -1.f;
-        {
-            const uint64_t vitals = rd_ptr(s_transforms[i] + go_active::PLAYER_VITALS);
-            if (vitals >= 0x10000) {
-                // Где здоровье на самом деле. Прошлые две сборки читали
-                // GenericVitals.KQN (0xB8) — и срез памяти из лога 15:56
-                // показал, что там у ВСЕХ игроков ровно 0.0, хотя соседнее
-                // поле m_MaxHealth (0x88) читается как честные 100.0. Значит
-                // объект найден верно, а KQN — не текущее здоровье.
-                //
-                // Правильная цепочка взята из дизассемблера, а не подобрана:
-                //   * GenericVitals.COL() (RVA 0x65391f8) кладёт m_MaxHealth
-                //       s0 = [this + 0x88]
-                //     в сеттер наблюдаемой величины:
-                //       x8 = [this + 0x68]        -- brS.Entity
-                //       x0 = [x8 + 0x98]          -- brz.Health
-                //       setter(x0, s0)
-                //   * сам сеттер (RVA 0xb0f6238) пишет новое значение в
-                //     [x0 + 0x20], а старое относит в [x0 + 0x24]:
-                //       stp s1, s0, [x0, #0x20]
-                //   * в dump.cs этому ровно соответствует
-                //       public class brz : brS  ->  public ? Health;  // 0x98
-                //     а 0x68 у brS — это public brz Entity.
-                // Итого: здоровье = [[[vitals + 0x68] + 0x98] + 0x20].
-                const uint64_t entity = rd_ptr(vitals + go_active::PMP_ENTITY);
-                if (entity >= 0x10000) {
-                    const uint64_t hv = rd_ptr(entity + go_active::PMK_HEALTH);
-                    if (hv >= 0x10000) {
-                        // Слот значения: дизассемблер сеттера показывает +0x20
-                        // (старое значение при этом относит в +0x24), а по
-                        // раскладке AsyncReactiveProperty<T> из дампа значение
-                        // должно лежать в +0x18. Тип brz.Health в дампе не
-                        // разрешён (там просто «?»), поэтому берём тот слот,
-                        // где лечит правдоподобное здоровье, — и печатаем оба,
-                        // чтобы следующая сборка уже знала точно.
-                        const float hp20 = rd<float>(hv + go_active::HEALTH_VALUE);
-                        const float hp18 = rd<float>(hv + go_active::ARP_LATEST_VALUE);
-                        auto plausible = [](float v) {
-                            return std::isfinite(v) && v >= 0.f && v <= 100000.f;
-                        };
-                        // Не прочиталось ни там ни там — здоровье НЕИЗВЕСТНО, а
-                        // не «ноль». Именно подстановка нуля вместо неудачи и
-                        // помечала живых игроков мёртвыми (жалоба 19.09).
-                        if (plausible(hp20))      { box.health = hp20; box.health_slot = 0x20; }
-                        else if (plausible(hp18)) { box.health = hp18; box.health_slot = 0x18; }
-                        else                      { box.health = -1.f; box.health_slot = 0; }
-                        if (box.health > g_hp_max_seen) g_hp_max_seen = box.health;
-                        // Срез объекта Health больше не печатаем: слот
-                        // подтверждён логом 16:32 (+0x20 = 100.0 у живых,
-                        // 0.0 у части игроков, +0x24 = прошлое значение).
-                        // Здоровье остаётся только для лога «поза»: решением
-                        // о смерти оно больше не управляет ни при каких
-                        // обстоятельствах (жалоба «смысла читать HP нет»).
-                    }
-                }
-            }
-        }
-        // Мёртвый решается ПОСЛЕ чтения скелета — см. ниже, перед push_back.
-        // Раньше это решение стояло здесь, но fill_skeleton_box вызывается
-        // ниже по циклу, а box создаётся заново каждый кадр (EspBox box{}),
-        // поэтому в этой точке костей всегда 0 и правило не срабатывало ни
-        // разу: в логе 17:06 каждая строка «поза» давала костей=0, а счётчик
-        // пропущенных мёртвых был 0 вместо 142.
+        // Life fields were sampled before count and projection. Health is not
+        // needed for ESP/aim and its stale values caused extra reads and false
+        // positives on some game states.
+        box.respawning = life.respawning;
+        box.health = -1.0F;
+        box.health_slot = 0;
+        box.death_flag = life.death_flag;
+        box.dead = life.dead;
 
         box.aim_source = 0;
         box.x1 = cx - half_w; box.y1 = cy - half_h;
@@ -9866,6 +9946,7 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
         // long-range head shots land low. Only accepted when it lies within
         // the body (plausibility vs feet) so a stale transform cannot hijack it.
         if (g_aim_bones_requested && !transform_camera_mode) {
+            ensure_player_head_hitbox(aux);
             Vec3 hb{};
             if (player_head_hitbox_world(aux, hb)) {
                 float dy = hb.y - feet.y;
@@ -9916,62 +9997,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             if (!box.aim_valid[1]) { Vec3 t = feet; t.y += body_height - 0.26F; if (set_aim_point(box, 1, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
             if (!box.aim_valid[2]) { Vec3 t = feet; t.y += body_height * 0.72F; if (set_aim_point(box, 2, t, vp, sw, sh) && box.aim_source == 0) box.aim_source = 3; }
         }
-        // Мёртвый — по позе, а не по здоровью.
-        //
-        // Здоровье цели читать бессмысленно (жалоба 19.09, и лог это
-        // подтвердил): цепочка vitals->Entity->Health->+0x20 читается верно
-        // (у живых 100.0, у некоторых 0.0), но нули там принадлежат СПЯЩИМ
-        // игрокам, а у только что убитого здоровье на клиенте остаётся
-        // прежним. Поэтому смотрим на кости: труп лежит. У стоящего игрока
-        // размах скелета по вертикали 1.5-1.8 м при горизонтали 0.4 м; у
-        // лежащего — высота падает до 0.3-0.5 м, а горизонталь вырастает до
-        // полутора. Костей должно быть не меньше половины: по обрубку из
-        // четырёх-пяти костей позу не определишь.
-        //
-        // Здесь, а не раньше: fill_skeleton_box уже отработал и заполнил
-        // skel_bones/skel_up/skel_flat для этого кадра.
-        box.dead = box.respawning;
-        // Собственный флаг смерти игры — первым делом: поза (ниже) ловит
-        // только лежачих, а труп может ещё стоять. Чтение сорвалось — флаг
-        // неизвестен (-1) и НЕ считается смертью: пометить живого игрока
-        // мёртвым хуже, чем один кадр повести по трупу.
-        {
-            const uint64_t ref = rd_ptr(s_transforms[i] + go_active::PLAYER_DEATH_HANDLER);
-            if (ref >= 0x10000) {
-                const uint64_t dh = rd_ptr(ref + go_active::DEATH_HANDLER_REF_TARGET);
-                if (dh >= 0x10000) {
-                    const uint32_t f = rd<uint8_t>(dh + go_active::DEATH_HANDLER_DEATH);
-                    if (f == 1) { box.death_flag = 1; box.dead = true; }
-                    else if (f == 0) box.death_flag = 0;
-                }
-            }
-        }
-        // Поза «лежит» — только как запасной признак и очень строго.
-        // Порог высоты 0.85 ложно ловил ПРИСЕВШЕГО игрока: в логе 00:53
-        // живой (здоровье 100, флаг смерти 0) сидел с высотой скелета
-        // 0.77-0.86 м и бокс мерцал «мёртв/жив» на каждом пересечении
-        // порога. Теперь: присевшего игра знает сама (поза/состояние KCC)
-        // и поза его не трогает; труп по высоте — 0.3-0.5 м, порог 0.60;
-        // горизонталь трупа — от метра, у сидящего 0.51-0.61 м; и гистерезис
-        // 0.35 с, чтобы шум скелета на один-два кадра не гасил бокс.
-        // Поза движения — собственный ответ игры: MoveState.DEAD (7) в
-        // KCC.Move.State. Это состояние самой игры, а не догадка по углам
-        // скелета, поэтому оно дешевле и надёжнее любого порога; лежачей позы
-        // (prone) в этой сборке нет вовсе — Move.Pose знает только Stand и
-        // Crouch (dump 11949, enum Pose TypeDefIndex 4285).
-        {
-            const PlayerAux& aux = player_aux(s_transforms[i]);
-            if (aux.kcc) {
-                const int32_t move_state = rd<int32_t>(aux.kcc + KCC_MOVE + 0x00);
-                if (move_state == KCC_MOVE_STATE_DEAD) box.dead = true;
-            }
-        }
+        // Conservative visual-only fallback: inspect a completed on-screen
+        // skeleton, ignore crouching/sparse rigs, and require 350 ms of a clear
+        // lying pose. Never spread this heuristic to off-screen players.
         if (!crouched && !box.dead && box.death_flag < 0 && box.skel_bones >= 11 &&
             box.skel_up >= 0.f && box.skel_flat >= 0.f) {
             const bool lying = box.skel_up < 0.60f ||
                                (box.skel_flat > 1.0f && box.skel_flat > box.skel_up * 1.5f);
             static std::unordered_map<uint64_t, double> s_lying_since;
-            const double t_lie = memio::now_seconds();
+            const double t_lie = frame_now;
             auto it = s_lying_since.find(s_transforms[i]);
             if (lying) {
                 if (it == s_lying_since.end()) s_lying_since.emplace(s_transforms[i], t_lie);
@@ -9981,34 +10015,15 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             }
             if (s_lying_since.size() > 256) s_lying_since.clear();
         }
-        // Что именно решило судьбу игрока — в лог: без этого порог непроверяем.
-        // Печатаем только тех, у кого кости РЕАЛЬНО измерены: в логе 17:06
-        // первые три игрока списка оказывались спящими (костей=0, высота=-1),
-        // и по такому логу порог не проверить.
-        {
-            static double s_pose_at = 0.0;
-            static int    s_pose_left = 0;
-            const double t3 = memio::now_seconds();
-            if (t3 >= s_pose_at) { s_pose_at = t3 + 8.0; s_pose_left = 3; }
-            if (s_pose_left > 0 && box.skel_bones >= 6) {
-                --s_pose_left;
-            }
-        }
         // A confirmed corpse must disappear immediately. The five-second list
         // grace protects living players from read gaps, not dead PlayerManagers.
         if (box.dead) {
             mark_skip('X');
             if (g_frame_player_count > 0) --g_frame_player_count;
-            // Смерть, подтверждённая этим кадром (respawning/здоровье/поза),
-            // точнее флага, прочитанного на шаге пеленга, — решение за ней.
             if (bearing_index >= 0) g_frame_bearings[bearing_index].dead = true;
-            // Метка для подавления дубликатов выше: этот объект — труп, uid он
-            // не удерживает, и свежий объект игрока получает бокс.
-            auto corpse_track = g_player_track.find(s_transforms[i]);
-            if (corpse_track != g_player_track.end()) {
-                corpse_track->second.corpse = true;
-                corpse_track->second.corpse_at = mono_seconds();
-            }
+            // Pose is a useful on-screen fallback, not a portable signal for
+            // players whose skeleton has not been sampled this frame.
+            mark_player_corpse(s_transforms[i], frame_now, false);
             continue;
         }
         // ---- Мировой якорь -------------------------------------------------
@@ -10044,11 +10059,12 @@ std::vector<EspBox> esp_get_boxes(int overlay_width, int overlay_height) {
             bearing.ally = box.ally;
             bearing.dead = box.dead;
         }
-        s_box_seen_at[s_transforms[i]] = mono_seconds();
+        s_box_seen_at[s_transforms[i]] = frame_now;
         if (s_box_seen_at.size() > 256) s_box_seen_at.clear();
         auto live_track = g_player_track.find(s_transforms[i]);
         if (live_track != g_player_track.end()) {
             live_track->second.corpse = false;
+            live_track->second.corpse_authoritative = false;
             live_track->second.corpse_at = 0.0;
         }
     }

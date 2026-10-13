@@ -345,15 +345,10 @@ inline constexpr std::uint64_t EVENT_HANDLER_MOVEMENT_INPUT  = 0x128;
 //   0x98  inventory            (Oxide.PlayerInventory) — все три подтверждены именами в новом дампе
 //   0xF0  weaponReference      (private; likely the current remote weapon)
 //   0x198 weapons              (private array of weapon objects)
-// Признак смерти игрока: Oxide.PlayerManager.respawning (bool).
-// Источник — РЕЛИЗНЫЙ дамп (dump.cs, struct Oxide_PlayerManager_Fields):
-//     bool respawning;   // 0x208
-// Стоит единицей, пока игрок мёртв и ждёт возрождения; живой игрок держит
-// ноль. Поле на самом PlayerManager, который уже есть в списке кадров, —
-// поэтому читается одним чтением, без цепочек. Рядом lastDeathPosition
-// (Vector3, 0x1E0) и playerDeathHandlerReference (0x80), но для «не целиться
-// в труп» довольно этого флага.
-inline constexpr std::uint64_t PLAYER_MANAGER_RESPAWNING = 0x228;  // было 0x208; bool после nextTerrainPosition(0x224)
+// Oxide.PlayerManager.respawning: authoritative death/respawn signal read
+// directly from the existing player object. The selected dump places it at
+// 0x228 (after nextTerrainPosition at 0x224); older dump notes listed 0x208.
+inline constexpr std::uint64_t PLAYER_MANAGER_RESPAWNING = 0x228;
 // Собственный признак смерти игры, а не догадка по позе. Релизный дамп:
 //     Oxide.PlayerManager.playerDeathHandlerReference   0x80
 //     Oxide.PlayerDeathHandler.death  (bool, synced)    0xF0

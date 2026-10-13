@@ -49,7 +49,7 @@ struct AimTarget {
     float world[3] = {};            // точная мировая координата кости для silent-режима
     bool  world_valid = false;
     int   bone = -1;                // слот точки прицела (0 голова, 1 шея, 2 грудь)
-    float health = -1.f;            // здоровье цели (для лога и проверки смерти)
+    float health = -1.f;            // reserved telemetry; not used for target selection
     bool  respawning = false;       // PlayerManager.respawning (для лога)
     // Поза выбранной цели — те же габариты скелета, по которым решается
     // «мёртв». В лог они идут вместе с самой целью: иначе, когда игрок

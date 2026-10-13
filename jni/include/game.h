@@ -10,25 +10,17 @@ struct EspBox {
     unsigned long long id;   // stable per-player identity (PlayerManager*), for target stickiness
     float x1, y1, x2, y2;
     float distance;
-    // Игрок мёртв. Аим таких не берёт в цель: труп ещё несколько секунд живёт
-    // в списке игроков и отдаёт корректные кости, из-за чего прицел уезжал на
-    // уже убитого (просьба 19.09). Считаем по двум независимым признакам:
-    //   * Oxide.PlayerManager.respawning (bool, 0x208) — «ждать возрождения»;
-    //   * здоровье: PlayerManager.vitals (0xC8) -> brS.Entity (0x68)
-    //     -> brz.Health (0x98) -> значение (+0x18 или +0x20).
-    // Первый в логе 14:55 не срабатывал ни разу (мёртвых 0 при жалобе игрока),
-    // поэтому основной признак — здоровье, а оба значения пишутся в лог.
-    // Здоровье НЕ в GenericVitals.KQN (0xB8): срез памяти из лога 15:56 показал
-    // там ровно 0.0 у всех игроков при честных 100.0 в m_MaxHealth (0x88).
+    // Confirmed dead players are excluded from boxes, aim targets, count, and bearings.
+    // Early decisions use authoritative respawn/death-handler/KCC state; the
+    // lying-pose fallback is evaluated only after this frame's skeleton is read.
     bool  dead = false;
-    float health = -1.f;          // текущее здоровье, -1 = не прочитано
-    unsigned health_slot = 0;     // из какого смещения прочитано (0x18 / 0x20)
-    // Габариты скелета в метрах — по ним и определяется мёртвый (труп лежит).
+    float health = -1.f;          // reserved telemetry field; not read by the hot loop
+    unsigned health_slot = 0;     // reserved; 0 when not sampled
     int   death_flag = -1;        // Oxide.PlayerDeathHandler.death: 1/0/-1
     float skel_up = -1.f;         // размах костей по вертикали
     float skel_flat = -1.f;       // наибольший размах по горизонтали
     int   skel_bones = 0;         // сколько костей дали мировую позицию
-    bool  respawning = false;     // PlayerManager.respawning (0x208)
+    bool  respawning = false;     // PlayerManager.respawning
     float corners[8][2];
     bool  corner_visible[8];
 
