@@ -81,6 +81,94 @@ int main() {
     assert(memory_step(-30.0f, 1.0f / 60.0f, 10.0f, 5.0f) < 0.0f);
 
     assert(memory_step(std::numeric_limits<float>::infinity(), 1.0f / 60.0f, 10.0f, 5.0f) == 0.0f);
+
+    // ---- компенсация отдачи -------------------------------------------------
+    const float tick = 1.0f / 12.0f;   // такт оверлея, а не игры
+    RecoilControl rcs;
+    assert(rcs.term() == 0.0f);
+
+    // Кнопка отпущена — член нулевой, как бы долго ни держалась ошибка: без огня
+    // возмущения нет, а заряд на пустом месте выкинул бы первые выстрелы.
+    for (int i = 0; i < 60; ++i) rcs.update(1.0f, false, tick, 4.0f, 20.0f);
+    assert(rcs.term() == 0.0f);
+
+    // Огонь держится, прицел сел: остаток ошибки одного знака копит член того же
+    // знака (команда подписана как ошибка, поэтому прибавляется без инверсии).
+    for (int i = 0; i < 40; ++i) rcs.update(0.4f, true, tick, 4.0f, 20.0f);
+    assert(rcs.term() > 0.0f);
+    const float charged = rcs.term();
+    rcs.update(-0.4f, true, tick, 4.0f, 20.0f);
+    assert(rcs.term() < charged);
+
+    // Вне полосы «прицел сел» заряд не растёт, только стекает: наведение на новую
+    // цель не должно наматывать интеграл.
+    rcs.reset();
+    for (int i = 0; i < 40; ++i) rcs.update(0.4f, true, tick, 4.0f, 20.0f);
+    const float before_acquisition = rcs.term();
+    float during_acquisition = before_acquisition;
+    for (int i = 0; i < 40; ++i)
+        during_acquisition = rcs.update(9.0f, true, tick, 4.0f, 20.0f);
+    assert(before_acquisition > 0.0f && during_acquisition < before_acquisition);
+
+    // Насыщение команды не докручивает интеграл (анти-виндап).
+    rcs.reset();
+    float saturated = 0.0f;
+    for (int i = 0; i < 40; ++i)
+        saturated = rcs.update(0.4f, true, tick, 4.0f, 20.0f, true);
+    assert(saturated == 0.0f);
+
+    // Кламп держит член в пределах области, каким бы долгим ни был огонь.
+    rcs.reset();
+    float clamped = 0.0f;
+    for (int i = 0; i < 2000; ++i) clamped = rcs.update(3.0f, true, tick, 4.0f, 1.5f);
+    assert(clamped == 1.5f);
+    rcs.reset();
+    clamped = 0.0f;
+    for (int i = 0; i < 2000; ++i) clamped = rcs.update(-3.0f, true, tick, 4.0f, 1.5f);
+    assert(clamped == -1.5f);
+
+    // Мусор на входе сбрасывает член, а не уносит его в бесконечность; degenerate
+    // пределы не дают заряда.
+    rcs.reset();
+    for (int i = 0; i < 40; ++i) rcs.update(0.4f, true, tick, 4.0f, 20.0f);
+    rcs.update(std::numeric_limits<float>::infinity(), true, tick, 4.0f, 20.0f);
+    assert(rcs.term() == 0.0f);
+    rcs.update(0.4f, true, tick, 4.0f, 0.0f);
+    assert(rcs.term() == 0.0f);
+    rcs.update(0.4f, true, tick, 0.0f, 20.0f);
+    assert(rcs.term() == 0.0f);
+    assert(rcs.update(std::numeric_limits<float>::quiet_NaN(), true, tick, 4.0f, 20.0f) == 0.0f);
+
+    // Отпущенная кнопка стекает к нулю, а не держит заряд до следующей очереди.
+    rcs.reset();
+    for (int i = 0; i < 40; ++i) rcs.update(0.4f, true, tick, 4.0f, 20.0f);
+    assert(rcs.term() > 0.1f);
+    float bled = rcs.term();
+    for (int i = 0; i < 120; ++i) bled = rcs.update(0.0f, false, tick, 4.0f, 20.0f);
+    assert(bled < 1.0e-3f);
+
+    // Замкнутая петля с постоянным возмущением — ради чего всё и добавлено.
+    // Растение: за такт камера уходит на команду и поднимается отдачей на climb.
+    // Пропорциональное звено оставляет статическую ошибку climb/kp; интеграл
+    // снимает её на порядок. Подъём 0.4 град/так — середина реального диапазона.
+    auto settle = [tick](bool with_integral) {
+        RecoilControl loop;
+        const float climb = 0.40f, kp = 0.70f;
+        float camera = 0.0f;
+        for (int i = 0; i < 600; ++i) {
+            const float error = camera;   // кость стоит в нуле
+            const float term = with_integral
+                ? loop.update(error, true, tick, 4.0f, 20.0f) : loop.term();
+            camera = camera - (kp * error + term) + climb;
+        }
+        return std::fabs(camera);
+    };
+    const float proportional_only = settle(false);
+    const float with_integral = settle(true);
+    assert(std::fabs(proportional_only - 0.40f / 0.70f) < 1.0e-3f);
+    assert(with_integral > 0.0f);
+    assert(with_integral < proportional_only * 0.15f);
+
     float invalid_yaw = std::numeric_limits<float>::quiet_NaN();
     float invalid_pitch = 0.0f;
     filter.update(invalid_yaw, invalid_pitch, 1.0f / 60.0f, 0.02f);

@@ -91,6 +91,7 @@ static const LangPair kUiEn[] = {
     {"Кнопка на экране", "On-screen button"},
     {"Кнопка фрикама сохранена", "Freecam button saved"},
     {"Код потока изменён", "the flow code was modified in the process"},
+    {"Компенсация отдачи", "Recoil compensation"},
     {"Конфиг", "Config"},
     {"Конфиг загружен", "Config loaded"},
     {"Конфиг создан", "Config created"},

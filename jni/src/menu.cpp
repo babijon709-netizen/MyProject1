@@ -229,13 +229,21 @@ float TabContent(int tab, float dt, float cW) {
         }
 
         SHdr(XS("Наводка"));
-        CardBg(Layout::SliderH * 3);
+        CardBg(Layout::SliderH * 3 + Layout::RowH);
         SliderRow("##afov", XS("Радиус"), &g_state.gun_fov, 5.f, 180.f, XS("%.0f°"), false, true, g_state.sl_gun_fov, dt);
         SliderRow("##asmt", XS("Скорость"), &g_state.gun_str, 1.f, 10.f, "%.0f", false, false, g_state.sl_gun_str, dt);
         // Предикт: аим ведёт по точке, куда цель уйдёт за N мс.
         // Уровень 0 = вести по кости; шаг 15 мс, уровень 10 = 150 мс.
         SliderRow("##aldd", XS("Предикт"), &g_state.aim_predict,
-                  0.f, 10.f, "%.0f", true, false, g_state.sl_aim_lead, dt);
+                  0.f, 10.f, "%.0f", false, false, g_state.sl_aim_lead, dt);
+        // Компенсация отдачи: добавляет к команде наводки интеграл по остатку
+        // ошибки, пока держится кнопка огня (aim_control::RecoilControl). Без
+        // неё пропорциональная петля держит прицел выше кости на величину
+        // подъёма ствола за такт; ошибка угловая, поэтому промах от неё растёт
+        // с дистанцией — вблизи ещё по телу, на сотне метров за макушку.
+        // Молчит, пока отдача погашена в памяти («Без отдачи»): две компенсации
+        // подряд уронили бы прицел ниже кости.
+        ToggleRow("##ta8", XS("Компенсация отдачи"), &g_state.aim_rcs, g_state.a_aim_rcs, true);
 
         g_state.aim_predict = std::round(g_state.aim_predict);
         g_state.aim_lead_ms = g_state.aim_predict * kAimPredictStepMs;
@@ -1819,6 +1827,7 @@ void RenderMenu() {
     Tick(g_state.a_aim_spec,   g_state.aim_special,        dt);
     Tick(g_state.a_aim_scope,  g_state.aim_scope_only,     dt);
     Tick(g_state.a_aim_fire,   g_state.aim_fire_only,      dt);
+    Tick(g_state.a_aim_rcs,    g_state.aim_rcs,            dt);
     Tick(g_state.a_esp_box,    g_state.esp_box,            dt);
     Tick(g_state.a_esp_name,   g_state.esp_name,           dt);
     Tick(g_state.a_esp_wall,   g_state.esp_wall,           dt);

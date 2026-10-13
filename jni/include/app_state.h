@@ -24,6 +24,11 @@ struct AppState {
     // (см. aim.cpp — признак там и у игры, и у хендлера ввода). Пара к
     // «Только в прицеле»: тот смотрит на прицел, этот — на огонь.
     bool  aim_fire_only = false;
+    // Компенсация отдачи в петле наводки: интеграл по остатку ошибки, пока
+    // держится кнопка огня (см. aim_control::RecoilControl). Сама выключается,
+    // когда отдача уже погашена в памяти игры («Без отдачи»): две компенсации
+    // подряд уронили бы прицел ниже кости.
+    bool  aim_rcs = false;
     int   aim_bone = 1;   // 0 голова, 1 шея, 2 тело (как слоты аима)
     // Чем именно аим крутит прицел: 0 тач (синтетический палец), 1 память
     // (запись ввода взгляда в игру), 2 сайлент (запись оси выстрела).
@@ -145,6 +150,7 @@ struct AppState {
     float tab_alpha = 1.f, tab_slide = 0.f, tab_slide_vel = 0.f;
     float a_aim_touch = 0, a_aim_pos = 0, a_aim_spec = 0, a_aim_scope = 0;
     float a_aim_fire = 0;
+    float a_aim_rcs = 0;
     float a_aim_mode0 = 1, a_aim_mode1 = 0, a_aim_mode2 = 0;
     RadioAnim ra_aim_mode0, ra_aim_mode1, ra_aim_mode2;
     float a_aim_head  = 1, a_aim_chest = 0, a_aim_pelvis = 0;
