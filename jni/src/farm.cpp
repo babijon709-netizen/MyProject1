@@ -207,7 +207,11 @@ constexpr float kMemDeadDeg    = 0.05f;  // град: мельче — не шл
 constexpr float kAimStepFine   = 0.60f;  // доля остатка в мелком шаге
 constexpr float kAimJumpGate   = 2.00f;  // град: крупнее — закрываем одним движением
 constexpr float kAimJumpGain   = 1.00f;  // ...во весь остаток
-constexpr float kAimJumpMax    = 10.0f;  // град: предел одного такого движения
+constexpr float kAimJumpMax    = 20.0f;  // град: предел одного такого движения
+                                         // (крестик появляется, когда камера ещё
+                                         // стоит на корпусе — закрываем одним
+                                         // движением, а не серией шагов; перелёта
+                                         // нет: следующий шаг ждёт ответа позы)
 constexpr float kLookRespDeg   = 0.06f;  // град: «поза показала нашу запись»
 constexpr float kPitchDeadSpot = 0.50f;  // град: субградусный pitch в упор не доводим
 
@@ -619,7 +623,15 @@ static void UpdateFarmInner(float dt) {
             if (s_memPend && !acked && s_memWait < kLookWaitMax) {
                 s_memWait += dt;                  // ответа ждём, второй шаг не шлём
             } else {
-                const bool coarse = wantMag > kAimJumpGate;
+                // Крупная поправка — ОДНА на эпизод: без этого она же и
+                // раскачивала прицел (после переезда крестика ошибка большая,
+                // каждое «дообучение» трима снова делало её большой, и камера
+                // швырялась по 10° туда-сюда). Снова вооружаемся, когда ошибка
+                // уже улеглась.
+                static bool s_coarseArmed = true;
+                if (wantMag < kAimJumpGate * 0.5f) s_coarseArmed = true;
+                const bool coarse = s_coarseArmed && wantMag > kAimJumpGate;
+                if (coarse) s_coarseArmed = false;
                 const float cap = coarse ? kAimJumpMax
                                          : (inReach ? kMemStepBody : kMemStepWalk);
                 float offYaw   = wantYaw   * (coarse ? kAimJumpGain : kAimStepFine);

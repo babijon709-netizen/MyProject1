@@ -707,12 +707,23 @@ constexpr float kAimDeltaNear = 0.60F;
 // Предел поправки «по факту попадания»: она уточняет наведение по камере, но не
 // имеет права рулить камерой сама — иначе необычная геометрия удара (луч в
 // землю под крестиком, попадание в листву) мотала бы прицел из стороны в сторону.
-constexpr float kAimBiasMax = 2.00F;
-// Трим учим только в покое и уже у цели: kAimFixSteadyDeg — насколько угол по
-// камере может дрогнуть между кадрами, чтобы считать камеру стоящей;
+constexpr float kAimFixMax = 2.00F;      // абсолютный предел трима, град
+// Условия обучения трима: kAimFixSteadyDeg — насколько угол ПО КАМЕРЕ может
+// дрогнуть между кадрами, чтобы считать камеру стоящей; kAimFixGeomM — насколько
+// могут сдвинуться крестик и точка попадания (иначе геометрия удара ещё едет);
 // kAimFixNearDeg — докуда до цели это имеет смысл.
 constexpr float kAimFixSteadyDeg = 0.15F;
 constexpr float kAimFixNearDeg   = 3.00F;
+constexpr float kAimFixGeomM     = 0.05F;
+// Насколько новый отсчёт может отличаться от текущего трима, чтобы ему верить;
+// и с какой скоростью трим к нему ползёт (град за кадр ≈ 1.5°/с). Совпал ли
+// отсчёт с тримом — это ещё и проверка «мы в покое, а не в переходном процессе».
+constexpr float kAimFixLearnMax  = 0.80F;
+constexpr float kAimFixRateDeg   = 0.025F;
+// Если геометрия в покое и у цели, а отсчёт устойчиво расходится с тримом —
+// поправка реально изменилась (сменилось оружие): тянем медленно.
+constexpr float kAimFixPullDeg   = 0.010F;
+constexpr int   kAimFixRejectFrames = 90;   // ~1.5 с
 
 bool esp_farm_get_target(FarmTarget& out) {
     out = FarmTarget{};
@@ -1059,51 +1070,50 @@ bool esp_farm_get_target(FarmTarget& out) {
     const float pitch_cam = atan2f(ux, sqrtf(fx * fx + rx * rx)) * rad2deg;
     if (!std::isfinite(yaw_cam) || !std::isfinite(pitch_cam)) { g_farm_idle_reason = 5; return false; }
 
-    // ---- Поправка «по факту попадания» ---------------------------------------
-    // Живой луч прицела игры (GKo.RaycastHit.m_Point) — это буквально та точка,
-    // куда уйдёт следующий замах. Мало выровнять камеру по крестику: между осью
-    // камеры и осью удара могут стоять покачивание оружия, отдача и смещение
-    // точки старта луча. Поэтому сравниваем две угловые меры ОДНОГО И ТОГО ЖЕ
-    // крестика:
-    //   • по камере   — только что посчитанные yaw/pitch (угол между осью камеры
-    //     и направлением на X из нашей точки старта);
+    // ---- Трим наведения «по факту попадания» ---------------------------------
+    // Живой луч прицела игры (GKo.RaycastHit.m_Point) — буквально та точка, куда
+    // уйдёт следующий замах. Мало выровнять камеру по крестику: между осью камеры
+    // и осью удара стоят покачивание оружия, отдача и смещение точки старта луча.
+    // Поэтому сравниваем две угловые меры ОДНОГО крестика:
+    //   • по камере    — только что посчитанные yaw_cam/pitch_cam (угол между осью
+    //     камеры и направлением на X из нашей точки старта);
     //   • по попаданию — угол между направлением луча (это та же ось камеры, но
     //     взятая из данных удара) и направлением на X из точки попадания:
     //     вектор (X - P) в осях камеры, угол = atan2(боковая, продольная), где
-    //     продольная = dot(X - P, fwd) + ray_distance — расстояние до X вдоль
-    //     оси (именно оно, а НЕ ray_distance: луч часто бьёт в близкую
-    //     поверхность, и деление на его длину раздувает поправку в разы).
-    // Разница этих мер и есть поправка к наведению. Она ОГРАНИЧЕНА
-    // (±kAimBiasMax) и сглажена: уточняет наведение, но не может увести камеру
-    // в сторону, если геометрия удара необычная (луч ушёл в землю под X).
+    //     продольная = dot(X - P, fwd) + ray_distance — расстояние до X вдоль оси
+    //     (именно оно, а НЕ ray_distance: луч часто бьёт в близкую поверхность).
+    // Разница мер — постоянный трим, который надо держать в наведении.
+    //
+    // Трим — свойство ОРУЖИЯ и камеры, а не крестика: он НЕ сбрасывается ни при
+    // смене крестика (а игра переставляет X после каждого удара), ни при смене
+    // узла. Учится он только «в покое» — когда стоит и поза камеры, и сама
+    // геометрия удара (крестик и точка попадания не сдвинулись), — и ползёт к
+    // отсчёту со скоростью kAimFixRateDeg за кадр. Пока камера едет или крестик
+    // только что переехал, трим просто держит выученное значение: остальная
+    // система в это время доводит камеру, и подмешивать в неё дрожащий отсчёт
+    // (а тем более «доучивать» его) значит раскачивать прицел.
     static unsigned long long s_fix_id = 0;
-    static float s_fix_y = 0.f, s_fix_p = 0.f;
-    static int   s_fix_seen = 0;   // 0 — сглаженного значения ещё нет
-    static int   s_fix_gap  = 0;   // кадров подряд без годного расхождения
-    static float s_fix_prevY = 0.f, s_fix_prevP = 0.f;   // прошлый угол по камере
-    static bool  s_fix_prevOk = false;
+    static float s_fix_y = 0.f, s_fix_p = 0.f;          // выученный трим
+    static Vec3  s_fix_spot{}, s_fix_ray{};
+    static bool  s_fix_have_prev = false;
+    static int   s_fix_reject = 0;
+    static float s_fix_prevY = 0.f, s_fix_prevP = 0.f;
+    static bool  s_fix_prev_ok = false;
     if (s_fix_id != best->identity) {
-        s_fix_id = best->identity; s_fix_seen = 0; s_fix_gap = 0;
-        s_fix_prevOk = false;
-        s_fix_y = 0.f; s_fix_p = 0.f;
+        s_fix_id = best->identity; s_fix_prev_ok = false; s_fix_have_prev = false;
+        s_fix_reject = 0;
     }
 
-    // Мерить поправку можно только «в покое»: пока камера едет, поза, из которой
-    // мы считаем yaw_cam/pitch_cam, отстаёт от луча на кадр-два, и разница мер —
-    // это не геометрия удара, а запаздывание. Такая «поправка» подталкивала бы
-    // камеру в сторону движения (лишний проскок). Поэтому трим учим, только
-    // когда камера стоит (ошибка по камере почти не меняется между кадрами) и
-    // уже почти наведена; в остальное время работает последний выученный трим.
-    const bool fix_steady = s_fix_prevOk &&
-                            fabsf(yaw_cam - s_fix_prevY) < kAimFixSteadyDeg &&
-                            fabsf(pitch_cam - s_fix_prevP) < kAimFixSteadyDeg;
-    s_fix_prevY = yaw_cam; s_fix_prevP = pitch_cam; s_fix_prevOk = true;
+    const float fix_pose_steady = s_fix_prev_ok &&
+        fabsf(yaw_cam - s_fix_prevY) < kAimFixSteadyDeg &&
+        fabsf(pitch_cam - s_fix_prevP) < kAimFixSteadyDeg;
+    s_fix_prevY = yaw_cam; s_fix_prevP = pitch_cam; s_fix_prev_ok = true;
+    const bool fix_near = fabsf(yaw_cam) < kAimFixNearDeg &&
+                          fabsf(pitch_cam) < kAimFixNearDeg;
 
-    bool aim_fix_valid = false;
-    float aim_fix_yaw = 0.f, aim_fix_pitch = 0.f;
-    if (has_spot && fix_steady &&
-        fabsf(yaw_cam) < kAimFixNearDeg && fabsf(pitch_cam) < kAimFixNearDeg &&
-        reach.ray_valid && reach.ray_point_valid) {
+    bool fix_sample_ok = false, fix_geom_steady = false;
+    float fix_sample_y = 0.f, fix_sample_p = 0.f;
+    if (has_spot && reach.ray_valid && reach.ray_point_valid) {
         const Vec3 e = {spot.x - reach.ray_point.x, spot.y - reach.ray_point.y,
                         spot.z - reach.ray_point.z};
         const float ex = e.x * right.x + e.y * right.y + e.z * right.z;
@@ -1112,35 +1122,52 @@ bool esp_farm_get_target(FarmTarget& out) {
         const float elen = sqrtf(ex * ex + eu * eu + ef * ef);
         const float along = ef + reach.ray_distance;   // расстояние до X по оси
         // Годится и попадание в САМ узел, и попадание вплотную к крестику
-        // (например, луч ушёл в землю под X): расхождение маленькое, значит
-        // мера ведёт именно к X. Дальнее чужое попадание отбрасываем — по
-        // стене/соседнему узлу курс править нельзя.
-        const bool usable = std::isfinite(along) && along > 0.15F &&
-                            std::isfinite(elen) && elen < kAimDeltaMax &&
-                            (ray_on_node || elen < kAimDeltaNear);
-        if (usable) {
-            float dy = atan2f(ex, along) * 57.29577951F - yaw_cam;
-            float dp = atan2f(eu, along) * 57.29577951F - pitch_cam;
-            if (std::isfinite(dy) && std::isfinite(dp)) {
-                dy = fminf(fmaxf(dy, -kAimBiasMax), kAimBiasMax);
-                dp = fminf(fmaxf(dp, -kAimBiasMax), kAimBiasMax);
-                if (s_fix_seen == 0) { s_fix_y = dy; s_fix_p = dp; }
-                else { s_fix_y += (dy - s_fix_y) * 0.15F; s_fix_p += (dp - s_fix_p) * 0.15F; }
-                if (s_fix_seen < 60) ++s_fix_seen;
-                s_fix_gap = 0;
-                aim_fix_yaw = s_fix_y; aim_fix_pitch = s_fix_p;
-                aim_fix_valid = true;
-            }
+        // (например, луч ушёл в землю под X). Дальнее чужое попадание
+        // отбрасываем — по стене/соседнему узлу курс править нельзя.
+        fix_sample_ok = std::isfinite(along) && along > 0.15F &&
+                        std::isfinite(elen) && elen < kAimDeltaMax &&
+                        (ray_on_node || elen < kAimDeltaNear);
+        if (fix_sample_ok) {
+            auto vdist = [](const Vec3& a, const Vec3& b) {
+                const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+                return sqrtf(dx * dx + dy * dy + dz * dz);
+            };
+            fix_geom_steady = s_fix_have_prev &&
+                              vdist(spot, s_fix_spot) < kAimFixGeomM &&
+                              vdist(reach.ray_point, s_fix_ray) < kAimFixGeomM;
+            s_fix_spot = spot; s_fix_ray = reach.ray_point; s_fix_have_prev = true;
+            fix_sample_y = atan2f(ex, along) * 57.29577951F - yaw_cam;
+            fix_sample_p = atan2f(eu, along) * 57.29577951F - pitch_cam;
+            fix_sample_ok = std::isfinite(fix_sample_y) && std::isfinite(fix_sample_p);
+            fix_sample_y = fminf(fmaxf(fix_sample_y, -kAimFixMax), kAimFixMax);
+            fix_sample_p = fminf(fmaxf(fix_sample_p, -kAimFixMax), kAimFixMax);
         }
     }
-    if (!aim_fix_valid && ++s_fix_gap > 30) {
-        s_fix_gap = 0;
-        s_fix_seen = 0;   // сглаженное устарело: следующий годный кадр — заново
+    if (!fix_sample_ok) s_fix_have_prev = false;
+
+    if (fix_sample_ok && fix_geom_steady && fix_pose_steady && fix_near) {
+        const bool consistent = fabsf(fix_sample_y - s_fix_y) <= kAimFixLearnMax &&
+                                fabsf(fix_sample_p - s_fix_p) <= kAimFixLearnMax;
+        if (consistent) {
+            s_fix_y += fminf(fmaxf(fix_sample_y - s_fix_y, -kAimFixRateDeg), kAimFixRateDeg);
+            s_fix_p += fminf(fmaxf(fix_sample_p - s_fix_p, -kAimFixRateDeg), kAimFixRateDeg);
+            s_fix_reject = 0;
+        } else if (++s_fix_reject > kAimFixRejectFrames) {
+            // Геометрия в покое и у цели, а поправка устойчиво другая — значит
+            // сменилось орудие/раскладка: тянем трим медленно, без рывков.
+            s_fix_y += fminf(fmaxf(fix_sample_y - s_fix_y, -kAimFixPullDeg), kAimFixPullDeg);
+            s_fix_p += fminf(fmaxf(fix_sample_p - s_fix_p, -kAimFixPullDeg), kAimFixPullDeg);
+        }
+    } else {
+        s_fix_reject = 0;
     }
-    // Поправка идёт в те же yaw/pitch, по которым контроллер ведёт камеру: для
-    // него это по-прежнему «одна ошибка наведения», просто уточнённая по удару.
-    const float yaw_fix   = aim_fix_valid ? aim_fix_yaw   : 0.f;
-    const float pitch_fix = aim_fix_valid ? aim_fix_pitch : 0.f;
+    // Трим отдаём всегда (0 — ещё ничего не выучено): это постоянная состояния,
+    // а не разовый отсчёт. Поправка идёт в те же yaw/pitch, по которым контроллер
+    // ведёт камеру: для него это по-прежнему «одна ошибка наведения».
+    const bool aim_fix_valid = true;
+    const float aim_fix_yaw = s_fix_y, aim_fix_pitch = s_fix_p;
+    const float yaw_fix   = aim_fix_yaw;
+    const float pitch_fix = aim_fix_pitch;
 
     const float yaw   = yaw_cam + yaw_fix;
     const float pitch = pitch_cam + pitch_fix;
